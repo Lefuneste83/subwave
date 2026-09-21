@@ -11,6 +11,12 @@
 //   - The theme tokens (--bg, --ink, --muted, --accent, --overlay,
 //     --soft-border, --field), so operator themes keep working.
 //
+// The shell's root <div> (.sw-player-shell, globals.css) already paints the
+// operator's --bg-image token behind everything, at cover/center. A skin
+// needs no code for this — just don't give your own root an opaque full-bleed
+// background that would hide it; render on top with translucent panels the
+// way ClassicSkin's ambient cover wash and Drift's colour washes already do.
+//
 // Skin styles are co-located, never added to globals.css. Keyboard shortcuts are
 // skin-owned; register them with useKeyboardShortcuts.
 //

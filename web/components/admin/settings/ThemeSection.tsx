@@ -250,6 +250,14 @@ function ThemeEditorModal({
                     />
                     <span className="w-8 shrink-0 text-right font-mono text-[11px] text-muted">{tokens[key] || '—'}</span>
                   </div>
+                ) : type === 'image' ? (
+                  <Input
+                    value={tokens[key] || ''}
+                    maxLength={340}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setTokens(prev => ({ ...prev, [key]: e.target.value }))}
+                    placeholder='url("/theme-assets/your-image.jpg")'
+                    className="font-mono text-[12px]"
+                  />
                 ) : (
                   <Input
                     value={tokens[key] || ''}
@@ -535,7 +543,10 @@ export function ThemeSection({ data, busy, saveSettings, adminFetch }: ThemeSect
             Describe a look in the editor and we&apos;ll draft the palette, or drop a JSON
             theme file in <code>state/themes/</code> and hit <em>Refresh</em>, no controller
             restart needed. The folder&apos;s <code>README.md</code> lists the format and the
-            allowed token keys.
+            allowed token keys. For a player background image, drop the picture in that
+            same folder and set the theme&apos;s <em>background image</em> token to{' '}
+            <code>{'url("/theme-assets/your-image.jpg")'}</code> (an <code>https://</code> URL
+            works too).
           </div>
           {error && (
             <div className="field-hint text-[var(--danger)]">

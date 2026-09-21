@@ -617,6 +617,49 @@ router.get('/themes', async (req, res) => {
   }
 });
 
+// Static images for a custom theme's --bg-image token. An operator drops a
+// jpg/png/webp/gif into ${STATE_DIR}/themes/ next to their theme JSON and
+// references it as url("/theme-assets/<filename>") — the same folder, same
+// "drop a file, hit Refresh" convention as the theme JSONs themselves.
+// Public and unauthenticated: the listener player paints this via a plain CSS
+// background-image, so an admin-gated route would leave every listener with a
+// broken background. Filename is allowlisted (no traversal, no dotfiles,
+// extension must be a recognised image type) — see theme-tokens.ts IMAGE_VAL_RE
+// for the matching token-value validator.
+const THEME_ASSET_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,119}$/;
+const THEME_ASSET_MIME: Record<string, string> = {
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+};
+
+router.get('/theme-assets/:file', async (req, res) => {
+  const file = String(req.params.file || '');
+  const ext = file.slice(file.lastIndexOf('.')).toLowerCase();
+  const mime = THEME_ASSET_MIME[ext];
+  if (!mime || file.includes('..') || !THEME_ASSET_NAME_RE.test(file)) {
+    return res.status(400).end();
+  }
+  try {
+    const path = join(STATE_ROOT, 'themes', file);
+    const st = await stat(path);
+    // ETag over filename + mtime: a replacement upload keeps the same name.
+    const etag = `"${createHash('sha1').update(`${file}:${st.mtimeMs}`).digest('hex').slice(0, 16)}"`;
+    res.setHeader('ETag', etag);
+    if (req.headers['if-none-match'] === etag) return res.status(304).end();
+    res.setHeader('Content-Type', mime);
+    // Short TTL: unlike a persona avatar (rewritten by the app with a fresh
+    // ETag), an operator may overwrite this file by hand without changing its
+    // name, so a long-lived cache would hide the update.
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.send(await readFile(path));
+  } catch {
+    res.status(404).end();
+  }
+});
+
 // Live session header plus a bounded tail of its turns for the Booth feed.
 // `sfx` turns are dropped here (internal agent action, not something said on
 // air) but stay in the session history for the agent's own context.

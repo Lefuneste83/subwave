@@ -101,6 +101,18 @@ Each file:
 
 Allowed token keys: ${THEME_TOKEN_KEYS.join(', ')}.
 
+**Background image.** Drop a jpg/jpeg/png/webp/gif into this same folder and
+point \`--bg-image\` at it:
+
+\`\`\`json
+"--bg-image": "url(\\"/theme-assets/skyline.jpg\\")"
+\`\`\`
+
+An \`https://\` URL works too: \`"url(\\"https://example.com/bg.jpg\\")"\`. Leaving
+it unset (or \`"none"\`) paints no image — the player falls back to the flat
+\`--bg\` colour. The image sits under the player's own panels and under the
+paper-grain texture, so turn \`--grain\` down for a crisper picture.
+
 \`id\` should match the filename (\`my-theme.json\` → \`id: "my-theme"\`) and may
 only contain lowercase letters, digits, and dashes. Built-in ids
 (${[...BUILTIN_IDS].join(', ')}) are reserved — files claiming those ids are skipped.
