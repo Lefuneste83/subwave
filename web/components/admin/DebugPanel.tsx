@@ -81,7 +81,7 @@ export default function DebugPanel() {
             label="Icecast"
             status={data?.icecast && !data.icecast.error ? 'ok' : err ? 'down' : 'idle'}
             v={fmtListeners(data?.icecast)}
-            sub={data?.icecast?.peakListeners != null ? `peak ${data.icecast.peakListeners}` : '—'}
+            sub={data?.icecast?.listener_peak != null ? `peak ${data.icecast.listener_peak}` : '—'}
           />
           <HealthCell
             label="Liquidsoap"
