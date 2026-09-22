@@ -5,7 +5,11 @@ import type { StationLocale } from '../../../lib/types';
 
 export interface DebugIcecast {
   listeners?: number;
-  peakListeners?: number;
+  /** Matches the backend's actual field name (routes/debug.ts's raw Icecast
+   * mirror uses status-json's own snake_case naming throughout). */
+  listener_peak?: number;
+  /** listenurl of every mount Icecast currently has a connected encoder on. */
+  activeMounts?: string[];
   error?: string;
 }
 
