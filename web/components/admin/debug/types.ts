@@ -6,6 +6,8 @@ import type { StationLocale } from '../../../lib/types';
 export interface DebugIcecast {
   listeners?: number;
   peakListeners?: number;
+  /** listenurl of every mount Icecast currently has a connected encoder on. */
+  activeMounts?: string[];
   error?: string;
 }
 

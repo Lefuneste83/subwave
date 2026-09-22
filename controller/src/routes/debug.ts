@@ -141,12 +141,20 @@ async function buildDebugSnapshot(req: express.Request): Promise<any> {
     // upper bound on the station's true peak, not a measured one — Icecast
     // has no combined-mount peak of its own to report.
     const totalPeak = icecastSources.reduce((sum, s: any) => sum + Number(s?.listener_peak || 0), 0);
+    // Every mount Icecast currently has a connected encoder on — dynamic, so
+    // it grows/shrinks with Opus/FLAC/AAC being turned on or off rather than
+    // hardcoding the four possible paths here too (the per-mount table below
+    // already owns that enumeration).
+    const activeMounts = icecastSources
+      .map((s: any) => String(s?.listenurl || ''))
+      .filter(Boolean);
     out.icecast = src ? {
       title: src.title,
       bitrate: src.bitrate,
       listeners: totalListeners,
       listener_peak: totalPeak,
       mount: src.listenurl,
+      activeMounts,
       stream_start: src.stream_start_iso8601,
       server_start: ic.server_start_iso8601,
     } : { error: 'no source connected' };
