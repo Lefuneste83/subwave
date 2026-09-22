@@ -153,7 +153,9 @@ async function buildDebugSnapshot(req: express.Request): Promise<any> {
       bitrate: src.bitrate,
       listeners: totalListeners,
       listener_peak: totalPeak,
-      mount: src.listenurl,
+      // No separate `mount` field: it duplicated activeMounts[0]/the primary
+      // mount's own URL for no benefit — activeMounts is the single source of
+      // truth for "what's live right now."
       activeMounts,
       stream_start: src.stream_start_iso8601,
       server_start: ic.server_start_iso8601,
