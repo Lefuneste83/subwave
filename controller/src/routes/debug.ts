@@ -120,12 +120,32 @@ async function buildDebugSnapshot(req: express.Request): Promise<any> {
     const r = await fetch(config.icecast.statusUrl);
     const ic: any = (await r.json() as any).icestats;
     icecastSources = Array.isArray(ic.source) ? ic.source : ic.source ? [ic.source] : [];
-    const src = icecastSources[0];
+    // Describe the broadcast off the primary mount (/stream.mp3), never
+    // whichever source status-json happens to list first — same reasoning as
+    // broadcast/listeners.ts's primarySource, so this card doesn't misreport
+    // title/bitrate off Opus/FLAC when the encoder connect order shifts.
+    const src = icecastSources.find((s: any) => String(s?.listenurl || '').includes('/stream.mp3'))
+      ?? icecastSources[0];
+    // This card is a raw mirror of Icecast's own status-json — deliberately
+    // NOT broadcast/listeners.ts's deduped/gated figure, which exists for a
+    // different job (the DJ pause-when-empty gate, /now-playing) and would
+    // make this card unable to show the operator what Icecast itself is
+    // reporting. But a single source's own `listeners` is only ONE mount's
+    // sockets, so summing every source status-json returns is what it takes
+    // for "raw Icecast count" to mean the whole station rather than
+    // whichever mount happens to be first in the array (Icecast orders
+    // `source` by encoder connect time, not by icecast.xml's declared mount
+    // order, so that position isn't stable across restarts).
+    const totalListeners = icecastSources.reduce((sum, s: any) => sum + Number(s?.listeners || 0), 0);
+    // Per-mount peaks aren't necessarily simultaneous, so this sum is an
+    // upper bound on the station's true peak, not a measured one — Icecast
+    // has no combined-mount peak of its own to report.
+    const totalPeak = icecastSources.reduce((sum, s: any) => sum + Number(s?.listener_peak || 0), 0);
     out.icecast = src ? {
       title: src.title,
       bitrate: src.bitrate,
-      listeners: src.listeners,
-      listener_peak: src.listener_peak,
+      listeners: totalListeners,
+      listener_peak: totalPeak,
       mount: src.listenurl,
       stream_start: src.stream_start_iso8601,
       server_start: ic.server_start_iso8601,
