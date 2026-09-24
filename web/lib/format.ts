@@ -59,7 +59,7 @@ export function fmtClockMinute(
 }
 
 // Full local station date + time for the admin header clock, e.g.
-// "thursday 24 september 2026 03:54". The weekday/month words are always
+// "Thursday 24 September 2026   03:54". The weekday/month words are always
 // English regardless of station locale (the rest of this admin is English
 // text around a live English-language date), but the hour follows the
 // station's own 12h/24h convention via fmtClockMinute — same station
@@ -80,8 +80,15 @@ export function fmtStationDateTime(
       ...(tz ? { timeZone: tz } : {}),
     }).formatToParts(date);
     const get = (type: string) => parts.find(p => p.type === type)?.value ?? '';
-    const datePart = `${get('weekday')} ${get('day')} ${get('month')} ${get('year')}`.toLowerCase();
-    return `${datePart} ${fmtClockMinute(date, tz, locale)}`;
+    // 'en-GB' already gives "Thursday"/"September" — leading capital, rest
+    // lowercase — so no extra casing pass is needed.
+    const datePart = `${get('weekday')} ${get('day')} ${get('month')} ${get('year')}`;
+    // Three non-breaking spaces, not three plain ones — HTML collapses
+    // consecutive plain spaces to one, so a literal "   " here would render
+    // identically to " ".   doesn't collapse, which is what triples the
+    // visual gap between the year and the clock without touching the single
+    // spaces inside the date itself.
+    return `${datePart}   ${fmtClockMinute(date, tz, locale)}`;
   } catch {
     return '';
   }
