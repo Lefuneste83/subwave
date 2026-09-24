@@ -92,7 +92,9 @@ export function fmtStationDateTime(
       // fmtClock, not fmtClockMinute: toLocaleTimeString with no explicit
       // hour/minute/second option defaults to showing all three, which is
       // what puts the ticking seconds digit ("04:37:45") on this display.
-      fmtClock(date, tz, locale)
+      // fmtClock's signature takes string | number, not Date — .getTime()
+      // instead of handing it `date` directly.
+      fmtClock(date.getTime(), tz, locale)
     }`;
   } catch {
     return '';
