@@ -102,6 +102,7 @@ import {
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import { DiscMark } from '../../lib/discMark';
+import { fmtStationDateTime } from '../../lib/format';
 import { animate as motionAnimate } from 'motion/react';
 
 type NavIcon = ComponentType<{
@@ -685,7 +686,7 @@ function CollapsibleNavItem({
 
 function TopBar({ pathname }: { pathname: string | null }) {
   const { section, page } = resolveCrumb(pathname);
-  const { nowPlaying, listeners } = useStationFeed();
+  const { nowPlaying, listeners, timezone, locale } = useStationFeed();
   const onAir = !!nowPlaying?.title;
   const listenersObj =
     listeners && typeof listeners === 'object'
@@ -734,6 +735,8 @@ function TopBar({ pathname }: { pathname: string | null }) {
           </BreadcrumbItem>
         </BreadcrumbList>
       </Breadcrumb>
+
+      <StationClock tz={timezone} locale={locale} />
 
       <span className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-2 text-[10px] tracking-[0.22em] text-ink uppercase">
         <span
@@ -800,6 +803,32 @@ function TopBar({ pathname }: { pathname: string | null }) {
         </DropdownMenu>
       </span>
     </header>
+  );
+}
+
+// Local station date + time, e.g. "thursday 24 september 2026 03:54" — the
+// station's own zone/locale (from useStationFeed, already polled by TopBar),
+// not the operator's browser clock. A once-a-minute recompute is plenty since
+// this only ever displays down to the minute; no need to hook into any
+// second-by-second polling.
+function StationClock({ tz, locale }: { tz: string | null; locale: Parameters<typeof fmtStationDateTime>[2] }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+  // Absolutely centered on the bar as a whole (not just the gap between the
+  // left/right clusters) — the header is `sticky`, which is itself a
+  // positioning context, so this needs no extra `relative` wrapper. Held back
+  // to `md:` (not `sm:`, unlike the rest of this bar) so it never overlaps the
+  // breadcrumb or the right-hand cluster on a narrower/tablet width; it simply
+  // isn't shown below that, same as it would be with no room for it at all.
+  return (
+    <span className="pointer-events-none absolute inset-0 hidden items-center justify-center md:flex">
+      <span className="pointer-events-auto text-[13px] font-bold whitespace-nowrap text-ink sm:text-base">
+        {fmtStationDateTime(now, tz, locale)}
+      </span>
+    </span>
   );
 }
 

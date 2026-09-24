@@ -58,6 +58,35 @@ export function fmtClockMinute(
   }
 }
 
+// Full local station date + time for the admin header clock, e.g.
+// "thursday 24 september 2026 03:54". The weekday/month words are always
+// English regardless of station locale (the rest of this admin is English
+// text around a live English-language date), but the hour follows the
+// station's own 12h/24h convention via fmtClockMinute — same station
+// zone/locale as fmtClock, so the header never disagrees with what the DJ is
+// actually saying on air (issue #418).
+export function fmtStationDateTime(
+  t: string | number | Date,
+  tz?: string | null,
+  locale?: StationLocale | null,
+): string {
+  try {
+    const date = new Date(t);
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      weekday: 'long',
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      ...(tz ? { timeZone: tz } : {}),
+    }).formatToParts(date);
+    const get = (type: string) => parts.find(p => p.type === type)?.value ?? '';
+    const datePart = `${get('weekday')} ${get('day')} ${get('month')} ${get('year')}`.toLowerCase();
+    return `${datePart} ${fmtClockMinute(date, tz, locale)}`;
+  } catch {
+    return '';
+  }
+}
+
 const DOW: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 
 // Day-of-week (0=Sun) and hour (0-23) for `date` on the wall clock in `tz`.
