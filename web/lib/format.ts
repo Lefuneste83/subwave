@@ -59,11 +59,11 @@ export function fmtClockMinute(
 }
 
 // Full local station date + time for the admin header clock, e.g.
-// "Thursday 24 September 2026   03:54". The weekday/month words are always
-// English regardless of station locale (the rest of this admin is English
-// text around a live English-language date), but the hour follows the
-// station's own 12h/24h convention via fmtClockMinute — same station
-// zone/locale as fmtClock, so the header never disagrees with what the DJ is
+// "Thursday 24 September 2026   04:37:45". The weekday/month words are
+// always English regardless of station locale (the rest of this admin is
+// English text around a live English-language date), but the clock follows
+// the station's own 12h/24h convention via fmtClock — same station
+// zone/locale as elsewhere, so the header never disagrees with what the DJ is
 // actually saying on air (issue #418).
 export function fmtStationDateTime(
   t: string | number | Date,
@@ -88,7 +88,12 @@ export function fmtStationDateTime(
     // identically to " ".   doesn't collapse, which is what triples the
     // visual gap between the year and the clock without touching the single
     // spaces inside the date itself.
-    return `${datePart}   ${fmtClockMinute(date, tz, locale)}`;
+    return `${datePart}   ${
+      // fmtClock, not fmtClockMinute: toLocaleTimeString with no explicit
+      // hour/minute/second option defaults to showing all three, which is
+      // what puts the ticking seconds digit ("04:37:45") on this display.
+      fmtClock(date, tz, locale)
+    }`;
   } catch {
     return '';
   }

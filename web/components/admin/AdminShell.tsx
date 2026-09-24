@@ -806,15 +806,16 @@ function TopBar({ pathname }: { pathname: string | null }) {
   );
 }
 
-// Local station date + time, e.g. "thursday 24 september 2026 03:54" — the
-// station's own zone/locale (from useStationFeed, already polled by TopBar),
-// not the operator's browser clock. A once-a-minute recompute is plenty since
-// this only ever displays down to the minute; no need to hook into any
-// second-by-second polling.
+// Local station date + time, e.g. "Thursday 24 September 2026   04:37:45" —
+// the station's own zone/locale (from useStationFeed, already polled by
+// TopBar), not the operator's browser clock. Ticks every second; this is a
+// plain client-side setInterval + Date.now(), so the faster tick costs no
+// extra network traffic at all — the timezone/locale still ride on
+// useStationFeed's existing 5s poll, unrelated to this timer.
 function StationClock({ tz, locale }: { tz: string | null; locale: Parameters<typeof fmtStationDateTime>[2] }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 60_000);
+    const id = setInterval(() => setNow(Date.now()), 1_000);
     return () => clearInterval(id);
   }, []);
   // Absolutely centered on the bar as a whole (not just the gap between the
