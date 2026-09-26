@@ -106,6 +106,10 @@ interface LlmCall {
    * From the controller's failureDiagnostics(); absent on success (see `response`). */
   responseText?: string;
   steps?: number;
+  /** Controller-verified Agentic diagnostic for the completed pick. */
+  agentPickResolution?: { usedMusicalLeanings?: boolean };
+  /** Controller-verified Track Shortlist diagnostic for the completed pick. */
+  shortlistResolution?: { usedMusicalLeanings?: boolean };
 }
 
 export interface DebugLlm {
@@ -219,5 +223,3 @@ export interface DebugData {
   mounts?: DebugMounts;
   error?: string;
 }
-
-

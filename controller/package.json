@@ -15,6 +15,8 @@
     "test": "tsx scripts/run-tests.ts",
     "llm-bench": "tsx scripts/llm-bench/cli.ts",
     "llm-bench:publish": "tsx scripts/llm-bench/publish-manual.ts",
+    "leanings-eval": "tsx scripts/leanings-eval.ts",
+    "soul-library-eval": "tsx scripts/soul-library-eval.ts",
     "lint": "eslint . && tsc --noEmit",
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc --noEmit",

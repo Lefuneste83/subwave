@@ -55,7 +55,7 @@ import {
 } from './dj-agent/breaker.js';
 import { dropEchoedLink, enqueuePick, generatePickLink, trackFields, trimLinkToIntro } from './dj-agent/enqueue.js';
 import { advanceRun, runActive } from './dj-agent/runs.js';
-import { pickSchemaBase, pickSystem, requestSystem } from './dj-agent/schemas.js';
+import { agenticEditorialPickPrompt, agenticEditorialPickSchema, agentReasonForLeanings, pickSchemaBase, pickSystem, requestSystem, resolveEditorialLeanings, resolvedMusicalLeaningsFlag, type EditorialLeaningsContext } from './dj-agent/schemas.js';
 import { guardIntro, screenAck, isNamedRequester } from '../util/request-guard.js';
 import * as likes from './likes.js';
 import { classifyPickFailure, type PickFailure } from '../util/pick-seed.js';
@@ -85,7 +85,7 @@ export { pickerAgent, requestAgent } from './dj-agent/agents.js';
 // the pick-anchor artist guard (#1124) reuses this same constrained re-pick
 // but for a valid pick it wants to swap off the anchor artist, so the bad-id
 // wording would be false and confuse the model.
-async function repickFromSeen({ seen, badId, showAt = null, playlistResolved = true, reason = null }: { seen: Map<string, any>; badId: string | null; showAt?: Date | null; playlistResolved?: boolean; reason?: string | null }) {
+async function repickFromSeen({ seen, badId, showAt = null, playlistResolved = true, reason = null, editorialLeanings = null }: { seen: Map<string, any>; badId: string | null; showAt?: Date | null; playlistResolved?: boolean; reason?: string | null; editorialLeanings?: EditorialLeaningsContext | null }) {
   const ids = [...seen.keys()];
   if (ids.length === 0) return null;
   const schema = modelTolerant(pickSchemaBase().extend({
@@ -106,7 +106,7 @@ async function repickFromSeen({ seen, badId, showAt = null, playlistResolved = t
       // favourites clause is absent (it rides the pick EVENT turn, not this
       // system prompt) — acceptable because `seen` was discovered under the
       // favourites-aware run this salvages.
-      system: pickSystem(showAt, playlistResolved),
+      system: pickSystem(showAt, playlistResolved, editorialLeanings),
       prompt: JSON.stringify({ candidates: [...seen.values()] }, null, 2)
         + `\n\n${why}`,
       schema,
@@ -162,7 +162,7 @@ async function repickRequestFromSeen({ seen, badId, requester, text, persona }:
 // (#1187) — the agent's own run needs neither. They're the same values
 // runTrackEvent hands the ordinary pool fallback, so a rescued pick is built
 // from exactly the pool a failed agent run would have produced.
-async function pickViaAgent(queue, ctx, { wantLink, audioWaypoint = null, pickAnchor = null, showAt = null, rankTarget = null }: { wantLink: boolean; audioWaypoint?: number[] | null; pickAnchor?: any; showAt?: Date | null; rankTarget?: { bpm: number | null; key: string | null } | null }): Promise<boolean> {
+async function pickViaAgent(queue, ctx, { wantLink, audioWaypoint = null, pickAnchor = null, showAt = null, rankTarget = null, editorialLeanings }: { wantLink: boolean; audioWaypoint?: number[] | null; pickAnchor?: any; showAt?: Date | null; rankTarget?: { bpm: number | null; key: string | null } | null; editorialLeanings: EditorialLeaningsContext }): Promise<boolean> {
   await library.load();
   const stats = library.stats();
   // Sized off the MIRROR, not `stats.total` (TAGGED tracks only) — see the same
@@ -298,13 +298,35 @@ async function pickViaAgent(queue, ctx, { wantLink, audioWaypoint = null, pickAn
     excludedIds,
   });
 
+  const agentPickResolution: any = {};
   const run = await pickerAgent.run({
     messages: session.windowMessages(),
     scope,
     showAt,
+    telemetry: { agentPickResolution },
   });
-  const { steps, toolCalls, extras } = run;
+  const { toolCalls, extras } = run;
+  let { steps } = run;
   let object = run.object;
+  if (editorialLeanings.promptValue && extras.seen.size) {
+    try {
+      const finalSelection: any = await djObject({
+        system: pickSystem(showAt, !!playlistTracks?.length, editorialLeanings, true),
+        prompt: agenticEditorialPickPrompt([...extras.seen.values()], {
+          currentTrack: pickAnchor ? { id: pickAnchor.id ?? null, title: pickAnchor.title ?? null, artist: pickAnchor.artist ?? null } : null,
+          link: wantLink ? 'A separate safe link may air for this pick.' : 'No link airs for this pick.',
+        }, editorialLeanings),
+        schema: agenticEditorialPickSchema([...extras.seen.keys()]),
+        temperature: 0.5,
+        kind: 'djAgentEditorialPick',
+      });
+      object = { ...finalSelection, reason: finalSelection.selectionReason };
+      steps += 1;
+    } catch (error) {
+      logEvent('pick.editorialSelectionFailed', { agent: 'pick', candidates: extras.seen.size, error: String(error) });
+      queue.log('picker', 'Agentic editorial selection failed — using discovery pick');
+    }
+  }
 
   let song = object?.id ? extras.seen.get(object.id) : null;
 
@@ -330,7 +352,7 @@ async function pickViaAgent(queue, ctx, { wantLink, audioWaypoint = null, pickAn
     }
   }
   if (!song && extras.seen.size) {
-    const repicked = await repickFromSeen({ seen: extras.seen, badId: object?.id ?? null, showAt, playlistResolved: !!playlistTracks?.length });
+    const repicked = await repickFromSeen({ seen: extras.seen, badId: object?.id ?? null, showAt, playlistResolved: !!playlistTracks?.length, editorialLeanings });
     if (repicked) {
       logEvent('pick.repicked', { agent: 'pick', from: object?.id ?? null, to: repicked.id, candidates: extras.seen.size });
       queue.log('picker', `agent returned unknown id "${object?.id}" — re-picked "${repicked.id}" from its own candidates`);
@@ -415,6 +437,7 @@ async function pickViaAgent(queue, ctx, { wantLink, audioWaypoint = null, pickAn
       seen: alt, badId: null, showAt,
       playlistResolved: !!playlistTracks?.length,
       reason,
+      editorialLeanings,
     }),
     poolRescue: (avoidArtist) => pickViaPool(
       queue, ctx, { wantLink, pickAnchor, showAt }, rankTarget, audioWaypoint,
@@ -460,6 +483,7 @@ async function pickViaAgent(queue, ctx, { wantLink, audioWaypoint = null, pickAn
         seen: alt, badId: null, showAt,
         playlistResolved: !!playlistTracks?.length,
         reason,
+        editorialLeanings,
       }),
       log: (line) => queue.log('picker', line),
       logEvent,
@@ -469,6 +493,12 @@ async function pickViaAgent(queue, ctx, { wantLink, audioWaypoint = null, pickAn
       song = albumGuarded.song;
     }
   }
+
+  const usedMusicalLeanings = resolvedMusicalLeaningsFlag(editorialLeanings, object.usedMusicalLeanings, object.leaningsTieBreak);
+  object.reason = agentReasonForLeanings(object.reason, usedMusicalLeanings, object.leaningsTieBreak);
+  agentPickResolution.track = { id: song.id, title: song.title ?? null, artist: song.artist ?? null };
+  agentPickResolution.reason = object.reason ?? null;
+  agentPickResolution.usedMusicalLeanings = usedMusicalLeanings;
 
   // The picker has seen private selection context. Only after its final choice
   // do we invoke the isolated listener-facing writer with safe prompt data.
@@ -776,6 +806,10 @@ export async function runTrackEvent(queue, ctx, { wantLink, showAt = null, pickA
     // multiplies across the window. Mirrored by the pool picker's listener-liked
     // source so both paths lean the same way — a lean, never a lock.
     const favClause = likes.favouritesClause(settings.get()?.likes);
+    // One immutable selection snapshot spans the event, main Agentic run and
+    // every constrained re-pick. In particular, guest sampling is not retried
+    // after the event turn has told the model which Leanings apply.
+    const editorialLeanings = resolveEditorialLeanings(showAt);
     // Exploration nudge (ε-greedy seed break, music/airing.ts): every pick
     // seeding discovery from the expected predecessor is a random walk that never
     // leaves its similarity cluster, so a fraction of picks steer the round
@@ -809,7 +843,7 @@ export async function runTrackEvent(queue, ctx, { wantLink, showAt = null, pickA
     if (settings.get().llm?.pickerAgent && !cheap && !breakerOpen()) {
       try {
         const queued = await pickViaAgent(queue, ctx, {
-          wantLink, audioWaypoint, pickAnchor, showAt, rankTarget,
+          wantLink, audioWaypoint, pickAnchor, showAt, rankTarget, editorialLeanings,
         });
         breakerSuccess();
         if (queued) return;
