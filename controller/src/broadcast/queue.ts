@@ -36,7 +36,7 @@ import {
   discardPauseTalkCommit,
   PAUSE_TALK_DIR,
 } from '../audio/wav-silence.js';
-import { normalizeForDisplay } from '../audio/speech-text.js';
+import { normalizeForDisplay, stripSpeakerLabel } from '../audio/speech-text.js';
 import * as djAgent from './dj-agent.js';
 import * as programme from './programme.js';
 import * as sfx from './sfx.js';
@@ -2095,7 +2095,11 @@ class Queue {
     { persona = null, meta = {}, pauseTalkEligible = false, sfx: selectedSfx = null, hostSpeech = null }:
       { persona?: Persona | null; meta?: TurnMeta; pauseTalkEligible?: boolean; sfx?: string | null; hostSpeech?: HostSpeechStamp | null } = {},
   ): Promise<AnnounceOutcome> {
-    const safeText = normalizeForDisplay(text || '');
+    // Single-voice paths leak the label too — a styled POST /dj/say came back as
+    // "Iris : Bonsoir…" with one persona and one voice (#1707).
+    const safeText = normalizeForDisplay(
+      persona?.name ? stripSpeakerLabel(text || '', [persona.name]) : (text || ''),
+    );
     if (!safeText) return { accepted: false, deferred: false, completed: Promise.resolve(false) };
     if (hostSpeech && !session.isHostSpeechCurrent(hostSpeech)) {
       return { accepted: false, deferred: false, completed: Promise.resolve(false) };
@@ -2256,9 +2260,12 @@ class Queue {
       return false;
     }
     const rendered: { persona: Persona; text: string; wavPath: string }[] = [];
+    // The whole cast, not just the line's own speaker: a model that prefixes a
+    // label picks any name on the call sheet, including the one it is replying to.
+    const castNames = lines.map(l => l.persona?.name).filter(Boolean) as string[];
     try {
       for (const l of lines) {
-        const text = normalizeForDisplay(l.text || '');
+        const text = normalizeForDisplay(stripSpeakerLabel(l.text || '', castNames));
         if (!text) continue;
         const wavPath = await this._speak(text, { kind, persona: l.persona });
         rendered.push({ ...l, text, wavPath });
