@@ -248,8 +248,11 @@ export {
   getEffectivePersona,
   getOnAirRoster,
   getScheduleOverride,
+  guestEditorialNudge,
+  guestEditorialNudgeFromGuests,
   languageDirective,
   onAirRosterClause,
+  personaMusicLeanings,
   pickOnAirSpeaker,
   renderDjPrompt,
   resolveActiveShow,
@@ -956,6 +959,12 @@ export async function load() {
         typeof stored.llm?.pickerAgent === 'boolean'
           ? stored.llm.pickerAgent
           : DEFAULTS.llm.pickerAgent,
+      // A new explicit opt-in. Older settings files and malformed values remain
+      // off, so guests never become an invisible source of editorial influence.
+      guestMusicalLeanings:
+        typeof stored.llm?.guestMusicalLeanings === 'boolean'
+          ? stored.llm.guestMusicalLeanings
+          : DEFAULTS.llm.guestMusicalLeanings,
       trackSelection:
         stored.llm?.trackSelection === 'shortlist'
           ? 'shortlist'
@@ -1957,6 +1966,9 @@ export async function update(patch) {
     }
     if (l.requestMatching !== undefined) {
       next.llm.requestMatching = l.requestMatching === 'direct' ? 'direct' : 'agentic';
+    }
+    if (l.guestMusicalLeanings !== undefined) {
+      next.llm.guestMusicalLeanings = !!l.guestMusicalLeanings;
     }
     if (l.segmentRuntime !== undefined) {
       next.llm.segmentRuntime = l.segmentRuntime === 'direct' ? 'direct' : 'agentic';

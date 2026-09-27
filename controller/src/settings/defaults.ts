@@ -433,6 +433,10 @@ export const DEFAULTS = {
     // over the session chat history. Off: the stateless pool picker runs instead,
     // still inside a session and still logged.
     pickerAgent: true,
+    // Guest preferences are a deliberately optional, secondary programming
+    // input. Keep them off for upgrades and new stations: a blank host field
+    // must mean no Musical Leanings are sent to the picker.
+    guestMusicalLeanings: false,
     // Agentic Tools remains the upgrade-safe default. Track Shortlist performs
     // controller-led discovery followed by one bounded structured selection.
     trackSelection: 'agentic',
