@@ -18,18 +18,27 @@ import { CallSection, FilterChip, JsonBlock, JsonOrText } from './bits';
 import { mapChatRole } from './TtsPanels';
 import { debugKeys } from './queries';
 
-function callUsesMusicalLeanings(call: {
-  kind?: string;
-  response?: string;
-  agentPickResolution?: { usedMusicalLeanings?: boolean };
-  shortlistResolution?: { usedMusicalLeanings?: boolean };
-}): boolean {
-  const agentic = call.kind === 'djAgentPick';
-  const shortlist = call.kind === 'djShortlistPick' || call.kind === 'djShortlistRepick';
-  if (!agentic && !shortlist) return false;
-  const resolved = agentic ? call.agentPickResolution : call.shortlistResolution;
-  if (resolved?.usedMusicalLeanings !== undefined) return resolved.usedMusicalLeanings;
-  try { return JSON.parse(call.response || '{}').usedMusicalLeanings === true; } catch { return false; }
+function callUsesMusicalLeanings(call: { kind?: string; response?: string; shortlistResolution?: { usedMusicalLeanings?: boolean } }): boolean {
+  // Agentic deliberately exposes no Leanings provenance badge: its final
+  // editorial choice is useful, but model-reported causality was unreliable.
+  // Native Shortlist retains its controller-resolved boolean. The former
+  // free-text tie-break was removed, so it must not gate this badge.
+  if (call.kind !== 'djShortlistPick' && call.kind !== 'djShortlistRepick') return false;
+  if (call.shortlistResolution?.usedMusicalLeanings !== undefined) {
+    return call.shortlistResolution.usedMusicalLeanings;
+  }
+  try {
+    const response = JSON.parse(call.response || '{}') as {
+      usedMusicalLeanings?: unknown;
+    };
+    return response.usedMusicalLeanings === true;
+  } catch {
+    return false;
+  }
+}
+
+function isShortlistCall(kind?: string): boolean {
+  return kind === 'djShortlistPick' || kind === 'djShortlistRepick';
 }
 
 function MessageList({ messages }: { messages: Array<{ role?: string; content?: unknown }> }) {
@@ -244,10 +253,18 @@ export function LlmCalls({ llm }: { llm: DebugLlm | undefined }) {
                 </span>
                 <span className="flex min-w-0 items-center gap-1.5">
                   <span className="truncate text-[12px] font-bold">{c.kind}</span>
-                  {callUsesMusicalLeanings(c) && <span className="shrink-0 border border-vermilion/40 bg-vermilion/10 px-1 py-px text-[8px] font-bold tracking-[0.08em] text-vermilion">LEANINGS</span>}
+                  {callUsesMusicalLeanings(c) && (
+                    <span className="shrink-0 border border-vermilion/40 bg-vermilion/10 px-1 py-px text-[8px] font-bold tracking-[0.08em] text-vermilion" title="This selection used Musical Leanings">
+                      LEANINGS
+                    </span>
+                  )}
                 </span>
                 <span className="caption text-[10px] whitespace-nowrap">
-                  {c.toolCalls?.length ? `🔧 ${c.toolCalls.length}` : ''}
+                  {c.toolCalls?.length
+                    ? isShortlistCall(c.kind)
+                      ? `◈ ${c.toolCalls.length}`
+                      : `🔧 ${c.toolCalls.length}`
+                    : ''}
                   {c.steps != null ? `${c.toolCalls?.length ? ' · ' : ''}${c.steps} steps` : ''}
                 </span>
                 <span className="mono-num text-[11px] text-muted">{c.ms}ms</span>

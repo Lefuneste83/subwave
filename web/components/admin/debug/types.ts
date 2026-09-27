@@ -5,8 +5,9 @@ import type { StationLocale } from '../../../lib/types';
 
 export interface DebugIcecast {
   listeners?: number;
-  /** Matches the backend's actual field name (routes/debug.ts's raw Icecast
-   * mirror uses status-json's own snake_case naming throughout). */
+  peakListeners?: number;
+  /** Matches the backend's actual field name (routes/debug.ts mirrors
+   * Icecast status-json's snake_case naming). */
   listener_peak?: number;
   /** listenurl of every mount Icecast currently has a connected encoder on. */
   activeMounts?: string[];
@@ -106,10 +107,12 @@ interface LlmCall {
    * From the controller's failureDiagnostics(); absent on success (see `response`). */
   responseText?: string;
   steps?: number;
-  /** Controller-verified Agentic diagnostic for the completed pick. */
-  agentPickResolution?: { usedMusicalLeanings?: boolean };
-  /** Controller-verified Track Shortlist diagnostic for the completed pick. */
-  shortlistResolution?: { usedMusicalLeanings?: boolean };
+  shortlistResolution?: {
+    track?: { id?: string; title?: string | null; artist?: string | null };
+    selectionReason?: string;
+    usedMusicalLeanings?: boolean;
+    leaningsTieBreak?: string | null;
+  };
 }
 
 export interface DebugLlm {
