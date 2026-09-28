@@ -26,7 +26,8 @@ import { allowsMoodPlaylistDiscovery } from '../music/discovery-policy.js';
 import { getFullContext } from '../context.js';
 import { queue } from './queue.js';
 import { createPoolBuilder } from './auto-pool.js';
-import { applyTrackFloor } from '../music/track-floor.js';
+import { applyTrackFloor, capCueOutSec } from '../music/track-floor.js';
+import { knownDurationSec } from './queue/pure.js';
 import { autoPlaylistShowLabel, createShowBuildTracker } from './auto-playlist-show.js';
 import { createAutoPlaylistRefresh, type RefreshResult } from './auto-playlist-refresh.js';
 import { isIdle } from './stream-idle.js';
@@ -491,7 +492,8 @@ async function refreshAutoPlaylistInner(canPublish: () => boolean): Promise<Refr
   const lines = ['#EXTM3U', ...pool.map((t: any) => {
     const trim = silenceTrim.resolveSilenceTrim(t);
     return subsonic.getAnnotatedUri(t, {
-      maxDurationSec,
+      // Same rule as the drain: stamp the cap only past this track's length.
+      maxDurationSec: capCueOutSec(knownDurationSec(t), maxDurationSec),
       cueInSec: trim.cueInSec,
       cueOutSec: trim.cueOutSec,
     });
