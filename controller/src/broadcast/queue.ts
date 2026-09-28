@@ -111,6 +111,7 @@ import {
   boundaryCarriesTrackVoice,
   exchangeSegment,
   formatAgo,
+  heldAnchorPlayableSec,
   knownDurationSec,
   linkClockDrifted,
   nextTransitionLabel,
@@ -3332,6 +3333,20 @@ class Queue {
     }
   }
 
+  // Seconds a held, not-yet-drained item will actually air. Resolves the cap
+  // and trim exactly as drainToLiquidsoap will when it sends the item (wall-clock
+  // show, requests exempt), so the pick look-ahead and the drain agree on how
+  // long the anchor plays. Null when its length is unknown.
+  heldPlayableSec(item: QueueItem): number | null {
+    const trim = silenceTrim.resolveSilenceTrim(item.track);
+    return heldAnchorPlayableSec({
+      durationSec: knownDurationSec(item.track),
+      maxTrackSec: item.requestedBy ? null : settings.effectiveMaxTrackSec(),
+      cueOutSecs: [trim.cueOutSec, item.cueOutSec],
+      cueInSec: trim.cueInSec,
+    });
+  }
+
   // One full DJ pick cycle: session roll, programme plan, persona handoff, link
   // cadence, pick. `pickAnchorItem` lets maybeDeadlinePick run the same cycle
   // against the HELD item this selection is intended to follow — `current` is
@@ -3362,7 +3377,9 @@ class Queue {
         // recovery, part-way through a track, where the elapsed part would push
         // `showAt` over the next boundary early (#1205). With a held pick anchor
         // (deadline path) the pick follows the HELD track instead, so the lead
-        // adds that track's length. Unknown clock → no look-ahead.
+        // adds that track's length — the span it will AIR, after the length
+        // cap and trim the drain has not stamped on it yet, never its raw
+        // tagged duration. Unknown clock → no look-ahead.
         //
         // This ONE date then drives the whole boundary sequence below — roll,
         // episode plan, mic-pass, episode hook — not just the pick. Leaving the
@@ -3373,7 +3390,9 @@ class Queue {
         // With one date there is no second date to disagree with.
         const leadSec = pickLeadSec(
           this.remainingSecOnAir(),
-          pickAnchorItem ? knownDurationSec(pickAnchorItem.track) : null,
+          // 0 (unknown) keeps pickLeadSec's "held, length unknown → no
+          // look-ahead"; null would read as "no held anchor" instead.
+          pickAnchorItem ? (this.heldPlayableSec(pickAnchorItem) ?? 0) : null,
         );
         let showAt: Date | null = null;
         if (leadSec != null) {
