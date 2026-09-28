@@ -544,10 +544,42 @@ function relaxOverdueBoundaryHandoffTrack(now: number = Date.now()) {
   schedulePersist();
 }
 
+// An aired boundary record only means something BEFORE the roll: it stops the
+// outgoing show's stale roster from speaking over the boundary it already
+// covered, and tells maybeRoll not to air a second mic-pass. Once the live
+// session IS the incoming show (targetKey === key), the record is history.
+// maybeRoll and recover() never carry an aired record forward, but a record
+// carried while still armed/queued (the pair airs after the station clock has
+// already rolled: a late final-track handoff, a between-tracks deferral past
+// the boundary) used to be flipped to aired on the incoming session and then
+// sit there. handoffInProgress() stayed true for the whole show, so every
+// scheduled link, station id and banter was dropped ("the show handoff has
+// already claimed this boundary") and the DJ went silent until the next roll.
+// Retire it instead: keep its programme and the covered-intro stamp. Called
+// from markHandoffAired and from the read paths, so a record already stuck in
+// a persisted session self-heals on the next check.
+function retireAiredBoundaryHandoff(): boolean {
+  const h = _session?.boundaryHandoff;
+  if (!_session || !h || !h.aired || h.targetKey !== _session.key) return false;
+  if (h.programme && !_session.programme) _session.programme = h.programme;
+  _session.boundaryHandoff = null;
+  _session.rolledFrom = null;
+  _session.handoffAired = true;
+  logEvent('handoff.retired', {
+    from: h.personaName,
+    to: h.incomingPersonaName,
+    show: h.incomingShowName,
+    boundaryAt: h.boundaryAt,
+  });
+  schedulePersist();
+  return true;
+}
+
 // The pending on-air handoff for the live session (outgoing persona metadata),
 // or null when there's nothing to air (no persona change, or already aired).
 export function pendingHandoff(): RolledFrom | BoundaryHandoff | null {
   relaxOverdueBoundaryHandoffTrack();
+  retireAiredBoundaryHandoff();
   if (_session?.boundaryHandoff && !_session.boundaryHandoff.aired
       && (!_session.boundaryHandoff.queued || _resumedQueuedHandoff)) {
     return _session.boundaryHandoff;
@@ -564,6 +596,9 @@ export function markHandoffAired() {
     _session.boundaryHandoff.queued = false;
     _session.boundaryHandoff.aired = true;
     _resumedQueuedHandoff = false;
+    // Aired after the roll: the incoming show is already live, nothing left
+    // to guard.
+    retireAiredBoundaryHandoff();
     schedulePersist();
     return;
   }
@@ -663,6 +698,7 @@ export function boundaryHandoffAwaitsTrack(): boolean {
 // speech from its stale roster may cross the boundary.
 export function handoffInProgress(): boolean {
   relaxOverdueBoundaryHandoffTrack();
+  retireAiredBoundaryHandoff();
   return !!(_session?.boundaryHandoff?.queued || _session?.boundaryHandoff?.aired);
 }
 
@@ -677,6 +713,7 @@ export function handoffBoundaryAt(): number | null {
 // there too; this is deliberately the answer to "is a handoff waiting?".
 export function boundaryHandoffStatus() {
   relaxOverdueBoundaryHandoffTrack();
+  retireAiredBoundaryHandoff();
   const h = _session?.boundaryHandoff;
   if (!h) return null;
   return {
