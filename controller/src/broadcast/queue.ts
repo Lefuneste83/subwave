@@ -3410,6 +3410,25 @@ class Queue {
     });
   }
 
+  // A pick cycle that arms the boundary handoff with NO held anchor records the
+  // track already on air as the outgoing show's final track
+  // (armBoundaryHandoff(pickCtx, this.current.track)). The pair is released by
+  // that track's confirmed START — onTrackStarted → runArmedBoundaryHandoff —
+  // and that start has already happened, so without this nothing speaks until
+  // the six-minute overdue relax hands it to whatever track comes next. Seen
+  // live: armed 36s into the 22:55 track for a 23:00 boundary, aired at 23:09
+  // over the middle of the incoming show's second song. The deadline path
+  // (held anchor) is left alone: its final track has not started yet.
+  // Fire-and-forget, like onTrackStarted: the render must not hold the pick.
+  // Not private: scripts/handoff-armed-on-air.test.ts drives it.
+  confirmOnAirBoundaryHandoff(armed: boolean, pickAnchorItem: QueueItem | null): boolean {
+    if (!armed || pickAnchorItem) return false;
+    if (!session.boundaryHandoffReadyForTrack(this.current?.track ?? null)) return false;
+    void this.runArmedBoundaryHandoff()
+      .catch(err => this.log('error', `Boundary handoff failed: ${(err as Error).message}`));
+    return true;
+  }
+
   // One full DJ pick cycle: session roll, programme plan, persona handoff, link
   // cadence, pick. `pickAnchorItem` lets maybeDeadlinePick run the same cycle
   // against the HELD item this selection is intended to follow — `current` is
@@ -3513,6 +3532,9 @@ class Queue {
         } catch (err) {
           this.log('error', `Persona handoff failed: ${(err as Error).message}`);
         }
+        // Armed on the track ALREADY on air: the start that normally releases
+        // the pair (onTrackStarted → runArmedBoundaryHandoff) has passed.
+        this.confirmOnAirBoundaryHandoff(finalTrackHandoff, pickAnchorItem);
         // Programme shows: open the episode if the hourly cron hasn't
         // already (whichever call site settles the session first wins; the
         // beat flag makes the other a no-op).
