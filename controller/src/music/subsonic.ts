@@ -898,7 +898,9 @@ export function getAnnotatedUri(song, opts: { maxDurationSec?: number | null; cu
   // Hard track-length cap (#447): a positive cap stamps `liq_cue_out` and
   // radio.liq's `cue_cut` stops the track there. Only the capped paths set it
   // (autonomous picks + auto.m3u); listener requests pass null and play in
-  // full. A cue_out past the track's end is a no-op. An explicit cueOutSec (a
+  // full. Callers pass the cap only for a track that runs past it
+  // (track-floor.capCueOutSec): a cue_out past the end is NOT a no-op when the
+  // decoder cannot measure the stream, it defeats the crossfade. An explicit cueOutSec (a
   // stem blend's start in the OUTGOING track) competes with the cap and the
   // earlier cut wins, so a blend can't resurrect audio past the cap. cueInSec
   // skips the INCOMING track past the head its rendered clip already played.
