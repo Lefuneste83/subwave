@@ -10,6 +10,8 @@ export interface StationIdentity {
   station: string;
   stationDescription: string;
   tagline: string;
+  /** settings.stationTabTitle: the player tab shows the station name alone. */
+  stationTabTitle: boolean;
 }
 
 // Also the default of the controller's `settings.station`, so an
@@ -31,6 +33,7 @@ export async function fetchStationIdentity(): Promise<StationIdentity | null> {
       stationDescription:
         typeof data?.stationDescription === 'string' ? data.stationDescription : '',
       tagline: typeof data?.tagline === 'string' ? data.tagline : '',
+      stationTabTitle: data?.stationTabTitle === true,
     };
   } catch {
     return null;
@@ -40,6 +43,8 @@ export async function fetchStationIdentity(): Promise<StationIdentity | null> {
 export interface StationMeta {
   name: string;
   description: string;
+  /** Show `name` alone in the browser tab, outside the "· SUB/WAVE" template. */
+  tabTitleStationOnly: boolean;
 }
 
 // Returns null when there's nothing operator-specific to say, so callers keep
@@ -65,6 +70,7 @@ export async function fetchStationMeta(
   const name = station || DEFAULT_STATION;
   return {
     name,
+    tabTitleStationOnly: id?.stationTabTitle === true,
     description:
       stationDescription ||
       tagline ||

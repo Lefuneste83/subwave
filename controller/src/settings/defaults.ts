@@ -156,6 +156,10 @@ export const DEFAULTS = {
   // describe itself differently depending on when it was opened (#1086). Empty =
   // unset, and the web app falls back to the tagline. Never enters the DJ prompt.
   stationDescription: '',
+  // Player browser-tab title. false (default) keeps the root layout's template,
+  // "<station> · SUB/WAVE"; true shows the station name alone. Read per-request
+  // by the web app's generateMetadata() via GET /dj; never enters the DJ prompt.
+  stationTabTitle: false,
   // IANA zone driving everything with local-time semantics (time-of-day moods,
   // schedule slots, hourly checks, festival dates). Empty = the container's TZ.
   // Applied live via time.ts setStationTimezone().
