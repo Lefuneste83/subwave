@@ -25,8 +25,7 @@ export async function generateMetadata(): Promise<Metadata> {
   const meta = await fetchStationMeta();
   if (!meta) return GENERIC;
   return pageMeta({
-    // settings.stationTabTitle: the station name alone, else "<name> — Player".
-    title: meta.tabTitleStationOnly ? meta.name : `${meta.name} — Player`,
+    title: `${meta.name} — Player`,
     description: meta.description,
     path: '/listen',
     siteName: meta.name,

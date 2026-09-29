@@ -131,23 +131,20 @@ export function StationSection({ data, form, setForm, busy, saveSettings, fieldE
             Substituted into the DJ prompt’s {'{station}'} placeholder (current: {data.values?.station || 'SUB/WAVE'}). Applies live.
           </div>
           <div className="mt-2 flex items-center gap-2">
-            {/* Same box as the station-name input above: square, input border,
-                field fill, ink tick. */}
             <Checkbox
               id="station-tab-title"
               checked={form.stationTabTitle}
               onCheckedChange={(v) => setForm(f => ({ ...f, stationTabTitle: v === true }))}
-              className="size-5 rounded-none border-input bg-field text-foreground shadow-none data-[state=checked]:bg-field data-[state=checked]:text-foreground"
             />
-            <Label htmlFor="station-tab-title">
+            <Label htmlFor="station-tab-title" className="!normal-case">
               Use the station name as the browser tab title
             </Label>
           </div>
           <SettingsFieldError path="stationTabTitle" errors={fieldErrors} />
           <div className="field-hint">
             When selected, the player’s browser tab shows your station name alone.
-            When unselected, it reads “SUB/WAVE — Player”. Applies on the listener’s
-            next page load.
+            When unselected, it reads “{form.station.trim() || 'Your station'} · SUB/WAVE”.
+            Applies on the listener’s next page load.
           </div>
         </div>
 
