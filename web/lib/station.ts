@@ -18,36 +18,25 @@ export interface StationIdentity {
 // un-personalised install reports this verbatim.
 export const DEFAULT_STATION = 'SUB/WAVE';
 
-// Last identity the controller returned, kept for this web process. The
-// controller answers /dj from its event loop, which a pick or a TTS render can
-// hold for longer than the 1.5 s budget below; without this, every slow answer
-// served the generic SUB/WAVE title and share card for that one request, so the
-// tab flipped between the station's title and "SUB/WAVE" from one load to the
-// next. A stale identity is always closer to the truth than none: the fields
-// change only when the operator edits them.
-let lastIdentity: StationIdentity | null = null;
-
-// Returns the last known identity on failure, or null when there has never been
-// one, so the caller falls back to generic SUB/WAVE branding. The preview must
-// never break.
+// Returns null on any failure so the caller falls back to generic SUB/WAVE
+// branding. The preview must never break.
 export async function fetchStationIdentity(): Promise<StationIdentity | null> {
   try {
     const res = await fetch(`${CONTROLLER_BASE}/dj`, {
       cache: 'no-store',
       signal: AbortSignal.timeout(1500),
     });
-    if (!res.ok) return lastIdentity;
+    if (!res.ok) return null;
     const data = await res.json();
-    lastIdentity = {
+    return {
       station: typeof data?.station === 'string' ? data.station : '',
       stationDescription:
         typeof data?.stationDescription === 'string' ? data.stationDescription : '',
       tagline: typeof data?.tagline === 'string' ? data.tagline : '',
       stationTabTitle: data?.stationTabTitle === true,
     };
-    return lastIdentity;
   } catch {
-    return lastIdentity;
+    return null;
   }
 }
 
