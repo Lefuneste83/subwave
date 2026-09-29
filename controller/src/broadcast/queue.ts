@@ -22,6 +22,7 @@ import * as mix from '../music/mix.js';
 import * as library from '../music/library.js';
 import * as loudness from '../music/loudness.js';
 import * as silenceTrim from '../music/silence-trim.js';
+import { capCueOutSec } from '../music/track-floor.js';
 import { swallowedByCrossfade } from '../util/request-guard.js';
 import * as showBoundary from './show-boundary.js';
 import * as blocklist from '../music/blocklist.js';
@@ -1988,7 +1989,9 @@ class Queue {
         const cueInCandidates = positiveCues([item.stemSeam ? item.stemCueInSec : null, trim.cueInSec]);
         item.cueInSec = cueInCandidates.length ? Math.max(...cueInCandidates) : undefined;
         const uri = subsonic.getAnnotatedUri(item.track, {
-          maxDurationSec,
+          // The cap's cue only when this track actually runs past it — a stamp
+          // past a short track's end defeats the crossfade (track-floor.ts).
+          maxDurationSec: capCueOutSec(itemDurSec, maxDurationSec),
           cueOutSec: cueOutCandidates.length ? Math.min(...cueOutCandidates) : null,
           cueInSec: item.cueInSec ?? null,
           resolveProbeId: item.resolveProbeId,
