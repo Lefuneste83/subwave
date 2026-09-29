@@ -32,13 +32,18 @@ export async function generateMetadata(): Promise<Metadata> {
   // Station → Share description) takes precedence.
   const meta = await fetchStationMeta({ allowPersonaTagline: true });
   if (!meta) return base;
-  const { name, description } = meta;
+  const { name, description, tabTitleStationOnly } = meta;
 
   // openGraph/twitter are NOT deep-merged across the layout→page chain (see
   // lib/seo.ts pageMeta), so restate them fully here. The layout's hand-written
   // og:image/twitter:image <meta> tags are emitted independently and remain.
+  //
+  // The browser tab follows settings.stationTabTitle: off (default) keeps the
+  // root layout's "%s · SUB/WAVE" template; on, `absolute` opts this one route
+  // out of it so the tab reads as the station alone. Other routes (admin,
+  // news, docs, …) always keep the "Page · SUB/WAVE" pattern.
   return {
-    title: name,
+    title: tabTitleStationOnly ? { absolute: name } : name,
     description,
     alternates: { canonical: absoluteUrl('/') },
     openGraph: {

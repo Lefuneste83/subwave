@@ -2894,6 +2894,15 @@ export const stationDescriptionSchema = settingsTrimmedString(
   `station description must be ${SETTINGS_STATION_DESCRIPTION_MAX} chars or fewer`,
 );
 
+/**
+ * Player tab title switch. Strict boolean, same posture as djSpeakClockSchema:
+ * a PATCH carrying anything else is refused, while load() coerces a hand-edited
+ * non-boolean to the default.
+ */
+export const stationTabTitleSchema = z.boolean({
+  error: 'stationTabTitle must be a boolean',
+});
+
 export const djHouseRulesSchema = settingsTrimmedString(
   SETTINGS_DJ_HOUSE_RULES_MAX,
   `djHouseRules must be at most ${SETTINGS_DJ_HOUSE_RULES_MAX} chars`,

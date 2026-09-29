@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { fmtClockMinute, normalizeStationLocale, type StationLocale } from '../../../lib/format';
 import { Input } from '../../ui/input';
 import { Label } from '../../ui/label';
+import { Checkbox } from '../../ui/checkbox';
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem, SelectGroup, SelectLabel,
 } from '../../ui/select';
@@ -49,6 +50,7 @@ export function StationSection({ data, form, setForm, busy, saveSettings, fieldE
   const save = () => saveSettings({
     station: form.station,
     stationDescription: form.stationDescription,
+    stationTabTitle: form.stationTabTitle,
     timezone: form.timezone,
     locale: form.locale,
     weather: {
@@ -127,6 +129,22 @@ export function StationSection({ data, form, setForm, busy, saveSettings, fieldE
           <SettingsFieldError path="station" errors={fieldErrors} />
           <div className="field-hint">
             Substituted into the DJ prompt’s {'{station}'} placeholder (current: {data.values?.station || 'SUB/WAVE'}). Applies live.
+          </div>
+          <div className="mt-2 flex items-center gap-2">
+            <Checkbox
+              id="station-tab-title"
+              checked={form.stationTabTitle}
+              onCheckedChange={(v) => setForm(f => ({ ...f, stationTabTitle: v === true }))}
+            />
+            <Label htmlFor="station-tab-title" className="!normal-case">
+              Use the station name as the browser tab title
+            </Label>
+          </div>
+          <SettingsFieldError path="stationTabTitle" errors={fieldErrors} />
+          <div className="field-hint">
+            When selected, the player’s browser tab shows your station name alone.
+            When unselected, it reads “{form.station.trim() || 'Your station'} · SUB/WAVE”.
+            Applies on the listener’s next page load.
           </div>
         </div>
 
@@ -547,7 +565,7 @@ export function StationSection({ data, form, setForm, busy, saveSettings, fieldE
         onSave={save}
         saveLabel="Save station settings"
         errors={fieldErrors}
-        ownedKeys={['station', 'stationDescription', 'timezone', 'locale', 'weather', 'privacy', 'requests']}
+        ownedKeys={['station', 'stationDescription', 'stationTabTitle', 'timezone', 'locale', 'weather', 'privacy', 'requests']}
       />
     </>
   );
