@@ -51,7 +51,7 @@ export const SECTIONS = [
   {
     id: 'station', group: 'the station', label: 'Station',
     hint: 'name · location · privacy', icon: Radio,
-    formKeys: ['station', 'stationDescription', 'stationTabTitle', 'timezone', 'locale', 'weather', 'privacy', 'requests'],
+    formKeys: ['station', 'stationDescription', 'timezone', 'locale', 'weather', 'privacy', 'requests'],
   },
   {
     id: 'music', group: 'the station', label: 'Music source',

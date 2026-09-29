@@ -381,8 +381,6 @@ export interface FormState {
   loudness: LoudnessForm;
   station: string;
   stationDescription: string;
-  /** Player tab shows the station name alone instead of "<station> · SUB/WAVE". */
-  stationTabTitle: boolean;
   timezone: string;
   locale: StationLocale;
   kokoroLang: string;
@@ -461,8 +459,6 @@ export interface SettingsData {
     boundaryFadeMinTrackSeconds?: number;
     station?: string;
     stationDescription?: string;
-    /** Absent on a controller predating the key — read it as false. */
-    stationTabTitle?: boolean;
     timezone?: string;
     locale?: StationLocale;
     /** Absent on a settings.json predating the key — read it as false, which is

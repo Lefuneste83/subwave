@@ -656,13 +656,6 @@ export async function load() {
       typeof stored.stationDescription === 'string'
         ? stored.stationDescription.trim().slice(0, 200)
         : DEFAULTS.stationDescription,
-    // A settings.json predating the key, or a hand-edited non-boolean, reads
-    // as the default (off). Composed here explicitly: load() does not spread
-    // DEFAULTS, so a field missing from this block would not survive a restart.
-    stationTabTitle:
-      typeof stored.stationTabTitle === 'boolean'
-        ? stored.stationTabTitle
-        : DEFAULTS.stationTabTitle,
     // Invalid stored zone (hand-edited file) falls back to Auto — the
     // station must never crash on a bad zone.
     timezone:
@@ -1513,10 +1506,6 @@ export async function update(patch) {
       'stationDescription',
       patch.stationDescription,
     );
-  }
-  if ('stationTabTitle' in patch) {
-    // No `restart`: read per-request by the web app's generateMetadata().
-    next.stationTabTitle = parseSettingsPatchKey<boolean>('stationTabTitle', patch.stationTabTitle);
   }
   if ('timezone' in patch) {
     // '' = back to Auto (container TZ). setStationTimezone() below pushes the

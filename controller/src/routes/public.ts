@@ -346,8 +346,6 @@ router.get('/dj', async (req, res) => {
       // Persona-independent so a shared link reads the same whoever is on air
       // (#1086). '' = unset; the web app falls back to the persona tagline.
       stationDescription: s.stationDescription || '',
-      // Player tab title: station name alone (true) or "<station> · SUB/WAVE".
-      stationTabTitle: s.stationTabTitle === true,
       // Broad on-air location only, never the precise weather label: this is
       // unauthenticated and an exact town is the doxxing vector.
       location: settings.resolveOnAirLocation(s),
