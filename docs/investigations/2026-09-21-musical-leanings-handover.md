@@ -7,17 +7,22 @@ music-selection guidance. It is a soft editorial preference only: it must not
 create candidates or override flow, show rules, rotation, safety, requests, or
 the existing artist/album guards.
 
-The station work established two different route contracts:
+The station work now establishes two controller-resolved route contracts:
 
-- **Track Shortlist** retains a controller-resolved `usedMusicalLeanings`
-  diagnostic and the `LEANINGS` Debug badge.
-- **Agentic Tools** deliberately has no Leanings provenance badge. The local
-  model cannot reliably say whether Leanings caused a choice or accurately
-  explain the claimed tie-break.
+- **Track Shortlist** retains its `usedMusicalLeanings` diagnostic and the
+  `LEANINGS` Debug badge.
+- **Agentic Tools** can show the same badge only when a separate, compact
+  review changes the blind preliminary choice and the controller can verify
+  the exact Musical Leanings phrase used, the selected track's support for
+  that phrase, and an acceptably close ordinary-flow comparison.
 
-All work described below was live-tested on the station branch. The current
-station-only commits must be sorted into the two review PRs before the branch
-is retired.
+Agentic does not trust a model-reported provenance boolean. The model proposes
+a challenger and quotes one of a closed list of exact preference phrases; the
+controller independently decides whether that proposal is badge-worthy.
+
+The compact review has passed focused tests, offline local-model replay and an
+extended station run. The first 55 live reviews produced eight verified badges
+with a median review time of about 4.6 seconds on the local 8B model.
 
 ## Agentic false-flag investigation
 
@@ -41,6 +46,11 @@ Observed failures included:
 4. **Unreliable omissions.** A model can select in the direction of a
    preference but return `usedMusicalLeanings: false`; conversely it can claim
    a tie-break where no grounded evidence exists.
+5. **Candidate-order bias.** When the editorial pass was asked to select from
+   every discovered candidate, it behaved like another general reranker. In a
+   25-review live sample it chose the first supplied candidate 17 times and
+   never retained the preliminary choice. Twelve reviews changed the track,
+   but none produced controller-valid Leanings evidence.
 
 The problem was amplified because Agentic saw Leanings more than once: in the
 system prompt, in the newest pick event, and in a fresh diagnostic reminder.
@@ -72,42 +82,89 @@ Important findings:
 - The final model's boolean remained unusable: Maria reported the expected
   provenance only 2/20 times despite the measurable selection shift.
 
-These experiments support the placement of Leanings beside an already
-discovered candidate set. They do **not** justify a live per-pick causal badge.
+These experiments support placing Leanings beside an already discovered
+candidate set, but show why unconstrained model self-report cannot justify a
+live badge. The newer contract below narrows the claim to facts the controller
+can verify.
 
 ## Current Agentic architecture
 
 When the presenter has a non-blank Musical Leanings field:
 
 ```text
-djAgentPick → djAgentEditorialPick → artist/album guards → queue
+djAgentPick → djAgentLeaningsReview → artist/album guards → queue
 ```
 
-1. `djAgentPick` is discovery only. It sees the ordinary presenter Soul, but
-   it receives no separate Musical Leanings prompt and has no Leanings
-   diagnostic fields in its schema.
-2. `djAgentEditorialPick` receives only the candidates actually surfaced by
-   discovery, plus the resolved host/optional guest Leanings. It selects one
-   of those exact IDs and writes a private, track-specific selection reason.
-3. Existing artist and album guards may still make a constrained corrective
-   re-pick. The flow never returns to `djAgentPick` for a second discovery
-   decision.
+1. `djAgentPick` performs discovery and makes the blind preliminary choice. It
+   sees the ordinary presenter Soul, but receives no separate Musical
+   Leanings prompt and has no Leanings diagnostic fields in its schema.
+2. The controller extracts a closed list of exact preference phrases from the
+   resolved host/optional guest Leanings.
+3. The controller creates a small, deterministic review set: the preliminary
+   choice first, three close ordinary-flow alternatives, and at most two
+   metadata-grounded preference matches. Candidate insertion order cannot
+   change this set.
+4. `djAgentLeaningsReview` receives a minimal system prompt, the compact
+   candidates, and the exact allowed phrases. It may propose one challenger
+   and must return one exact phrase, or retain the preliminary choice with
+   `NO_LEANINGS_INFLUENCE`.
+5. The controller accepts a Leanings-led replacement only when all of the
+   following are true:
 
-If the Musical Leanings field is blank, `djAgentEditorialPick` is not called.
+   - the selected ID belongs to the compact review set and differs from the
+     preliminary choice;
+   - the quoted phrase exactly matches the active Musical Leanings;
+   - the selected candidate's library metadata supports that phrase;
+   - its ordinary-flow comparison is `close` or `possible`; and
+   - the musical reason is sufficiently specific.
+
+6. For an accepted replacement, the controller writes the public reason so it
+   names the DJ, track and exact verified preference wording. Existing artist
+   and album guards can still override it before queueing; an overridden or
+   unqueued choice does not keep the badge.
+
+If the Musical Leanings field is blank, `djAgentLeaningsReview` is not called.
 Agentic follows its ordinary one-step discovery-and-pick behaviour and still
 sees any musical preferences the operator deliberately left in the presenter
 Soul.
 
-The editorial call must not claim that Leanings decided the pick. Its reason
-is controller-sanitised before it reaches Booth/session text. Raw debug output
-can still name the wrong track or mention Leanings; the controller-resolved ID
-and verified reason are authoritative.
+The review is therefore a proposal, not the authority. It cannot select a
+hidden candidate, invent its own preference wording, or turn a generic
+energy/mood explanation into a Leanings badge. The controller-resolved ID,
+evidence and reason are authoritative.
 
-### Live smoke observations
+### Replay observations for the constrained review
+
+`controller/scripts/agentic-leanings-review-replay.ts` exercises the new
+contract without queueing music. It rotates discovery insertion order on each
+iteration and asserts that the controller's compact candidate set remains
+stable.
+
+- The replay input is about 1,900 tokens, compared with roughly 8,000–10,000
+  tokens observed in the earlier full-context review.
+- The Shelby fixture produced the same controller-valid replacement in 3/3
+  runs: Jellybean's `Who Found Who`, grounded in the exact active phrase
+  `electronic music`.
+- In the Russell negative fixture, the local model proposed an unsupported
+  alternative in 3/3 runs and invented `sophisticated rock`. The controller
+  rejected every proposal and retained the blind preliminary choice in 3/3
+  runs.
+
+This demonstrates the intended safety property: model inconsistency can lose
+a potential badge, but cannot manufacture verified Leanings evidence.
+
+Run the focused replay with:
+
+```sh
+npm run leanings:review-replay
+npm run leanings:review-replay -- scripts/fixtures/agentic-leanings-review/russell-generic-mood.json 3
+```
+
+### Earlier live smoke observations
 
 The initial live sample completed the expected two-call sequence for every
 Agentic run that surfaced usable candidates. A blank Leanings field was also
-confirmed not to call `djAgentEditorialPick`.
+confirmed not to call `djAgentLeaningsReview`.
 
 The two-step arrangement was faster than the old local Agentic runs in the
 small sample:
@@ -121,10 +178,9 @@ The three observed five-minute Agentic deadlines were attributed to local GPU
 pressure in the looping discovery tools, not the editorial final-selection
 step.
 
-Useful future Debug improvement: compare the controller-resolved discovery
-proposal with the controller-resolved editorial choice, and show a factual
-indicator when the editorial pass changed the proposal. Do not label that as
-proof that Leanings caused the change.
+Those timings pre-date the compact review contract and should not be used as a
+performance expectation. The new replay reduces input substantially, but
+local model load and generation time still vary.
 
 ## Track Shortlist status
 
@@ -159,22 +215,27 @@ means its independent musical effect is not measurable enough for a badge.
 
 ## Suggested follow-up investigations
 
-1. **Controller-verifiable preference annotations.** Map explicitly selected,
-   controlled preferences (for example an exact configured genre lean) to
-   candidate library metadata. Report a factual candidate match, never that it
-   caused the selection. Do not use show mood/energy tags as Leanings evidence.
+1. **Monitor attribution edge cases without tightening yet.** In the first 55
+   compact reviews, eight replacements reached the queue with a badge. Four
+   had weaker causal attribution even though the review genuinely changed the
+   track: in three cases the preliminary track also matched the cited phrase;
+   in one, `alternative pop` was inferred across separate `Alternative Rock`
+   and `Power Pop` genre tags. That frequency is not currently excessive and
+   the badges are useful evidence that the feature is active. Revisit only if
+   users report misleading results; possible stricter rules are to require the
+   cited phrase to distinguish the replacement from the preliminary track and
+   to keep multiword matching within one metadata tag.
 2. **Continue fixed-candidate controls.** The replay harness can compare the
    same candidate set with and without Leanings at aggregate scale. This is
    appropriate for evaluation, not live shadow decisions.
-3. **Evaluate provenance separately.** A stronger model or a separately
-   constrained evaluator may be able to provide grounded provenance, but it
-   must be tested against copied-schema and generic-flow failures before any
-   live badge is restored.
+3. **Measure false negatives.** Save rejected review proposals alongside the
+   controller's rejection reason. This will show whether metadata matching or
+   the ordinary-flow threshold is now too strict without weakening the badge.
 4. **Consider structured Leanings alongside prose.** A future operator-facing
    preference taxonomy could make factual matching auditable while retaining
    free text for broad taste.
 5. **Debug quality.** Populate verified selection on the
-   `djAgentEditorialPick` record as well as the original `djAgentPick` record;
+   `djAgentLeaningsReview` record as well as the original `djAgentPick` record;
    today the original card is refreshed to the final queued track, while the
    raw responses remain intentionally historical.
 
@@ -187,21 +248,19 @@ PRs:
 - #1687: `feat/intelligent-candidate-pool-alternative` — Track Shortlist
   behaviour, natural reason restoration, and the Shortlist Debug badge fix.
 
-Before updating #1678, keep it independent of #1687: the Agentic editorial
-selection currently reuses small prompt/schema helpers from
-`music/dj-pick.ts`. Move or duplicate those generic helpers under the Agentic
-module before cherry-picking, so #1678 can still merge ahead of #1687.
+#1678 remains independent of #1687: its Agentic reason and validation helpers
+live under the Agentic module, so the Musical Leanings PR can still merge
+ahead of the Track Shortlist PR.
 
 Suggested reviewer note:
 
-> Agentic picking no longer exposes the Musical Leanings badge or tie-break
-> diagnostic: local-model testing showed that model-reported provenance was
-> unreliable. Musical Leanings remain required for Track Shortlist, where they
-> provide the candidate-adjacent editorial cue that picker depends on.
+> Agentic picking no longer trusts model-reported Musical Leanings provenance.
+> The blind preliminary pick is followed by a small, deterministic review of
+> close alternatives. A replacement earns the Leanings badge only when the
+> controller can verify its exact active preference phrase, supporting track
+> metadata, ordinary-flow proximity, final queue result and public rationale.
 >
-> For Agentic picking, the vanilla discovery behaviour is unchanged. When a
-> presenter has Musical Leanings configured, the discovered candidates receive
-> one additional constrained editorial selection pass; this softly re-orders
-> eligible choices without changing discovery, show rules, rotation, safety,
-> or musical-flow constraints. With Leanings blank, Agentic follows its
-> existing single-pass behaviour.
+> The local model still makes imperfect proposals. Replay includes a negative
+> case where it invents an unsupported preference in 3/3 runs; the controller
+> rejects all three and retains the preliminary pick. With Musical Leanings
+> blank, Agentic follows its existing single-pass behaviour.
