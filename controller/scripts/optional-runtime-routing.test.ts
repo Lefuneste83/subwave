@@ -23,9 +23,9 @@ assert.ok(shortlistStart >= 0 && shortlistEnd > shortlistStart, 'Shortlist must 
 assert.match(shortlistRoute, /buildShortlist\(/, 'Shortlist discovery is controller-led');
 assert.match(shortlistRoute, /djPick\(/, 'Shortlist makes one bounded structured choice');
 assert.doesNotMatch(shortlistRoute, /pickerAgent\.run/, 'Shortlist must not instantiate the picker tool loop');
-assert.match(picker, /shortlistSelectionReason\(song, object\.reason\)/,
-  'the final queued shortlist track must validate its own Booth reason');
-assert.match(djAgent, /shortlistRepick \? shortlistPickSchema\(ids\)/,
+assert.match(picker, /shortlistClauseSelectionReason\(song, object\.musicalReason\)/,
+  'the final queued shortlist track must rebuild its Booth reason from verified identity');
+assert.match(djAgent, /shortlistRepick\s+\? shortlistPickSchema\(ids\)/,
   'a shortlist corrective re-pick must use the shortlist selection schema');
 assert.match(djAgent, /prompt: shortlistRepick\s+\? shortlistPickPrompt/,
   'a shortlist corrective re-pick must use the shortlist prompt');

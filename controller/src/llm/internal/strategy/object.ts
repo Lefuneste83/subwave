@@ -74,7 +74,7 @@ export async function djObject({
 }: any): Promise<any> {
   return withFailover(
     kind,
-    (err) => ({ user: prompt, ...failureDiagnostics(err) }),
+    (err) => ({ user: prompt, ...failureDiagnostics(err), ...telemetry }),
     async (l) => {
       let lastErr;
       // Track the strategy actually attempted so a failure record attributes to

@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { buildShortlist, executeShortlistPlan, planShortlistSources, replayFixtureTrace } from '../src/music/shortlist.js';
 import { pickerScope } from '../src/llm/tools.js';
-import { resolvedLeaningsTieBreak, resolvedMusicalLeaningsFlag, shortlistPickPrompt, shortlistPickSchema, shortlistReasonForLeanings, shortlistSelectionReason } from '../src/music/dj-pick.js';
+import { buildPickerContext } from '../src/llm/internal/tools/picker/scope.js';
+import { cacheSourcePool } from '../src/llm/internal/tools/picker/source-pool-cache.js';
+import { shortlistCandidateForPick, shortlistClauseSelectionReason, shortlistLeaningsSource, shortlistPickPrompt, shortlistPickSchema, shortlistReasonForLeanings, shortlistSelectionReason } from '../src/music/dj-pick.js';
 
 test('makes a redacted, replayable trace with source arguments and candidate ids', () => {
   const trace = replayFixtureTrace({
@@ -28,35 +30,17 @@ test('makes a redacted, replayable trace with source arguments and candidate ids
   assert.equal('title' in trace.sourceCalls[0], false);
 });
 
-test('cycles context, continuity, and exploration source lanes without adding sources', () => {
+test('balances context, continuity and diversity lanes without inventing intent-driven sources', () => {
   const journey = planShortlistSources({
     scope: pickerScope({ audioWaypoint: [0.1] }),
     currentTrackId: 'seed', discoveryPasses: 3,
     moods: ['celebratory'], energies: ['high'],
   }, new Set(['tracksTowardJourney', 'tracksByMood', 'tracksThatSoundLikeThis', 'tracksLikeThis']));
   assert.deepEqual(journey, [
-    { source: 'tracksByMood', args: { mood: 'celebratory', energy: 'high' } },
-    { source: 'tracksThatSoundLikeThis', args: { songId: 'seed' } },
-    { source: 'tracksTowardJourney', args: {} },
+    { source: 'tracksTowardJourney', args: {}, family: 'context' },
+    { source: 'tracksThatSoundLikeThis', args: { songId: 'seed' }, family: 'continuity' },
+    { source: 'tracksByMood', args: { mood: 'celebratory', energy: 'high' }, family: 'context' },
   ]);
-
-  const rotating = planShortlistSources({
-    scope: pickerScope({ audioWaypoint: [0.1] }),
-    currentTrackId: 'seed', discoveryPasses: 5,
-    moods: ['celebratory'], energies: ['high'],
-  }, new Set([
-    'tracksTowardJourney', 'tracksByMood',
-    'tracksThatSoundLikeThis', 'tracksLikeThis', 'similarSongs',
-    'deepCuts', 'recentlyAdded', 'starredSongs', 'randomSongs',
-  ]));
-  assert.equal(rotating.length, 5);
-  assert.ok(['tracksTowardJourney', 'tracksByMood'].includes(rotating[0].source));
-  assert.ok(['tracksThatSoundLikeThis', 'tracksLikeThis', 'similarSongs'].includes(rotating[1].source));
-  assert.ok(['deepCuts', 'recentlyAdded', 'starredSongs', 'randomSongs'].includes(rotating[2].source));
-  assert.ok(['tracksTowardJourney', 'tracksByMood'].includes(rotating[3].source));
-  assert.ok(['tracksThatSoundLikeThis', 'tracksLikeThis', 'similarSongs'].includes(rotating[4].source));
-  assert.notEqual(rotating[0].source, rotating[3].source);
-  assert.notEqual(rotating[1].source, rotating[4].source);
 
   const strictPlaylist = planShortlistSources({
     scope: pickerScope({ playlistTracks: [{ id: 'in-show' }], playlistLock: new Set(['in-show']) }),
@@ -64,7 +48,7 @@ test('cycles context, continuity, and exploration source lanes without adding so
     moods: ['reflective'], energies: ['low'], explore: true,
   }, new Set(['showPlaylistTracks', 'tracksByMood', 'deepCuts']));
   assert.deepEqual(strictPlaylist.map((call) => call.source), [
-    'showPlaylistTracks', 'deepCuts', 'deepCuts', 'showPlaylistTracks', 'deepCuts',
+    'showPlaylistTracks', 'tracksByMood', 'showPlaylistTracks', 'tracksByMood', 'showPlaylistTracks',
   ]);
 
   const empty = planShortlistSources({
@@ -72,65 +56,108 @@ test('cycles context, continuity, and exploration source lanes without adding so
     moods: ['calm'], energies: ['low'],
   }, new Set(['tracksByMood']));
   assert.deepEqual(empty, [
-    { source: 'tracksByMood', args: { mood: 'calm', energy: 'low' } },
-    { source: 'tracksByMood', args: { mood: 'calm', energy: 'low' } },
-    { source: 'tracksByMood', args: { mood: 'calm', energy: 'low' } },
+    { source: 'tracksByMood', args: { mood: 'calm', energy: 'low' }, family: 'context' },
+    { source: 'tracksByMood', args: { mood: 'calm', energy: 'low' }, family: 'context' },
+    { source: 'tracksByMood', args: { mood: 'calm', energy: 'low' }, family: 'context' },
   ]);
+
+  const balanced = planShortlistSources({
+    scope: pickerScope(), currentTrackId: 'seed', discoveryPasses: 3,
+    moods: ['calm'], energies: ['low'], genres: ['ambient'], explore: true,
+  }, new Set([
+    'tracksByMood', 'songsByGenre', 'tracksThatSoundLikeThis', 'tracksLikeThis', 'similarSongs',
+    'deepCuts', 'starredSongs', 'recentlyAdded', 'randomSongs',
+  ]));
+  assert.deepEqual(balanced.map((call) => call.family), ['context', 'continuity', 'diversity']);
+  assert.equal(balanced[2].source, 'deepCuts');
+  assert.ok(!balanced.some((call) => ['searchLibrary', 'identifyRequestedTrack'].includes(call.source)));
 });
 
 test('native builder plans from source-owned availability before execution', async () => {
   // A no-index scope still keeps its usable mood source and an available
   // exploration source, without logging unavailable similarity probes.
   const result = await buildShortlist({
-    scope: pickerScope(), currentTrackId: 'seed', discoveryPasses: 3,
+    scope: pickerScope(), currentTrackId: 'seed', discoveryPasses: 1,
     moods: ['calm'], energies: ['low'],
   });
   assert.ok(result.sourceRuns.length > 0);
-  assert.ok(result.sourceRuns.some((run) => run.source === 'tracksByMood'));
-  assert.ok(result.sourceRuns.every((run) => run.status !== 'unavailable'));
+  assert.ok(result.sourceRuns.every((run) => run.source === 'tracksByMood'));
 });
 
 test('DJ shortlist selection accepts only supplied ids and keeps provenance out of its reason', () => {
   const schema = shortlistPickSchema(['candidate-a', 'candidate-b']);
-  assert.equal(schema.safeParse({
-    id: 'candidate-a', selectionReason: 'One by Artist A brings a warmer texture after the opener.', usedMusicalLeanings: false, say: null, transition: null,
-  }).success, true);
-  // modelTolerant repairs missing nullable fields for less capable providers;
-  // the final controller gate below still rejects true without real evidence.
-  assert.equal(schema.safeParse({
-    id: 'invented', selectionReason: 'not allowed', usedMusicalLeanings: false, say: null, transition: null,
-  }).success, false);
-  const prompt = shortlistPickPrompt([{ id: 'candidate-a', title: 'One', shortlistSources: ['tracksByMood'] }], {
-    currentTrack: { id: 'current', title: 'Current', artist: 'Artist' },
-    precedingTrack: { id: 'prior', title: 'Prior', artist: 'Earlier Artist' },
-    transition: { recentChoices: ['normal', 'sweep'], guidance: 'Choose deliberately.' },
-    journey: { direction: 'Move toward the destination.', targetBpm: 116, targetKey: '8A' },
-    curatedPlaylist: { mode: 'soft' },
-    link: 'A separate safe link may air for this pick.',
-  }, {
-    host: 'Favour patient dub.',
-    guest: { guest: { id: 'guest-1', name: 'Carrie Marshall' }, musicalLeanings: 'Favour unexpected rock records.' },
-    promptValue: 'Host: Favour patient dub.\nGuest (Carrie Marshall, secondary): Favour unexpected rock records.',
+  const parsed = schema.parse({
+    id: 'candidate-a', musicalReason: 'its warmer texture opens the arrangement without breaking the sequence', usedMusicalLeanings: true, say: null, transition: null,
   });
+  assert.equal('usedMusicalLeanings' in parsed, false, 'the model cannot self-report Leanings provenance');
+  assert.equal(schema.safeParse({
+    id: 'invented', musicalReason: 'its warmer texture opens the arrangement without breaking the sequence', say: null, transition: null,
+  }).success, false);
+  const prompt = shortlistPickPrompt([{ id: 'candidate-a', title: 'One', shortlistSources: ['tracksByMood'] }]);
   assert.match(prompt, /candidate-a/);
   assert.match(prompt, /Track Shortlist/);
-  const payload = JSON.parse(prompt.split('\n\nChoose one id')[0]);
-  assert.deepEqual(payload.context, {
-    currentTrack: { id: 'current', title: 'Current', artist: 'Artist' },
-    precedingTrack: { id: 'prior', title: 'Prior', artist: 'Earlier Artist' },
-    transition: { recentChoices: ['normal', 'sweep'], guidance: 'Choose deliberately.' },
-    journey: { direction: 'Move toward the destination.', targetBpm: 116, targetKey: '8A' },
-    curatedPlaylist: { mode: 'soft' },
-    link: 'A separate safe link may air for this pick.',
-    musicalLeanings: 'Host: Favour patient dub.\nGuest (Carrie Marshall, secondary): Favour unexpected rock records.',
+  const leaningsBlindPrompt = shortlistPickPrompt(
+    [{ id: 'candidate-a', title: 'One', shortlistSources: ['tracksByMood'] }],
+    {},
+  );
+  assert.doesNotMatch(leaningsBlindPrompt, /Favour patient dub|"musicalLeanings"/i);
+  assert.match(leaningsBlindPrompt, /ordinary musical flow only/i);
+});
+
+test('Shortlist sees predecessor audio facts and applies the vanilla-neutral transition policy', () => {
+  const prompt = shortlistPickPrompt(
+    [{ id: 'candidate-a', title: 'One', bpm: 124, key: '8A' }],
+    {
+      currentTrack: {
+        id: 'current', title: 'Current Song', artist: 'Current Artist', album: 'Album',
+        bpm: 122, key: '7A', pace: 0.63,
+      },
+      recentTransitions: ['normal', 'washout', 'normal', 'washout'],
+    },
+  );
+  const payload = JSON.parse(prompt.slice(0, prompt.indexOf('\n\nChoose one id'))) as {
+    context: { currentTrack: Record<string, unknown>; recentTransitions: string[] };
+  };
+  assert.deepEqual(payload.context.currentTrack, {
+    id: 'current', title: 'Current Song', artist: 'Current Artist', album: 'Album',
+    bpm: 122, key: '7A', pace: 0.63,
   });
-  assert.ok(payload.context.musicalLeanings.indexOf('Host:') < prompt.indexOf('"shortlist"'));
-  assert.match(prompt, /soft editorial preference among already eligible/i);
-  assert.match(prompt, /strongly prefer candidates whose shortlistSources contain "showPlaylistTracks"/i);
-  assert.match(prompt, /transition context is supplied/i);
-  assert.doesNotMatch(prompt, /leaningsTieBreak/i);
-  assert.equal(resolvedMusicalLeaningsFlag({ host: 'x', guest: null, promptValue: 'Host: x' }, true), true);
-  assert.equal(resolvedMusicalLeaningsFlag(null, true, 'plain reason'), false);
+  assert.deepEqual(payload.context.recentTransitions, ['normal', 'washout', 'normal', 'washout']);
+  assert.match(prompt, /oldest first/);
+  assert.match(prompt, /strips a third identical effect/);
+  assert.match(prompt, /Never use the same transition three picks running/);
+  assert.match(prompt, /lean "normal" now unless this moment clearly calls for another/);
+  assert.doesNotMatch(prompt, /default to (?:washout|sweep|blend|dissolve|chop|loop)/i,
+    'the parity reminder must not bias the model away from one named effect');
+
+  const effectsOff = shortlistPickPrompt([{ id: 'candidate-a', title: 'One' }], {});
+  assert.doesNotMatch(effectsOff, /Never use the same transition three picks running/);
+});
+
+test('Shortlist sends a compact selection-only candidate payload', () => {
+  const candidate = {
+    id: 'candidate-a', title: 'One', artist: 'Artist', album: 'Album', year: 2001,
+    genre: 'Rock', moods: ['driving'], energy: 'high', instrumental: false,
+    bpm: 120, key: '8A', pace: 0.7, sections: 4, unaired: true,
+    play_count: 2, last_played_days_ago: 30, artist_play_count: 5,
+    artist_last_played_days_ago: 10, duration_sec: 240, intro_ms: 12_000,
+    shortlistSources: ['deepCuts'], controllerOnly: 'never send',
+  };
+  assert.deepEqual(shortlistCandidateForPick(candidate), {
+    id: 'candidate-a', title: 'One', artist: 'Artist', album: 'Album', year: 2001,
+    genre: 'Rock', moods: ['driving'], energy: 'high', instrumental: false,
+    bpm: 120, key: '8A', pace: 0.7, sections: 4, unaired: true,
+    play_count: 2, last_played_days_ago: 30, artist_play_count: 5,
+    artist_last_played_days_ago: 10,
+  });
+  const prompt = shortlistPickPrompt([candidate]);
+  const payload = JSON.parse(prompt.slice(0, prompt.indexOf('\n\nChoose one id'))) as { shortlist: Array<Record<string, unknown>> };
+  assert.equal(payload.shortlist.length, 1);
+  assert.equal('shortlistSources' in payload.shortlist[0], false);
+  assert.equal('duration_sec' in payload.shortlist[0], false);
+  assert.equal('intro_ms' in payload.shortlist[0], false);
+  assert.doesNotMatch(prompt.slice(0, prompt.indexOf('\n\nChoose one id')), /\n\s+"/,
+    'candidate JSON is compact rather than indentation-heavy');
 });
 
 test('shortlist presentation never attaches one track\'s note to another track', () => {
@@ -159,31 +186,23 @@ test('shortlist presentation never attaches one track\'s note to another track',
   );
 });
 
-test('Shortlist Leanings provenance requires an explicit decision', () => {
+test('Shortlist reasons use verified identity and reject model backstage language', () => {
+  const song = { artist: 'Prince', title: '1999' };
   assert.equal(
-    resolvedMusicalLeaningsFlag({ host: 'Favour patient dub.', guest: null, promptValue: 'Host: Favour patient dub.' }, false, 'warm vocal and melodic hook'),
-    false,
+    shortlistClauseSelectionReason(song, 'its bright synth pulse gives the sequence a clean lift'),
+    '“1999” by Prince — its bright synth pulse gives the sequence a clean lift.',
   );
   assert.equal(
-    resolvedMusicalLeaningsFlag({ host: 'Favour patient dub.', guest: null, promptValue: 'Host: Favour patient dub.' }, true, 'warm vocal and melodic hook'),
-    true,
+    shortlistClauseSelectionReason(song, 'I chose this candidate from the shortlist for the queue'),
+    '“1999” by Prince — its musical character fits the surrounding sequence naturally.',
   );
-  assert.equal(
-    resolvedMusicalLeaningsFlag({ host: 'Favour patient dub.', guest: null, promptValue: 'Host: Favour patient dub.' }, false, 'warm vocal and melodic hook'),
-    false,
-  );
-  assert.equal(
-    resolvedMusicalLeaningsFlag(null, true, 'warm vocal and melodic hook'),
-    false,
-  );
-  assert.equal(
-    resolvedMusicalLeaningsFlag({ host: 'Favour patient dub.', guest: null, promptValue: 'Host: Favour patient dub.' }, true, null),
-    true,
-  );
-  assert.equal(
-    resolvedMusicalLeaningsFlag({ host: 'Favour patient dub.', guest: null, promptValue: 'Host: Favour patient dub.' }, true, 'energy'),
-    true,
-  );
+  const context = {
+    host: 'Favour patient dub.',
+    guest: { musicalLeanings: 'Warm voices and strong melodies.' },
+  };
+  assert.equal(shortlistLeaningsSource(context, 'patient dub'), 'host');
+  assert.equal(shortlistLeaningsSource(context, 'Warm voices'), 'guest');
+  assert.equal(shortlistLeaningsSource(context, 'invented taste'), null);
 });
 
 test('Shortlist keeps natural claimed Leanings reasons and removes unclaimed ones', () => {
@@ -220,9 +239,9 @@ test('replays a source plan, keeping the picker accumulator as the source of tru
   };
 
   const result = await executeShortlistPlan(tools, seen, [
-    { source: 'energy', args: { energy: 'high' } },
-    { source: 'duplicate', args: {} },
-    { source: 'unavailable', args: {} },
+    { source: 'energy', args: { energy: 'high' }, family: 'context' },
+    { source: 'duplicate', args: {}, family: 'continuity' },
+    { source: 'unavailable', args: {}, family: 'diversity' },
   ]);
 
   assert.equal(result.uniqueCandidates, 2);
@@ -233,6 +252,55 @@ test('replays a source plan, keeping the picker accumulator as the source of tru
     ['duplicate', 'ok', 1, 0],
     ['unavailable', 'unavailable', 0, 0],
   ]);
+});
+
+test('repeated mood passes reuse one library pool but still surface new candidates', async () => {
+  const ctx = buildPickerContext(pickerScope());
+  const pool = Array.from({ length: 5 }, (_, index) => ({
+    id: `mood-${index}`, title: `Song ${index}`, artist: `Artist ${index}`,
+    moods: ['calm'], energy: 'low',
+  }));
+  let reads = 0;
+  const moodPool = cacheSourcePool((mood: string) => {
+    reads++;
+    assert.equal(mood, 'calm');
+    return pool;
+  });
+  const tools = {
+    tracksByMood: {
+      inputSchema: { safeParse: (value: unknown) => ({ success: true, data: value }) },
+      execute: async ({ mood, energy }: { mood: string; energy: string | null }) =>
+        ctx.collect(moodPool(mood).filter((track) => !energy || track.energy === energy), 2),
+    },
+  };
+
+  const result = await executeShortlistPlan(tools, ctx.seen, [
+    { source: 'tracksByMood', args: { mood: 'calm', energy: 'low' }, family: 'context' },
+    { source: 'tracksByMood', args: { mood: 'calm', energy: 'low' }, family: 'context' },
+  ]);
+
+  assert.equal(reads, 1, 'the expensive source query runs only once for this pick');
+  assert.deepEqual(result.sourceRuns.map((run) => run.accepted), [2, 2]);
+  assert.equal(result.uniqueCandidates, 4, 'the second pass still broadens the shortlist');
+  assert.equal(new Set(result.candidates.map((candidate) => candidate.id)).size, 4);
+});
+
+test('source-pool cache is keyed, retains empty results and retries failures', () => {
+  let reads = 0;
+  const pool = cacheSourcePool((key: string) => {
+    reads++;
+    if (key === 'broken') throw new Error('temporary read failure');
+    return key === 'empty' ? [] : [key];
+  });
+
+  assert.deepEqual(pool('empty'), []);
+  assert.deepEqual(pool('empty'), []);
+  assert.deepEqual(pool('low'), ['low']);
+  assert.deepEqual(pool('low'), ['low']);
+  assert.deepEqual(pool('high'), ['high']);
+  assert.throws(() => pool('broken'), /temporary read failure/);
+  assert.throws(() => pool('broken'), /temporary read failure/);
+  assert.equal(reads, 5);
 });
 
 test('records invalid input and source errors without abandoning later sources', async () => {
@@ -248,8 +316,8 @@ test('records invalid input and source errors without abandoning later sources',
   };
 
   const result = await executeShortlistPlan(tools, seen, [
-    { source: 'invalid', args: {} },
-    { source: 'failed', args: {} },
+    { source: 'invalid', args: {}, family: 'context' },
+    { source: 'failed', args: {}, family: 'diversity' },
   ]);
 
   assert.deepEqual(result.sourceRuns.map((run) => [run.status, run.error]), [

@@ -13,7 +13,9 @@ export function MusicSelectionSection({ data, form, setForm, busy, saveSettings,
       llm: {
         trackSelection: form.llm.trackSelection,
         shortlistPasses: form.llm.shortlistPasses,
+        guestMusicalLeanings: form.llm.guestMusicalLeanings,
         requestMatching: form.llm.requestMatching,
+        requestWebResolve: form.llm.requestWebResolve,
         noRepeatWindow: Math.max(0, parseInt(form.llm.noRepeatWindow, 10) || 0),
         artistVarietyWindow: Math.max(0, parseInt(form.llm.artistVarietyWindow, 10) || 0),
         discoverySteps: form.llm.discoverySteps,
@@ -47,10 +49,12 @@ export function MusicSelectionSection({ data, form, setForm, busy, saveSettings,
             onChange={v => setForm(f => ({ ...f, llm: { ...f.llm, trackSelection: v as 'agentic' | 'shortlist' } }))}
           />
           <p className="mt-2 text-[13px] leading-[1.55] text-muted">
-            Both routes use the same library exploration tools and apply the same show rules, recency protections,
-            requests and Musical Leanings. With <strong>Agentic Tools</strong>, the LLM uses those tools to explore
-            the library and makes the final pick. With <strong>Track Shortlist</strong>, the controller explores with
-            those same tools first, builds an eligible shortlist, then asks the LLM to choose from it.
+            Both options follow the same show rules, repeat protection, listener requests and
+            Musical Leanings. Choose <strong>Agentic Tools</strong> if you use a capable model with
+            reliable tool calling and want it to explore the library itself. Choose <strong>Track
+            Shortlist</strong> for smaller or local models, or when you want faster, more predictable
+            picks with less LLM work: SUB/WAVE gathers suitable tracks first and the model makes the
+            final choice.
           </p>
         </div>
         {form.llm.trackSelection === 'agentic' ? (
@@ -72,17 +76,36 @@ export function MusicSelectionSection({ data, form, setForm, busy, saveSettings,
           <div className="field mt-5">
             <Label>Track Shortlist passes</Label>
             <Seg value={String(form.llm.shortlistPasses)} options={[
-              { id: '1', label: '1', title: 'Context only — the narrowest shortlist' },
-              { id: '2', label: '2', title: 'Context and Continuity — no Exploration pass' },
-              { id: '3', label: '3', title: 'Default: Context, Continuity, then Exploration' },
-              { id: '4', label: '4', title: 'Repeats Context after the complete three-lane cycle' },
-              { id: '5', label: '5', title: 'Repeats Context and Continuity for the broadest shortlist' },
+              { id: '1', label: '1', title: 'Quickest, narrowest search' },
+              { id: '2', label: '2', title: 'Adds another suitable discovery source' },
+              { id: '3', label: '3', title: 'Recommended balance of fit and variety' },
+              { id: '4', label: '4', title: 'Searches one more source for a wider choice' },
+              { id: '5', label: '5', title: 'Widest search, with more candidates to compare' },
             ]} onChange={v => setForm(f => ({ ...f, llm: { ...f.llm, shortlistPasses: Number(v) } }))} />
             <p className="mt-2 text-[13px] leading-[1.55] text-muted">
-              Three passes are the default: <strong>Context</strong> grounds the show or journey, <strong>Continuity</strong> follows the track on air, and <strong>Exploration</strong> reaches beyond the familiar. Two passes omit Exploration; one uses Context only, for a deliberately narrow shortlist. Four and five repeat Context then Continuity, widening the candidate set and final DJ selection prompt. This does not change Agentic Segment tools.
+              Each pass gathers candidates from one suitable part of your library. SUB/WAVE balances
+              the show&apos;s mood and genre, continuity with the current track, and wider discovery;
+              strict playlists and sonic journeys stay focused on their own direction. <strong>Three
+              passes is a good starting point.</strong> Use fewer for quicker, narrower shortlists or
+              more for extra variety. This does not add LLM calls&mdash;the model still chooses once
+              from the finished shortlist. 1&ndash;5.
             </p>
           </div>
         )}
+        <div className="field mt-5">
+          <Label>Guest Musical Leanings</Label>
+          <Seg
+            value={form.llm.guestMusicalLeanings ? 'on' : 'off'}
+            options={[
+              { id: 'off', label: 'Off', title: 'Only the on-air DJ’s Musical Leanings can influence selection' },
+              { id: 'on', label: 'On', title: 'An eligible guest may occasionally add a weaker secondary preference' },
+            ]}
+            onChange={v => setForm(f => ({ ...f, llm: { ...f.llm, guestMusicalLeanings: v === 'on' } }))}
+          />
+          <p className="mt-2 text-[13px] leading-[1.55] text-muted">
+            When enabled, an eligible guest&apos;s Musical Leanings can occasionally provide a weaker secondary tie-breaker. Off by default. This never uses a guest&apos;s Soul and never overrides the host, show rules, rotation, safety or the current musical flow.
+          </p>
+        </div>
       </Card>
 
       <Card title="Request matching" sub={form.llm.requestMatching === 'agentic' ? 'Agent-assisted' : 'Direct'}>
@@ -93,6 +116,20 @@ export function MusicSelectionSection({ data, form, setForm, busy, saveSettings,
             { id: 'agentic', label: 'Agent-assisted', title: 'Uses music-search tools for detailed or compound requests' },
           ]} onChange={v => setForm(f => ({ ...f, llm: { ...f.llm, requestMatching: v as 'agentic' | 'direct' } }))} />
           <p className="mt-2 text-[13px] leading-[1.55] text-muted">Direct matching covers the majority of artist, title, genre and simple-mood requests. Agent-assisted matching can interpret more detailed or compound requests, but needs a tool-capable model and may take longer or use more LLM resources.</p>
+          {form.llm.requestMatching === 'agentic' && (
+            <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto] sm:items-center sm:gap-4">
+              <div>
+                <div className="text-[13px] font-bold">Resolve described requests via web</div>
+                <div className="field-hint mt-1 max-w-[440px]">
+                  Lets the DJ look up a described track before matching it to your library. It needs a
+                  web-search provider; otherwise it remains inactive.
+                </div>
+              </div>
+              <Seg value={form.llm.requestWebResolve ? 'on' : 'off'}
+                options={[{ id: 'off', label: 'Off' }, { id: 'on', label: 'On' }]}
+                onChange={v => setForm(f => ({ ...f, llm: { ...f.llm, requestWebResolve: v === 'on' } }))} />
+            </div>
+          )}
         </div>
       </Card>
 
@@ -104,7 +141,7 @@ export function MusicSelectionSection({ data, form, setForm, busy, saveSettings,
       </Card>
 
       <SaveBar note="Music selection applies from the next pick · no mixer restart." busy={busy} onSave={save} saveLabel="Save music selection" errors={fieldErrors}
-        ownedKeys={['llm.trackSelection', 'llm.shortlistPasses', 'llm.requestMatching', 'llm.noRepeatWindow', 'llm.artistVarietyWindow', 'llm.discoverySteps', 'llm.agentTimeoutMs', 'picker']} />
+        ownedKeys={['llm.trackSelection', 'llm.shortlistPasses', 'llm.guestMusicalLeanings', 'llm.requestMatching', 'llm.requestWebResolve', 'llm.noRepeatWindow', 'llm.artistVarietyWindow', 'llm.discoverySteps', 'llm.agentTimeoutMs', 'picker']} />
     </>
   );
 }

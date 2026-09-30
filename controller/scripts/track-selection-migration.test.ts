@@ -27,12 +27,13 @@ test('a retired Candidate Pool install upgrades to Track Shortlist', async () =>
   assert.equal(llm.trackSelection, 'shortlist');
   assert.equal(llm.pickerAgent, false, 'the legacy compatibility flag is preserved');
   assert.equal(llm.segmentRuntime, 'direct', 'the existing direct-segment migration is retained');
-  assert.equal(llm.requestMatching, 'agentic', 'request matching keeps its established independent default');
+  assert.equal(llm.requestMatching, 'direct', 'a legacy pool install keeps direct request matching');
 });
 
 test('an unambiguous explicit setting always wins over the legacy flag', async () => {
   assert.equal((await coldLoad({ pickerAgent: false, trackSelection: 'agentic' })).trackSelection, 'agentic');
   assert.equal((await coldLoad({ pickerAgent: true, trackSelection: 'shortlist' })).trackSelection, 'shortlist');
+  assert.equal((await coldLoad({ pickerAgent: false, requestMatching: 'agentic' })).requestMatching, 'agentic');
 });
 
 test('new and older Agentic Tools installs retain the Agentic default', async () => {

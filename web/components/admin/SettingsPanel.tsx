@@ -543,6 +543,7 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
         pickerAgent: !!v.llm?.pickerAgent,
         trackSelection: v.llm?.trackSelection === 'shortlist' ? 'shortlist' : 'agentic',
         shortlistPasses: typeof v.llm?.shortlistPasses === 'number' ? v.llm.shortlistPasses : 3,
+        guestMusicalLeanings: v.llm?.guestMusicalLeanings === true,
         requestMatching: v.llm?.requestMatching === 'direct' ? 'direct' : 'agentic',
         segmentRuntime: v.llm?.segmentRuntime === 'direct' ? 'direct' : 'agentic',
         // Fallback must track the controller's default (config.ts, 250): a

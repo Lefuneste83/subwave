@@ -176,6 +176,7 @@ export interface LlmForm {
   pickerAgent: boolean;
   trackSelection: 'agentic' | 'shortlist';
   shortlistPasses: number;
+  guestMusicalLeanings: boolean;
   requestMatching: 'agentic' | 'direct';
   segmentRuntime: 'agentic' | 'direct';
   noRepeatWindow: string;

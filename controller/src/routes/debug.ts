@@ -39,7 +39,6 @@ import { BadStatePathError, listStateDir } from '../util/state-tree.js';
 import { buildPickerTools, PICKER_TOOLS } from '../llm/tools.js';
 import { livePickerScope } from '../broadcast/dj-agent.js';
 import { pickerAgent } from '../broadcast/dj-agent/agents.js';
-import { resolveEditorialLeanings } from '../broadcast/dj-agent/schemas.js';
 import { buildShortlist } from '../music/shortlist.js';
 import { djPick } from '../music/dj-pick.js';
 
@@ -114,9 +113,9 @@ router.post('/debug/discovery/compare', requireAdmin, async (_req, res) => {
   try {
     const { scope, activeShow, playlistTracks } = await livePickerScope(queue);
     const current = queue.current?.track ?? null;
-    const editorialLeanings = resolveEditorialLeanings();
     const agentStarted = performance.now();
-    const agent = await pickerAgent.run({ messages: session.windowMessages(), scope, editorialLeanings });
+    const agent = await pickerAgent.run({ messages: session.windowMessages(), scope });
+    const agentElapsedMs = Math.round(performance.now() - agentStarted);
     const shortlistStarted = performance.now();
     const shortlist = await buildShortlist({
       scope,
@@ -124,6 +123,7 @@ router.post('/debug/discovery/compare', requireAdmin, async (_req, res) => {
       discoveryPasses: settings.get().llm?.shortlistPasses ?? 3,
       moods: activeShow?.moods,
       energies: activeShow?.energies,
+      genres: activeShow?.genres ?? scope.genreLock,
     });
     const shortlistSelection = shortlist.candidates.length
       ? await djPick({
@@ -133,7 +133,6 @@ router.post('/debug/discovery/compare', requireAdmin, async (_req, res) => {
           currentTrack: current ? { id: current.id ?? null, title: current.title ?? null, artist: current.artist ?? null, album: current.album ?? null } : null,
           link: 'No link airs for this diagnostic pick.',
         },
-        editorialLeanings,
       })
       : null;
     const compact = (track: any) => track?.id
@@ -143,7 +142,7 @@ router.post('/debug/discovery/compare', requireAdmin, async (_req, res) => {
       current: compact(current),
       agentic: {
         discoveryRounds: settings.get().llm?.discoverySteps ?? 0,
-        elapsedMs: Math.round(performance.now() - agentStarted),
+        elapsedMs: agentElapsedMs,
         selected: compact(agent.extras.seen.get(agent.object?.id)),
         sources: agent.toolCalls.map((call: any, index: number) => ({ round: call.round ?? index + 1, source: call.name || 'unknown' })),
       },
@@ -151,7 +150,7 @@ router.post('/debug/discovery/compare', requireAdmin, async (_req, res) => {
         passes: settings.get().llm?.shortlistPasses ?? 3,
         elapsedMs: Math.round(performance.now() - shortlistStarted),
         selected: compact(shortlistSelection && shortlist.candidates.find((track) => track.id === shortlistSelection.id)),
-        sources: shortlist.sourceRuns.map((run, index) => ({ pass: index + 1, source: run.source, returned: run.returned, accepted: run.accepted })),
+        sources: shortlist.sourceRuns.map((run, index) => ({ pass: index + 1, family: run.family, source: run.source, returned: run.returned, accepted: run.accepted })),
       },
     });
   } catch (err: any) {

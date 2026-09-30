@@ -10,6 +10,7 @@ import { buildPickerTools, type PickerScope } from '../llm/tools.js';
 export type ShortlistSourceCall = {
   source: string;
   args: Record<string, unknown>;
+  family: 'context' | 'continuity' | 'diversity';
 };
 
 export type ShortlistPlanningContext = {
@@ -21,6 +22,7 @@ export type ShortlistPlanningContext = {
   // scope carries strict locks; these soft values are only source arguments.
   moods?: string[] | null;
   energies?: string[] | null;
+  genres?: string[] | null;
   // Mirrors the existing ε-greedy deep-cut nudge. Callers decide the random
   // draw once, outside this deterministic planner.
   explore?: boolean;
@@ -28,65 +30,97 @@ export type ShortlistPlanningContext = {
 
 const ENERGY_VALUES = new Set(['low', 'medium', 'high']);
 
-// A small stable hash spreads otherwise-identical picks across each lane
-// without introducing mutable process state. Current-track ids naturally
-// rotate the exploration mix while keeping each plan reproducible.
-function stableIndex(value: string, size: number): number {
-  if (size < 2) return 0;
-  let hash = 0;
-  for (let i = 0; i < value.length; i += 1) hash = ((hash * 31) + value.charCodeAt(i)) | 0;
-  return Math.abs(hash) % size;
+function firstString(values: string[] | null | undefined): string | null {
+  return values?.find((value): value is string => typeof value === 'string' && value.length > 0) ?? null;
 }
 
-// Cycle context, continuity, and exploration. This keeps a short shortlist
-// from repeatedly favouring the same familiar discovery sources.
+function stableOffset(value: string | null): number {
+  let hash = 0;
+  for (const char of value || '') hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return hash;
+}
+
+function rotated<T>(values: T[], offset: number): T[] {
+  if (!values.length) return [];
+  const start = offset % values.length;
+  return [...values.slice(start), ...values.slice(0, start)];
+}
+
+// Build a bounded mix of musical context, local continuity and catalogue
+// diversity. Search and request-only tools need listener intent, so they do not
+// belong in this generic plan. All candidates still pass through the shared
+// picker registry and its show, recency and policy guards.
 export function planShortlistSources(
   context: ShortlistPlanningContext,
   availableSources: ReadonlySet<string>,
 ): ShortlistSourceCall[] {
   const budget = Math.max(1, Math.min(5, Math.floor(context.discoveryPasses) || 1));
-  const source = (name: string, args: Record<string, unknown> = {}): ShortlistSourceCall | null => {
-    return availableSources.has(name) ? { source: name, args } : null;
+  const lanes: Record<ShortlistSourceCall['family'], ShortlistSourceCall[]> = {
+    context: [], continuity: [], diversity: [],
+  };
+  const add = (
+    family: ShortlistSourceCall['family'],
+    source: string,
+    args: Record<string, unknown> = {},
+  ) => {
+    if (availableSources.has(source)) lanes[family].push({ source, args, family });
   };
 
-  const mood = context.moods?.find((value): value is string => typeof value === 'string' && value.length > 0) ?? null;
+  const mood = firstString(context.moods);
   const energy = context.energies?.find((value): value is 'low' | 'medium' | 'high' => ENERGY_VALUES.has(value)) ?? null;
+  const genre = firstString(context.genres) ?? firstString(context.scope.genreLock);
 
-  const compact = (items: Array<ShortlistSourceCall | null>) => items.filter((item): item is ShortlistSourceCall => item !== null);
-  const contextual = compact([
-    ...(context.scope.playlistLock && context.scope.playlistTracks?.length
-      ? [source('showPlaylistTracks')]
-      : [
-          context.scope.audioWaypoint?.length ? source('tracksTowardJourney') : null,
-          context.scope.playlistTracks?.length ? source('showPlaylistTracks') : null,
-          mood ? source('tracksByMood', { mood, energy }) : energy ? source('tracksByEnergy', { energy }) : null,
-        ]),
-  ]);
-  const continuity = context.currentTrackId ? compact([
-    source('tracksThatSoundLikeThis', { songId: context.currentTrackId }),
-    source('tracksLikeThis', { songId: context.currentTrackId }),
-    source('similarSongs', { songId: context.currentTrackId }),
-  ]) : [];
-  const exploration = context.explore
-    ? compact([source('deepCuts')])
-    : compact([
-        source('deepCuts'),
-        source('recentlyAdded'),
-        source('starredSongs'),
-        source('randomSongs'),
-      ]);
-  const lanes = [contextual, continuity, exploration];
-  if (!lanes.some((lane) => lane.length)) return [];
+  if (context.scope.audioWaypoint?.length) add('context', 'tracksTowardJourney');
+  if (context.scope.playlistTracks?.length) add('context', 'showPlaylistTracks');
+  if (mood) add('context', 'tracksByMood', { mood, energy });
+  else if (energy) add('context', 'tracksByEnergy', { energy });
+  if (genre) add('context', 'songsByGenre', { genre });
 
-  const rotationKey = context.currentTrackId || [mood, energy, context.scope.playlistTracks?.length || 0].join(':');
-  const laneRuns = [0, 0, 0];
-  return Array.from({ length: budget }, (_, pass) => {
-    let laneIndex = pass % lanes.length;
-    while (!lanes[laneIndex].length) laneIndex = (laneIndex + 1) % lanes.length;
-    const lane = lanes[laneIndex];
-    const occurrence = laneRuns[laneIndex]++;
-    return lane[(stableIndex(`${rotationKey}:${laneIndex}`, lane.length) + occurrence) % lane.length];
+  if (context.currentTrackId) {
+    add('continuity', 'tracksThatSoundLikeThis', { songId: context.currentTrackId });
+    add('continuity', 'tracksLikeThis', { songId: context.currentTrackId });
+    add('continuity', 'similarSongs', { songId: context.currentTrackId });
+  }
+
+  // Strict playlists and sonic journeys own the direction, so they do not
+  // spend a pass on an unfocused diversity source.
+  const diversity = (context.scope.playlistLock || context.scope.audioWaypoint?.length
+    ? []
+    : rotated(
+      ['deepCuts', 'starredSongs', 'recentlyAdded', 'randomSongs'],
+      stableOffset(context.currentTrackId),
+    )
+  ).filter((source) => availableSources.has(source));
+  if (context.explore && diversity.includes('deepCuts')) {
+    diversity.splice(diversity.indexOf('deepCuts'), 1);
+    diversity.unshift('deepCuts');
+  }
+  for (const source of diversity) add('diversity', source);
+
+  const calls: ShortlistSourceCall[] = [];
+  const familyOrder: ShortlistSourceCall['family'][] = ['context', 'continuity', 'diversity'];
+  const cycle = () => ({
+    context: [...lanes.context],
+    continuity: [...lanes.continuity],
+    diversity: [...lanes.diversity],
   });
+  let remaining = cycle();
+  while (calls.length < budget && familyOrder.some((family) => remaining[family].length)) {
+    let added = false;
+    for (const family of familyOrder) {
+      const call = remaining[family].shift();
+      if (call) {
+        calls.push(call);
+        added = true;
+      }
+      if (calls.length === budget) break;
+    }
+    if (!added) break;
+    if (!familyOrder.some((family) => remaining[family].length) && calls.length < budget) {
+      remaining = cycle();
+    }
+  }
+  return calls;
 }
 
 export type ShortlistSourceRun = ShortlistSourceCall & {

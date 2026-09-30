@@ -19,7 +19,7 @@ import { isUnreachable, isQuotaOrAuthError, isUpstreamOverloaded, isRateLimited 
 // can't silently lack a field — the `usage: undefined` drift in the Ollama
 // tool-call branch was the kind of bug this prevents. Per-primitive payload
 // (system, messages, toolCalls, response, user, …) goes in `extra`.
-function recordSuccess({ kind, started, via, model, sampling, usage, perf, warnings, extra = {} }: any) {
+function recordSuccess({ kind, started, via, model, sampling, usage, contextPeakInput, perf, warnings, extra = {} }: any) {
   record({
     kind,
     ok: true,
@@ -28,6 +28,10 @@ function recordSuccess({ kind, started, via, model, sampling, usage, perf, warni
     via,
     sampling,
     usage,
+    // For multi-step tool loops this is the largest individual model request,
+    // not the accumulated billable usage. It is the number a server context
+    // window must accommodate.
+    ...(Number.isFinite(contextPeakInput) && contextPeakInput > 0 ? { contextPeakInput } : {}),
     // AI SDK 7 per-step performance stats (perfOf) + provider warnings
     // (warningsOf — the live "provider ignored the reasoning param" tripwire).
     // Optional: absent on results that carry no performance data.
@@ -66,6 +70,7 @@ export interface AttemptResult<T> {
   via: string;
   sampling?: any;
   usage?: any;
+  contextPeakInput?: number;
   // perfOf(result) — aggregated AI SDK step performance for /debug + events.
   perf?: any;
   // warningsOf(result) — provider warnings (e.g. unsupported reasoning param).
@@ -103,7 +108,7 @@ export async function withFailover<T>(
     const started = Date.now();
     try {
       const r = await attempt(leg);
-      recordSuccess({ kind, started, via: `${r.via}:pinned`, model: leg.label, sampling: r.sampling, usage: r.usage, perf: r.perf, warnings: r.warnings, extra: r.extra });
+      recordSuccess({ kind, started, via: `${r.via}:pinned`, model: leg.label, sampling: r.sampling, usage: r.usage, contextPeakInput: r.contextPeakInput, perf: r.perf, warnings: r.warnings, extra: r.extra });
       return r.value;
     } catch (err: any) {
       logFailurePreview(kind, err);
@@ -115,7 +120,7 @@ export async function withFailover<T>(
   const primaryStarted = Date.now();
   try {
     const r = await attempt(primary);
-    recordSuccess({ kind, started: primaryStarted, via: r.via, model: primary.label, sampling: r.sampling, usage: r.usage, perf: r.perf, warnings: r.warnings, extra: r.extra });
+    recordSuccess({ kind, started: primaryStarted, via: r.via, model: primary.label, sampling: r.sampling, usage: r.usage, contextPeakInput: r.contextPeakInput, perf: r.perf, warnings: r.warnings, extra: r.extra });
     return r.value;
   } catch (err: any) {
     const primaryVia = err?.__via || 'ai-sdk';
@@ -135,7 +140,7 @@ export async function withFailover<T>(
     const backupStarted = Date.now();
     try {
       const r = await attempt(backup);
-      recordSuccess({ kind, started: backupStarted, via: r.via, model: backup.label, sampling: r.sampling, usage: r.usage, perf: r.perf, warnings: r.warnings, extra: r.extra });
+      recordSuccess({ kind, started: backupStarted, via: r.via, model: backup.label, sampling: r.sampling, usage: r.usage, contextPeakInput: r.contextPeakInput, perf: r.perf, warnings: r.warnings, extra: r.extra });
       return r.value;
     } catch (err2: any) {
       logFailurePreview(kind, err2);

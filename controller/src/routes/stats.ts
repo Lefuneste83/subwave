@@ -10,6 +10,7 @@ import { ttsCalls, shortlistPicks, summarizeLlm, summarizeTts, summarizeDjLog, s
 import { queue } from '../broadcast/queue.js';
 import { recentRequests } from '../broadcast/request-log.js';
 import { budgetStatus } from '../broadcast/dj-budget.js';
+import { agenticPickerContextWindow, contextWindowByKind, shortlistContextWindow } from '../llm/context-window.js';
 
 export const router = express.Router();
 
@@ -23,6 +24,11 @@ router.get('/stats', requireAdmin, (req, res) => {
     llm.agentTimeoutMs = settings.get().llm?.agentTimeoutMs ?? 45000;
     // Durable per-UTC-day tally, unlike the rings above. enabled:false with no cap.
     llm.budget = budgetStatus();
+    llm.contextWindows = {
+      shortlist: shortlistContextWindow(recentCalls),
+      agenticPicker: agenticPickerContextWindow(recentCalls),
+      byKind: contextWindowByKind(recentCalls),
+    };
 
     res.json({
       t: new Date().toISOString(),

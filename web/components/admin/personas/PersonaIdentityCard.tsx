@@ -160,6 +160,9 @@ export function PersonaIdentityCard({
                 A private, soft tie-breaker for track selection. It applies to every picker, never changes the presenter&apos;s voice, overrides show rules, or goes on air.
                 <span className="ml-2 text-muted">{musicLeanLen} / {MUSIC_LEAN_MAX}</span>
               </div>
+              <div className="field-hint mt-1.5">
+                <strong>Agentic Tools:</strong> setting Musical Leanings adds a second LLM review to each pick. In testing with a local 8B model this added around 4 seconds; actual time varies with the model and hardware.
+              </div>
             </div>
         </div>
       </div>

@@ -52,6 +52,8 @@ interface ToolResultLike {
 export interface StepLike {
   toolCalls?: ToolCallLike[];
   toolResults?: ToolResultLike[];
+  usage?: TokenUsage;
+  totalUsage?: TokenUsage;
 }
 
 // The flattened discovery-tool entry surfaced to /debug.

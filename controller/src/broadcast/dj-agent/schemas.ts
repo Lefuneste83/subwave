@@ -28,7 +28,11 @@ export const PICK_SCHEMA = z.object({
   // the run was discarded, and the slot fell to the pool picker. One shared
   // wording, in util/pick-seed.ts; don't inline a second copy here.
   id: z.string().describe(`the exact song id returned by one of the discovery tools — never invent or compose ids. ${SEED_NOT_A_PICK_CLAUSE}`),
-  reason: z.string().describe('internal scratchpad only — max 12 words, never shown to the listener; do not justify, just note what makes THIS pick a fresh step (a shift in energy/era/texture, or an artist genuinely new to the rotation), not a vibe label you would recycle pick after pick (e.g. "warmer, driving energy", never a repeated "mellow reflective step"). Only call a pick a "new artist" when it has no "artist_play_count"/"artist_last_played_days_ago"; "unaired" means this song is new to the station, not that its artist is. If the artist shows recent or frequent plays, describe the real reason instead (energy shift, texture, flow)'),
+  reason: z.string().describe('internal scratchpad only — max 12 words, never shown to the listener; do not justify, just note what makes THIS pick a fresh step (a shift in energy/era/texture, or an artist genuinely new to the rotation), not a vibe label you would recycle pick after pick (e.g. "warmer, driving energy", never a repeated "mellow reflective step"). Default to actual flow; never mention Musical Leanings here. Only call a pick a "new artist" when it has no "artist_play_count"/"artist_last_played_days_ago"; "unaired" means this song is new to the station, not that its artist is. If the artist shows recent or frequent plays, describe the real reason instead (energy shift, texture, flow)'),
+  // The standard Agentic discovery schema omits these diagnostic fields. They
+  // remain in the base contract for callers that explicitly request them.
+  usedMusicalLeanings: z.boolean().describe('private diagnostic decision — always include this. Default false with leaningsTieBreak null. Set true ONLY when two or more eligible tracks already fit the flow and supplied Musical Leanings genuinely settle that close choice; compatibility alone is not enough. Leanings never override show rules, rotation, safety, or musical flow.'),
+  leaningsTieBreak: z.string().nullable().describe('always include this. Set null when usedMusicalLeanings is false. When true, give the short specific trait of the chosen discovered candidate that directly matches the supplied Musical Leanings (for example "warm vocal and melodic hook"). Do not use generic flow facts such as energy, pace, key, or club feel as Leanings evidence.'),
   // Transition effects (only honoured when the system prompt offers them — persona djMode, see settings.effectsActive).
   // One-line pointer only: the full coaching is dj.effectsGuidance() in the
   // system prompt. This description used to repeat all of it, so every agent
@@ -60,6 +64,96 @@ export function pickSchema() {
   // tool args, text salvage) — the wire schema stays identical to the plain
   // object's, all fields still required. See core/pure.ts.
   return modelTolerant(pickSchemaBase());
+}
+
+// The Agentic tool loop is discovery only when a presenter has Musical
+// Leanings. Its final choice is made later from the candidates it actually
+// surfaced, so this contract must not ask the discovery model to make or
+// explain a Leanings provenance claim.
+export function agenticDiscoverySchema() {
+  return modelTolerant(pickSchemaBase().omit({
+    usedMusicalLeanings: true,
+    leaningsTieBreak: true,
+  }));
+}
+
+export type AgenticLeaningsReviewContext = {
+  currentTrack?: {
+    id?: string | null;
+    title?: string | null;
+    artist?: string | null;
+    album?: string | null;
+    bpm?: number | null;
+    key?: string | null;
+    pace?: number | null;
+  } | null;
+  journeyActive?: boolean;
+  link?: string;
+  recentTransitions?: string[];
+  djName?: string | null;
+  // Shortlist supplies provenance-separated options here while retaining the
+  // closed combined leaningsOptions list used by the shared schema validator.
+  // Agentic callers omit these fields, leaving its locked prompt unchanged.
+  hostLeaningsOptions?: string[];
+  guestLeaningsOptions?: string[];
+};
+
+// The full effect vocabulary and suitability rules already live in the system
+// prompt. This small latest-turn reminder gives one-shot Shortlist decisions
+// the same anti-monoculture signal as the Agentic and Pool paths without
+// repeating that expensive guidance. Presence of the array (even empty) is the
+// effects-active flag; when effects are off, the prompt remains unchanged.
+export function transitionChoiceNudge(recentTransitions: string[] | undefined): string {
+  return Array.isArray(recentTransitions)
+    ? ' The context recentTransitions list is oldest first; the station strips a third identical effect, so vary deliberately. Never use the same transition three picks running, and if the last choice used an effect, lean "normal" now unless this moment clearly calls for another.'
+    : '';
+}
+
+export const NO_AGENTIC_LEANINGS_INFLUENCE = 'NO_LEANINGS_INFLUENCE';
+
+export function agenticLeaningsReviewSchema(ids: string[], leaningsOptions: string[], baselineId: string) {
+  const choices = [...new Set(ids)];
+  if (choices.length < 2) throw new Error('cannot review an Agentic pick without multiple candidates');
+  if (!choices.includes(baselineId)) throw new Error('Agentic Leanings baseline must be one of the reviewed candidates');
+  if (leaningsOptions.length < 1) throw new Error('cannot review an Agentic pick without exact Leanings options');
+  return modelTolerant(z.object({
+    // Deliberately strings rather than dynamic enums. llama.cpp showed a strong
+    // first-enum-value bias: baseline/sentinel at position zero produced an
+    // artificial 100% "keep" rate, while candidate ids at position zero drove
+    // the previous independent-rerank bias. The controller still validates
+    // both fields against these closed lists before a replacement can count.
+    selectedId: z.string().trim().min(1).max(160).describe(`copy the final exact id from baseline or challengers. Choose a close challenger with a supported Leanings match; otherwise use ${baselineId}. Never invent an id.`),
+    leaningsBasis: z.string().trim().min(1).max(100).describe(`write ${NO_AGENTIC_LEANINGS_INFLUENCE} when selectedId is ${baselineId}. When changing selectedId, copy exactly one supplied leaningsOptions phrase that materially caused that change; never invent or paraphrase evidence.`),
+    musicalReason: z.string().trim().min(16).max(180).describe('one natural, specific clause about the selected track, beginning with "its" or "it". Describe sound, texture, melody, rhythm, production or songwriting like a music lover, not a metadata report. Do not name the DJ, artist, title, preferences, Leanings, baseline, challenger, preliminary choice, current flow, queue position, BPM, key, energy level or mood tag; the controller adds verified identity and evidence.'),
+    transition: pickSchemaBase().shape.transition,
+  }), { objectFallbacks: { leaningsBasis: NO_AGENTIC_LEANINGS_INFLUENCE, musicalReason: '[musical reason unavailable]' } });
+}
+
+export function agenticLeaningsReviewSystem(): string {
+  return 'You are performing one private music-editor review. The controller has already selected an eligible baseline without Musical Leanings. First look for a supplied challenger that is a verified close ordinary-flow choice and has a controller-supported Leanings match; that is a genuine tie-break and should replace the baseline. Use a possible-flow match only when its musical fit is convincingly comparable. Keep the baseline when no such challenger exists. Never invent tracks, preference evidence or facts beyond the supplied data.';
+}
+
+export function agenticLeaningsReviewPrompt({
+  baseline,
+  challengers,
+  leaningsOptions,
+  context = {},
+}: {
+  baseline: Record<string, unknown>;
+  challengers: Array<Record<string, unknown>>;
+  leaningsOptions: string[];
+  context?: AgenticLeaningsReviewContext;
+}): string {
+  return JSON.stringify({
+    context,
+    baseline,
+    challengers,
+    leaningsOptions,
+  }, null, 2)
+    + '\n\nUse this decision order: (1) scan every challenger for flowCloseness="close" plus a non-empty leaningsMatches; if present, choose the strongest such challenger and copy its matching phrase into leaningsBasis. (2) Otherwise consider a flowCloseness="possible" match only when its musical continuation is genuinely comparable. (3) Only when neither exists, keep the baseline and write leaningsBasis=NO_LEANINGS_INFLUENCE. Do not independently rerank tracks that have no supported match.'
+    + '\n\nflowCloseness is a Leanings-blind controller comparison using energy, mood, tempo, key and genre. A candidate’s leaningsMatches contains exact active-profile phrases supported by its genre/mood tags. The controller independently verifies both fields, so copy ids and phrases exactly.'
+    + '\n\nAlways write musicalReason for selectedId as one natural, specific musical clause of roughly 12–28 words, beginning with "its" or "it". Write like a music lover: describe an audible texture, melody, rhythm, production choice or songwriting quality. Do not repeat the DJ, artist or title. Do not mention preferences, Leanings, baseline, challenger, preliminary choice, current flow, queue position, BPM, key, energy levels or mood tags. Avoid stock evaluator wording such as "complements the current flow". The controller adds the verified names and exact evidence. Set transition for selectedId.'
+    + transitionChoiceNudge(context.recentTransitions);
 }
 
 // Resolved per run, like pickSchema: the intro length follows the on-air
@@ -255,7 +349,7 @@ export function pickSystem(
   // over-promising is the more expensive way to be wrong.
   const rounds = dj.promptDiscoverySteps();
   const findingCandidates = nativeShortlist
-    ? 'The controller has already built a Track Shortlist under the station guards. Choose exactly one supplied id; do not request or invent candidates.'
+      ? 'The controller has already built a Track Shortlist under the station guards. Choose exactly one supplied id; do not request or invent candidates.'
     : rounds > 1
       ? instruction('picker', 'finding-candidates-multi', { rounds })
       : instruction('picker', 'finding-candidates');

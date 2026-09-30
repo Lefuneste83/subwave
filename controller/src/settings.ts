@@ -956,15 +956,11 @@ export async function load() {
       // llama.cpp fell back to its own 1.0 default with nothing in the logs.
       repeatPenalty: clampRepeatPenalty(stored.llm?.repeatPenalty, DEFAULTS.llm.repeatPenalty),
       pickerAgent:
-        typeof stored.llm?.pickerAgent === 'boolean'
-          ? stored.llm.pickerAgent
-          : DEFAULTS.llm.pickerAgent,
-      // A new explicit opt-in. Older settings files and malformed values remain
-      // off, so guests never become an invisible source of editorial influence.
-      guestMusicalLeanings:
-        typeof stored.llm?.guestMusicalLeanings === 'boolean'
-          ? stored.llm.guestMusicalLeanings
-          : DEFAULTS.llm.guestMusicalLeanings,
+        stored.llm?.trackSelection !== undefined
+          ? stored.llm.trackSelection !== 'shortlist'
+          : typeof stored.llm?.pickerAgent === 'boolean'
+            ? stored.llm.pickerAgent
+            : DEFAULTS.llm.pickerAgent,
       trackSelection:
         stored.llm?.trackSelection === 'shortlist'
           ? 'shortlist'
@@ -976,8 +972,16 @@ export async function load() {
             ? 'shortlist'
             : DEFAULTS.llm.trackSelection,
       shortlistPasses: clampShortlistPasses(stored.llm?.shortlistPasses, DEFAULTS.llm.shortlistPasses),
+      // A new explicit opt-in. Older settings files and malformed values remain
+      // off, so guests never become an invisible source of editorial influence.
+      guestMusicalLeanings:
+        typeof stored.llm?.guestMusicalLeanings === 'boolean'
+          ? stored.llm.guestMusicalLeanings
+          : DEFAULTS.llm.guestMusicalLeanings,
       requestMatching:
-        stored.llm?.requestMatching === 'direct' ? 'direct' : DEFAULTS.llm.requestMatching,
+        stored.llm?.requestMatching === 'direct' || (stored.llm?.requestMatching === undefined && stored.llm?.pickerAgent === false)
+          ? 'direct'
+          : DEFAULTS.llm.requestMatching,
       segmentRuntime:
         stored.llm?.segmentRuntime === 'direct' || (stored.llm?.segmentRuntime === undefined && stored.llm?.pickerAgent === false)
           ? 'direct'
@@ -1960,15 +1964,16 @@ export async function update(patch) {
     }
     if (l.trackSelection !== undefined) {
       next.llm.trackSelection = l.trackSelection === 'shortlist' ? 'shortlist' : 'agentic';
+      next.llm.pickerAgent = next.llm.trackSelection === 'agentic';
     }
     if (l.shortlistPasses !== undefined) {
       next.llm.shortlistPasses = clampShortlistPasses(Number(l.shortlistPasses), next.llm.shortlistPasses);
     }
-    if (l.requestMatching !== undefined) {
-      next.llm.requestMatching = l.requestMatching === 'direct' ? 'direct' : 'agentic';
-    }
     if (l.guestMusicalLeanings !== undefined) {
       next.llm.guestMusicalLeanings = !!l.guestMusicalLeanings;
+    }
+    if (l.requestMatching !== undefined) {
+      next.llm.requestMatching = l.requestMatching === 'direct' ? 'direct' : 'agentic';
     }
     if (l.segmentRuntime !== undefined) {
       next.llm.segmentRuntime = l.segmentRuntime === 'direct' ? 'direct' : 'agentic';

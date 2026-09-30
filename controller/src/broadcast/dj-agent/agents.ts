@@ -5,7 +5,7 @@
 import * as settings from '../../settings.js';
 import { defineAgent } from '../../llm/agent.js';
 import { buildPickerTools, type PickerScope } from '../../llm/tools.js';
-import { pickSchema, pickSystem, requestSchema, requestSystem, type EditorialLeaningsContext } from './schemas.js';
+import { agenticDiscoverySchema, pickSystem, requestSchema, requestSystem } from './schemas.js';
 import { agentDeadline } from './breaker.js';
 import type { Persona } from '../queue/types.js';
 
@@ -19,9 +19,6 @@ export interface PickerRunArgs {
   // Forecast air time for the pick's link, prompt only — not a discovery
   // constraint, so it stays outside the scope.
   showAt?: Date | null;
-  // Captured once by the caller and reused by every corrective re-pick in the
-  // same selection cycle. See resolveEditorialLeanings().
-  editorialLeanings?: EditorialLeaningsContext | null;
 }
 
 export interface RequestRunArgs {
@@ -40,7 +37,7 @@ export const pickerAgent = defineAgent<PickerRunArgs, PickerExtras>({
   kind: 'djAgentPick',
   // Function form: resolved per run so the transition coaching follows the
   // on-air persona's djMode and the say length its scriptLength.
-  schema: () => pickSchema(),
+  schema: () => agenticDiscoverySchema(),
   // Advisory floor only — on the done-tool path the cap is DERIVED per provider
   // (gatedMaxStepsFor in provider/capabilities.ts), so this reaches the model
   // only as the Math.max floor on the native leg.
@@ -49,7 +46,10 @@ export const pickerAgent = defineAgent<PickerRunArgs, PickerExtras>({
   // since a caller's pinned step cap can be load-bearing.
   providerDiscoveryBudget: true,
   timeoutMs: agentDeadline,
-  buildSystem: ({ showAt, scope, editorialLeanings }) => pickSystem(showAt ?? null, !!scope?.playlistTracks?.length, false, editorialLeanings ?? null),
+  // Discovery deliberately has no Musical Leanings. They are applied exactly
+  // once by the constrained final selector after this tool loop has surfaced
+  // its real candidate set.
+  buildSystem: ({ showAt, scope }) => pickSystem(showAt ?? null, !!scope?.playlistTracks?.length, false, { host: null, guest: null, promptValue: null }),
   buildTools: ({ scope }) => {
     const { tools, seen } = buildPickerTools(scope);
     return { tools, extras: { seen } };
