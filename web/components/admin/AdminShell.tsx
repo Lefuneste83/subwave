@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import type { ComponentType, CSSProperties, ReactNode } from 'react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { AnimatePresence, m } from 'motion/react';
 import { useDynamicStyle } from '../../hooks/useDynamicStyle';
 import {
@@ -102,7 +102,7 @@ import {
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import { DiscMark } from '../../lib/discMark';
-import { fmtStationDateTime } from '../../lib/format';
+import { fmtClock, fmtStationDateTime } from '../../lib/format';
 import { animate as motionAnimate } from 'motion/react';
 
 type NavIcon = ComponentType<{
@@ -812,23 +812,80 @@ function TopBar({ pathname }: { pathname: string | null }) {
 // plain client-side setInterval + Date.now(), so the faster tick costs no
 // extra network traffic at all — the timezone/locale still ride on
 // useStationFeed's existing 5s poll, unrelated to this timer.
+//
+// Layout: the clock is an in-flow flex item between the breadcrumb and the
+// right-hand cluster, not an overlay. `flex-1 min-w-0` lets it take only the
+// space those two leave over, so it can never paint on top of either of them
+// (an absolute overlay centred on the whole bar did, at tablet width with the
+// sidebar open). Whether it shows is decided by the width of THAT slot, not
+// the viewport: the sidebar, a long breadcrumb and the listener count all eat
+// into it, and a viewport breakpoint can see none of them. Measured tiers:
+// full date + time, then time only, then nothing.
+//
+// Until the first poll delivers the station timezone the slot shows a neutral
+// placeholder rather than the browser's local time, which would be a
+// different — wrong — clock for any operator outside the station's zone.
+const CLOCK_PLACEHOLDER = '--:--:--';
+const CLOCK_TEXT_CLASS = 'text-[13px] font-bold whitespace-nowrap tabular-nums sm:text-base';
+
+type ClockFit = 'full' | 'short' | 'none';
+
 function StationClock({ tz, locale }: { tz: string | null; locale: Parameters<typeof fmtStationDateTime>[2] }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1_000);
     return () => clearInterval(id);
   }, []);
-  // Absolutely centered on the bar as a whole (not just the gap between the
-  // left/right clusters) — the header is `sticky`, which is itself a
-  // positioning context, so this needs no extra `relative` wrapper. Held back
-  // to `md:` (not `sm:`, unlike the rest of this bar) so it never overlaps the
-  // breadcrumb or the right-hand cluster on a narrower/tablet width; it simply
-  // isn't shown below that, same as it would be with no room for it at all.
+
+  const ready = !!tz;
+  const full = ready ? fmtStationDateTime(now, tz, locale) : CLOCK_PLACEHOLDER;
+  const short = ready ? fmtClock(now, tz, locale) : CLOCK_PLACEHOLDER;
+
+  const slotRef = useRef<HTMLSpanElement>(null);
+  const fullRef = useRef<HTMLSpanElement>(null);
+  const shortRef = useRef<HTMLSpanElement>(null);
+  const [fit, setFit] = useState<ClockFit>('none');
+
+  useLayoutEffect(() => {
+    const slot = slotRef.current;
+    if (!slot) return;
+    const measure = () => {
+      const avail = slot.clientWidth;
+      const fullW = fullRef.current?.offsetWidth ?? Infinity;
+      const shortW = shortRef.current?.offsetWidth ?? Infinity;
+      setFit(fullW <= avail ? 'full' : shortW <= avail ? 'short' : 'none');
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    // Observe the slot (sidebar toggle, window resize, neighbours growing)
+    // AND the two measuring copies (the text itself changing width — a new
+    // weekday, a font finishing loading).
+    const ro = new ResizeObserver(measure);
+    ro.observe(slot);
+    if (fullRef.current) ro.observe(fullRef.current);
+    if (shortRef.current) ro.observe(shortRef.current);
+    return () => ro.disconnect();
+  }, []);
+
+  const shown = fit === 'full' ? full : fit === 'short' ? short : null;
+
   return (
-    <span className="pointer-events-none absolute inset-0 hidden items-center justify-center md:flex">
-      <span className="pointer-events-auto text-[13px] font-bold whitespace-nowrap text-ink sm:text-base">
-        {fmtStationDateTime(now, tz, locale)}
+    <span ref={slotRef} className="relative flex min-w-0 flex-1 items-center justify-center overflow-hidden">
+      {/* Invisible, out-of-flow copies, measured to decide which tier fits. */}
+      <span ref={fullRef} aria-hidden="true" className={`invisible absolute top-0 left-0 ${CLOCK_TEXT_CLASS}`}>
+        {full}
       </span>
+      <span ref={shortRef} aria-hidden="true" className={`invisible absolute top-0 left-0 ${CLOCK_TEXT_CLASS}`}>
+        {short}
+      </span>
+      {shown != null && (
+        <span
+          className={`${CLOCK_TEXT_CLASS} ${ready ? 'text-ink' : 'text-muted'}`}
+          title={ready ? `Station time (${tz})` : 'Waiting for the station timezone'}
+        >
+          {shown}
+        </span>
+      )}
     </span>
   );
 }
