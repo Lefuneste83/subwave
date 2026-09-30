@@ -74,7 +74,7 @@ function ThemePreview({ tokens, mode }: { tokens: Record<string, string>; mode: 
     <div
       ref={ref}
       data-theme={mode}
-      className="grid gap-2 border border-line bg-bg bg-cover bg-center bg-no-repeat p-3 text-ink [background-image:var(--bg-image,none)]"
+      className="grid gap-2 border border-line bg-bg [background-image:var(--bg-image,none)] bg-cover bg-center bg-no-repeat p-3 text-ink"
     >
       <div className="flex items-baseline justify-between">
         <span className="font-display text-[22px] leading-none">Aa Now Playing</span>
