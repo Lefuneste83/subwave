@@ -105,6 +105,32 @@ export interface ConnectionsState {
   /** What the icecast render trusted (#1613). Rides the connections response
    *  so the hint cannot disagree with the rows it is explaining. */
   trustedProxies: TrustedProxyState;
+  /** Whether the Country column's GeoIP link can run. Absent on an older
+   *  controller, in which case no hint is shown. */
+  geoip?: GeoipState;
+}
+
+export interface GeoipState {
+  source: 'env' | 'setting' | 'none';
+  path: string;
+  ok: boolean;
+  error?: string;
+}
+
+// Why some Country cells are blank, said only when some are. Rows get a
+// country from that IP's player beacon or from the GeoIP database; players
+// that never load the page (VLC, Sonos, hardware) depend on the database.
+export function geoipHint(
+  s: GeoipState | undefined,
+  rows: { country?: string }[] | undefined,
+): string | null {
+  if (!s || s.ok) return null;
+  if (!rows?.some(r => !r.country)) return null;
+  if (s.source === 'none') {
+    return 'No country for some listeners: no GeoIP database is set, so only listeners who opened the web player get one. Set Settings → Danger zone → Listener country → GeoIP database.';
+  }
+  const where = s.source === 'env' ? 'GEOIP_DB_PATH' : 'the GeoIP database setting';
+  return `No country for some listeners: can’t open ${s.path} (${s.error || 'unreadable'}), set in ${where}. Use the path as the controller container sees it (e.g. /var/sub-wave/…) and make sure the file is readable; it is retried every minute.`;
 }
 
 // The Listeners table shows the connecting peer whenever no proxy is trusted,

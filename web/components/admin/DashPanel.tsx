@@ -68,6 +68,7 @@ import {
   sortConnections,
   countryFlag,
   countryTitle,
+  geoipHint,
   trustedProxyHint,
 } from './dash/types';
 import {
@@ -138,6 +139,7 @@ export default function DashPanel() {
   const err = statusQuery.error ? errorMessage(statusQuery.error) : null;
   const conns = connectionsQuery.data ?? null;
   const proxyHint = trustedProxyHint(conns?.trustedProxies);
+  const countryHint = geoipHint(conns?.geoip, conns?.connections);
   const connErr = connectionsQuery.error ? errorMessage(connectionsQuery.error) : null;
   const stats = statsQuery.data ?? null;
   const requests = requestsQuery.data ?? null;
@@ -746,6 +748,11 @@ export default function DashPanel() {
             >
               reverse-proxy guide
             </a>
+          </div>
+        ) : null}
+        {!connErr && conns && countryHint ? (
+          <div className="mb-2 border-l-2 border-separator-strong pl-2 text-[11px] text-muted">
+            {countryHint}
           </div>
         ) : null}
         {connErr ? (
