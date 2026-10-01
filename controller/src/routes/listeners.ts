@@ -12,7 +12,7 @@ import {
 import { currentTrustedProxies } from '../broadcast/trusted-proxies.js';
 import { resolveConnectionCountry } from '../broadcast/listener-country.js';
 import { beaconCountryFor } from '../broadcast/beacon-countries.js';
-import { lookupCountry } from '../broadcast/geoip.js';
+import { lookupCountry, geoipStatus } from '../broadcast/geoip.js';
 
 export const router = express.Router();
 
@@ -60,6 +60,9 @@ router.get('/listeners/connections', requireAdmin, async (_req, res) => {
       count: connections.length,
       connections,
       trustedProxies: currentTrustedProxies(),
+      // Whether the Country column's database link can run, so blank cells
+      // explain themselves. Advisory, like trustedProxies.
+      geoip: geoipStatus(),
     });
   } catch (err: any) {
     res.status(502).json({ error: err.message });
