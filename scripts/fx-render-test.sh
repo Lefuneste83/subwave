@@ -13,6 +13,9 @@
 #       Phase 1 — render the a→b transition with the production envelope logic
 #       (mirrored from radio.liq) and print an RMS-over-time table. Default
 #       renders every variant.
+#   scripts/fx-render-test.sh xchain
+#       Regression check — five tracks with distinct cross stamps; fail unless
+#       every transition buffers the outgoing track's own stamp (2.4.5 lag).
 #   scripts/fx-render-test.sh loopcheck
 #       Regression check — fail if Loop's capture-pass level differs from the
 #       plain transition by more than 1 dB on deterministic pink noise.
@@ -602,10 +605,77 @@ LIQ
   echo "XDUR PASS — the outgoing track owns its stamped end-of-track buffer"
 }
 
+xchain() {
+  # Do cross's buffers follow each track's OWN stamp along a chain? Two tracks
+  # (xdur) cannot see it: the 2.4.5 lag only shows from the third transition on,
+  # where each tail used to be sized by the stamp of the track two back. Five
+  # tones with distinct stamps run through the OLD wiring (raw
+  # liq_cross_duration) and the NEW one (cross_stamps + strip_cross_stamps,
+  # lifted verbatim from radio.liq so the harness cannot drift from the mixer).
+  # PASS = every new-mode transition buffers its outgoing stamp on both sides.
+  local f
+  for f in 1 2 3 4 5; do
+    [ -f "$WORK/x$f.wav" ] || ffmpeg -v error -y -f lavfi -i "sine=frequency=$((220 + f * 110)):duration=30" -af volume=-12dB -ar 44100 -ac 2 "$WORK/x$f.wav"
+  done
+  awk '/^cross_prev_end = ref/{on=1} /^# BUFFER SIZING/{on=0} on' "$HERE/../liquidsoap/radio.liq" > "$WORK/xchain-stamps.liq"
+  grep -q "def strip_cross_stamps" "$WORK/xchain-stamps.liq" \
+    || { echo "XCHAIN FAIL — could not lift cross_stamps/strip_cross_stamps out of radio.liq"; return 1; }
+  cat > "$WORK/xchain.liq" <<'LIQ'
+settings.log.stdout := true
+settings.log.level := 3
+crossfade_duration = ref(5.0)
+mode = environment.get(default="new", "MODE")
+q = request.queue(id="q")
+list.iter(fun (p) -> ignore(q.push(request.create(p))), [
+  'annotate:title="x1",liq_cross_duration="4":/work/x1.wav',
+  'annotate:title="x2",liq_cross_duration="9":/work/x2.wav',
+  'annotate:title="x3",liq_cross_duration="3":/work/x3.wav',
+  'annotate:title="x4",liq_cross_duration="7":/work/x4.wav',
+  'annotate:title="x5",liq_cross_duration="6":/work/x5.wav'
+])
+%include "/work/xchain-stamps.liq"
+def t(a, b) =
+  key = if mode == "new" then "liq_cross_end_duration" else "liq_cross_duration" end
+  stamp = float_of_string(default=crossfade_duration(), a.metadata[key])
+  ra = source.remaining(a.source)
+  rb = source.remaining(b.source)
+  if b.metadata["title"] != "" then
+    log("XCHAIN: #{a.metadata['title']} -> #{b.metadata['title']} stamp=#{stamp} a_buf=#{ra} b_buf=#{rb}")
+  end
+  d = if mode == "new" then min(ra, rb) else stamp end
+  out = add(normalize=false, [fade.out(duration=d, initial_metadata=a.metadata, a.source),
+                              fade.in(duration=d, initial_metadata=b.metadata, b.source)])
+  if mode == "new" then strip_cross_stamps(out) else out end
+end
+music = if mode == "new" then metadata.map(update=true, strip=true, cross_stamps, q) else q end
+music = cross(duration=crossfade_duration(), persist_override=true, t, music)
+output.file(%wav, fallible=true, "/work/xchain-#{mode}.wav", music)
+clock.assign_new(sync="none", [music])
+thread.run(delay=25., fun() -> shutdown())
+LIQ
+  local m log bad=0
+  for m in old new; do
+    log=$(liq xchain.liq -e MODE=$m)
+    echo "== $m"
+    echo "$log" | grep -E "XCHAIN:|rror" || true
+    if [ "$m" = new ]; then
+      # Buffers sit one 0.02 s frame under the stamp at most.
+      echo "$log" | grep "XCHAIN:" | awk '{
+        for (i = 1; i <= NF; i++) { split($i, kv, "="); v[kv[1]] = kv[2] }
+        if (v["a_buf"] < v["stamp"] - 0.05 || v["a_buf"] > v["stamp"] + 0.05 || v["b_buf"] < v["stamp"] - 0.05 || v["b_buf"] > v["stamp"] + 0.05) bad++
+        n++
+      } END { exit !(n == 4 && bad == 0) }' || bad=1
+    fi
+  done
+  [ "$bad" = 0 ] || { echo "XCHAIN FAIL — a transition did not buffer its outgoing track's own stamp"; return 1; }
+  echo "XCHAIN PASS — every transition buffers its outgoing stamp on both sides"
+}
+
 case "${1:-}" in
   probe)  probe ;;
   render) shift; render "$@" ;;
   loopcheck) loopcheck ;;
   xdur)   xdur ;;
-  *) echo "usage: $0 probe | render <a-audio> <b-audio> [dry|sweep|washout|both|blend|dissolve|chop|loop|all] | loopcheck | xdur"; exit 2 ;;
+  xchain) xchain ;;
+  *) echo "usage: $0 probe | render <a-audio> <b-audio> [dry|sweep|washout|both|blend|dissolve|chop|loop|all] | loopcheck | xdur | xchain"; exit 2 ;;
 esac
