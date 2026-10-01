@@ -102,3 +102,43 @@ test('the cache is capped and evicts the least recently beaconed IP', () => {
   assert.equal(beaconCountryFor('10.0.0.1', BEACON_COUNTRY_MAX + 2), undefined);
   assert.equal(beaconCountryFor('192.0.2.1', BEACON_COUNTRY_MAX + 2), 'IT');
 });
+
+// ---------------------------------------------------------------------------
+// GeoIP status for the Listeners card, and retrying a failed open
+// ---------------------------------------------------------------------------
+
+const { geoipStatus, lookupCountry, resetGeoipCache, FAILED_OPEN_RETRY_MS } =
+  await import('../src/broadcast/geoip.js');
+const settings = await import('../src/settings.js');
+const { writeFileSync } = await import('node:fs');
+
+test('no path configured reports source none', async () => {
+  await settings.update({ stream: { geoipDbPath: '' } });
+  resetGeoipCache();
+  assert.deepEqual(geoipStatus(), { source: 'none', path: '', ok: false });
+});
+
+test('an unreadable path reports the reason, and is retried after the window', async () => {
+  const p = path.join(process.env.STATE_DIR!, 'geo', 'country.mmdb');
+  await settings.update({ stream: { geoipDbPath: p } });
+  resetGeoipCache();
+  const t0 = 5_000_000;
+  const missing = geoipStatus(t0);
+  assert.equal(missing.source, 'setting');
+  assert.equal(missing.path, p);
+  assert.equal(missing.ok, false);
+  assert.equal(missing.error, 'ENOENT');
+
+  // The file appears (here: junk, so the open still fails, with a new reason).
+  const { mkdirSync } = await import('node:fs');
+  mkdirSync(path.dirname(p), { recursive: true });
+  writeFileSync(p, 'not a database');
+  assert.equal(geoipStatus(t0 + 1000).error, 'ENOENT', 'a failure is cached inside the window');
+  const retried = geoipStatus(t0 + FAILED_OPEN_RETRY_MS);
+  assert.equal(retried.ok, false);
+  assert.notEqual(retried.error, 'ENOENT', 'after the window the file is opened again');
+  assert.equal(lookupCountry('203.0.113.9'), undefined, 'and a lookup still fails open');
+
+  await settings.update({ stream: { geoipDbPath: '' } });
+  resetGeoipCache();
+});
