@@ -66,6 +66,8 @@ import {
   SEGMENTS,
   maskIp,
   sortConnections,
+  countryFlag,
+  countryTitle,
   trustedProxyHint,
 } from './dash/types';
 import {
@@ -772,7 +774,14 @@ export default function DashPanel() {
                     onSort={setSort}
                     className={STICKY_TH + ' pr-3'}
                   />
-                  {/* Mount is dropped on a phone; the other three fit 390px. */}
+                  <SortableTh
+                    label="Country"
+                    col="country"
+                    sort={sort}
+                    onSort={setSort}
+                    className={STICKY_TH + ' pr-3'}
+                  />
+                  {/* Mount is dropped on a phone; the other four fit 390px. */}
                   <SortableTh
                     label="Mount"
                     col="mount"
@@ -805,6 +814,16 @@ export default function DashPanel() {
                   >
                     <td className="py-1.5 pr-3 font-mono whitespace-nowrap" title={c.ip}>
                       {revealIps ? c.ip || '—' : maskIp(c.ip)}
+                    </td>
+                    <td className="py-1.5 pr-3 whitespace-nowrap" title={countryTitle(c)}>
+                      {c.country ? (
+                        <>
+                          <span aria-hidden="true">{countryFlag(c.country)}</span>{' '}
+                          <span className="font-mono">{c.country}</span>
+                        </>
+                      ) : (
+                        <span className="text-muted">—</span>
+                      )}
                     </td>
                     <td className="hidden py-1.5 pr-3 whitespace-nowrap text-muted sm:table-cell">
                       {c.mount}
