@@ -431,8 +431,10 @@ cross_last_file = ref("")
 cross_last_stamps = ref([])
 
 def cross_stamps(m) =
-  file = m["filename"]
-  if file != "" and file == cross_last_file() then
+  # `fname`, not `file`: a local `file` shadows the stdlib file.* module
+  # (Liquidsoap Warning 6 at startup).
+  fname = m["filename"]
+  if fname != "" and fname == cross_last_file() then
     cross_last_stamps()
   else
     own = float_of_string(default=crossfade_duration(), m["liq_cross_duration"])
@@ -443,7 +445,7 @@ def cross_stamps(m) =
       ("liq_cross_duration", "")
     ]
     cross_prev_end := own
-    cross_last_file := file
+    cross_last_file := fname
     cross_last_stamps := stamps
     stamps
   end
