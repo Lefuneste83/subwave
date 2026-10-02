@@ -3,7 +3,7 @@
 // restart by design; the raw per-call lists stay on /debug.
 import express from 'express';
 import { requireAdmin } from '../middleware/auth.js';
-import { recentCalls } from '../llm/log.js';
+import { recentCalls, generationHealthSnapshot } from '../llm/log.js';
 import * as llmProvider from '../llm/provider.js';
 import * as settings from '../settings.js';
 import { ttsCalls, shortlistPicks, summarizeLlm, summarizeTts, summarizeDjLog, summarizeRequests, summarizeShortlistPicks } from '../stats.js';
@@ -29,6 +29,7 @@ router.get('/stats', requireAdmin, (req, res) => {
       agenticPicker: agenticPickerContextWindow(recentCalls),
       byKind: contextWindowByKind(recentCalls),
     };
+    llm.generation = generationHealthSnapshot();
 
     res.json({
       t: new Date().toISOString(),
