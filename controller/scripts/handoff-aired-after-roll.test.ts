@@ -1,6 +1,6 @@
 // A boundary handoff that airs AFTER the session has rolled must not keep
-// handoffInProgress() true for the whole incoming show
-// (session.retireAiredBoundaryHandoff).
+// handoffInProgress() true for the whole incoming show, nor block the next
+// boundary (session.airedOnLiveShow). The record itself stays, as history.
 //
 // THE DEFECT THIS GUARDS. maybeRoll carries a still-armed/queued record onto
 // the incoming session; markHandoffAired then flipped it to aired there and
@@ -84,12 +84,12 @@ test('carried across the roll, aired after it → released for the incoming show
   assert.equal(session.handoffInProgress(), true, 'queued still holds the air');
   session.markHandoffAired();
   assert.equal(session.handoffInProgress(), false, 'scheduled speech is allowed again');
-  assert.equal(session.boundaryHandoffStatus(), null);
+  assert.equal(session.boundaryHandoffStatus()?.state, 'aired', 'kept for /debug, as history');
   assert.equal(session.pendingHandoff(), null, 'no second mic-pass');
   assert.equal(session.getSession()?.handoffAired, true);
 });
 
-test('a session already stuck with an aired record self-heals on read', async () => {
+test('a session already persisted with an aired record is released on read', async () => {
   const now = await armed();
   await session.maybeRoll(context(CAVE, now + 5 * 60_000));
   // Simulate the persisted state from before the fix.
@@ -97,16 +97,37 @@ test('a session already stuck with an aired record self-heals on read', async ()
   s.boundaryHandoff!.aired = true;
   s.boundaryHandoff!.queued = false;
   assert.equal(session.handoffInProgress(), false);
-  assert.equal(session.getSession()?.boundaryHandoff, null);
 });
 
-test('retiring keeps a programme attached only to the record', async () => {
+test('a record aired on the live show gives way to the next boundary', async () => {
+  const now = await armed();
+  await session.maybeRoll(context(CAVE, now + 5 * 60_000));
+  session.markHandoffQueued();
+  session.markHandoffAired();
+  // The Cave's own boundary into the next host's show.
+  const ANYA = { ...TOM, id: 'p_anya', name: 'Anya' };
+  const DAWN = { id: 's_dawn', name: 'Dawn Patrol' };
+  const week: Record<number, string[]> = {};
+  for (let day = 0; day < 7; day++) week[day] = Array(24).fill(DAWN.id);
+  await settings.update({
+    personas: [TOM, PROF, ANYA], activePersonaId: ANYA.id,
+    shows: [{ ...CAVE, topic: 'caves', personaId: PROF.id }, { ...DAWN, topic: '', personaId: ANYA.id }],
+    schedule: week,
+  } as never);
+  assert.equal(session.armBoundaryHandoff(context(DAWN, now + 65 * 60_000), RUTTI), true,
+    'the history record does not block the next mic-pass');
+  assert.equal(session.boundaryHandoffStatus()?.state, 'armed');
+  assert.equal(session.handoffInProgress(), false, 'armed alone does not hold the air');
+});
+
+test('airing after the roll hands the record\'s programme to the live show', async () => {
   const now = await armed();
   await session.maybeRoll(context(CAVE, now + 5 * 60_000));
   const s = session.getSession()!;
   s.programme = null;
   const programme = { showId: CAVE.id, episode: 'e1' } as never;
   s.boundaryHandoff!.programme = programme;
+  session.markHandoffQueued();
   session.markHandoffAired();
   assert.equal(session.getProgramme(), programme);
 });

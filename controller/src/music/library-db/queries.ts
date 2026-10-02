@@ -51,14 +51,14 @@ export function songsByEnergy(energy: EnergyValue): EnergyPoolRecord[] {
     t.original_year, t.is_compilation, t.era_untrusted, t.audio_moods,
     t.bpm, t.musical_key, t.intro_ms, t.loudness_lufs,
     t.structure_json, t.vocal_ranges_json, t.pace_json
-    FROM tracks t WHERE t.energy = ? ORDER BY t.rowid`).all(energy) as EnergyPoolRow[];
+    FROM tracks t WHERE t.energy = ? AND ${SQL_HAS_MOODS} ORDER BY t.rowid`).all(energy) as EnergyPoolRow[];
   return rows.map(rowToEnergyPool);
 }
 
 export function allTaggedIds(): string[] {
   return (
     requireDb()
-      .prepare('SELECT id FROM tracks WHERE moods IS NOT NULL')
+      .prepare(`SELECT id FROM tracks WHERE ${SQL_HAS_MOODS}`)
       .all() as Array<{ id: string }>
   ).map(r => r.id);
 }
@@ -150,7 +150,7 @@ export function trackIdsByGenreDecade(): Map<string, string[]> {
                 WHEN year > 0 THEN (year / 10) * 10
                 ELSE 0
               END AS decade
-       FROM tracks WHERE moods IS NULL`,
+       FROM tracks WHERE ${SQL_NO_MOODS}`,
     )
     .all() as Array<{ id: string; g: string; decade: number }>;
   const out = new Map<string, string[]>();

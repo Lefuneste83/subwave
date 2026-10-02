@@ -5,8 +5,11 @@
 // once against the optional fallback leg when the primary leg can't recover this
 // call — either its host is unreachable (connection refused / DNS / timeout —
 // see isUnreachable), it refused with a quota/usage-limit/auth error (see
-// isQuotaOrAuthError; issue #438), or a reachable gateway relayed a saturated
-// upstream that survived same-leg retries (see isUpstreamOverloaded; issue #671).
+// isQuotaOrAuthError; issue #438), a reachable gateway relayed a saturated
+// upstream that survived same-leg retries (see isUpstreamOverloaded; issue #671),
+// or the leg's model itself is gone — retired, removed, or never present (see
+// isModelUnavailable). That last one is permanent: no retry and no wait brings
+// the model back, so the call must move to the fallback leg immediately.
 // record* lives here so a call is logged exactly once, with the leg that ran.
 
 import { createHash } from 'node:crypto';
@@ -16,7 +19,7 @@ import { guardGenerationModel, throwIfCancelled } from './generation.js';
 import type { Leg } from '../provider/legs.js';
 import { primaryLeg, fallbackLeg } from '../provider/legs.js';
 import { record } from '../telemetry/log.js';
-import { isUnreachable, isQuotaOrAuthError, isUpstreamOverloaded, isRateLimited, isGenerationControlError, isProviderRequestTimeout } from './pure.js';
+import { isUnreachable, isQuotaOrAuthError, isUpstreamOverloaded, isRateLimited, isModelUnavailable, isGenerationControlError, isProviderRequestTimeout } from './pure.js';
 
 // Wrap per dispatch, never mutate cached registry models or capture old settings.
 function guardedLeg(leg: Leg, kind: string, role: 'primary' | 'fallback'): Leg {
@@ -114,8 +117,9 @@ export interface AttemptResult<T> {
 // primary leg is tried first; only when the primary leg can't recover this call
 // — host unreachable OR a quota/usage-limit/auth rejection OR a reachable
 // gateway relaying a saturated upstream (#671) OR a rate limit that survived
-// same-leg retries (#738 — a free-tier request cap) — and only when a fallback
-// is configured, is `attempt` retried once against the backup leg.
+// same-leg retries (#738 — a free-tier request cap) OR a permanently missing
+// model — and only when a fallback is configured, is `attempt` retried once
+// against the backup leg.
 // On a failover the primary's failure is also recorded (via `…:failover→<backup>`)
 // so /debug shows the switch happened.
 //
@@ -158,14 +162,25 @@ export async function withFailover<T>(
     const quotaOrAuth = isQuotaOrAuthError(err);
     const upstreamOverloaded = isUpstreamOverloaded(err);
     const rateLimited = isRateLimited(err);
-    const backup = ((!isGenerationControlError(err) || isProviderRequestTimeout(err)) && !signal?.aborted && (isUnreachable(err) || quotaOrAuth || upstreamOverloaded || rateLimited)) ? fallbackLeg() : null;
+    const modelGone = isModelUnavailable(err);
+    const backup = ((!isGenerationControlError(err) || isProviderRequestTimeout(err))
+      && !signal?.aborted
+      && (isUnreachable(err) || quotaOrAuth || upstreamOverloaded || rateLimited || modelGone))
+      ? fallbackLeg()
+      : null;
     if (!backup) {
       logFailurePreview(kind, err);
       recordFailure({ kind, started: primaryStarted, via: primaryVia, model: primary.label, error: err?.message, extra: failExtra(err) });
       throwIfCancelled(signal);
       throw err;
     }
-    const reason = isProviderRequestTimeout(err) ? 'generation timed out' : quotaOrAuth ? 'refused (quota/auth)' : upstreamOverloaded ? 'upstream overloaded' : rateLimited ? 'rate limited' : 'unreachable';
+    const reason = isProviderRequestTimeout(err)
+      ? 'generation timed out'
+      : modelGone ? 'model unavailable'
+      : quotaOrAuth ? 'refused (quota/auth)'
+      : upstreamOverloaded ? 'upstream overloaded'
+      : rateLimited ? 'rate limited'
+      : 'unreachable';
     const detail = err?.statusCode || err?.cause?.statusCode || err?.code || err?.cause?.code || err?.name || 'unknown';
     console.log(`[${kind}] primary LLM (${primary.label}) ${reason} (${detail}) — failing over to ${backup.label}`);
     recordFailure({ kind, started: primaryStarted, via: `${primaryVia}:failover→${backup.label}`, model: primary.label, error: err?.message, extra: failExtra(err) });

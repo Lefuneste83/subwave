@@ -28,7 +28,7 @@ interface CapturedRequest {
 }
 
 async function withRequests(
-  responses: ('invalid' | 'stalled' | 'ok')[],
+  responses: ('invalid' | 'stalled' | 'retired' | 'ok')[],
   run: (requests: CapturedRequest[]) => Promise<void>,
   onStall?: () => void,
 ) {
@@ -50,6 +50,11 @@ async function withRequests(
     assert.ok(response, 'unexpected retry, recovery, or fallback request');
     requests.push({ url: String(url), body: JSON.parse(String(init?.body)), signal: init!.signal! });
     assert.equal(new URL(String(url)).hostname, 'generativelanguage.googleapis.com');
+    if (response === 'retired') {
+      return new Response(JSON.stringify({ error: {
+        code: 404, status: 'NOT_FOUND', message: 'model gemini-2.5-flash has been retired',
+      } }), { status: 404, headers: { 'content-type': 'application/json' } });
+    }
     if (response === 'stalled') {
       const stream = new ReadableStream<Uint8Array>({ start(controller) {
         controller.enqueue(new TextEncoder().encode('{"candidates":'));
@@ -118,4 +123,35 @@ test('Gemini caller cancellation aborts body reading without schema recovery or 
     assert.equal(recentCalls[0].ok, false);
     assert.equal(generationHealthSnapshot().inFlightCount, 0);
   }, () => caller.abort(reason));
+});
+
+test('a retired Gemini primary fails over immediately and backup schema recovery keeps its own safety map', async () => {
+  await withRequests(['retired', 'invalid', 'ok'], async requests => {
+    assert.deepEqual(await djObject({ prompt: 'test', schema }), { ok: true });
+    assert.equal(requests.length, 3);
+    assert.ok(requests[0].url.includes('gemini-2.5-flash'));
+    assert.deepEqual(thresholds(requests[0]), primaryThresholds);
+    for (const request of requests.slice(1)) {
+      assert.ok(request.url.includes('gemini-2.5-pro'));
+      assert.deepEqual(thresholds(request), backupThresholds);
+    }
+    assert.equal(recentCalls.length, 2);
+    assert.match(recentCalls.find(call => !call.ok)!.via, /^ai-sdk:failover/);
+    assert.equal(recentCalls.find(call => call.ok)!.via, 'ai-sdk:recovery');
+    assert.equal(generationHealthSnapshot().inFlightCount, 0);
+  });
+});
+
+test('a retired Gemini primary hands over once to an independently bounded backup', async () => {
+  await withRequests(['retired', 'stalled'], async requests => {
+    await assert.rejects(djObject({ prompt: 'test', schema }), { code: 'PROVIDER_REQUEST_TIMEOUT' });
+    assert.equal(requests.length, 2);
+    assert.deepEqual(thresholds(requests[0]), primaryThresholds);
+    assert.deepEqual(thresholds(requests[1]), backupThresholds);
+    assert.equal(requests[1].signal.aborted, true);
+    assert.equal(requests[1].signal.reason.code, 'PROVIDER_REQUEST_TIMEOUT');
+    assert.equal(recentCalls.length, 2);
+    assert.ok(recentCalls.every(call => !call.ok));
+    assert.equal(generationHealthSnapshot().inFlightCount, 0);
+  });
 });

@@ -78,7 +78,7 @@ test('membership is a case-sensitive union maintained by all tag/analysis writer
   assert.deepEqual(ids('new-audio'), []);
   assert.deepEqual(ids('reflective'), ['payload']);
   db.setTrackEnergyBulk([{ id: 'union', energy: 'low' }]);
-  assert.equal(db.songsByEnergy('low').some(r => r.id === 'union'), true);
+  assert.equal(db.songsByEnergy('low').some(r => r.id === 'union'), false, 'energy alone does not make a cleared track tagged');
   assert.throws(() => db.setTrackEnergyBulk([{ id: 'union', energy: 'high' }, { id: 'payload', energy: 'invalid' }]));
   assert.equal(db.getTrack('union')!.energy, 'low');
   noOrphans();
