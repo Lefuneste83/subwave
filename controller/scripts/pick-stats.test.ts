@@ -7,6 +7,11 @@
 //     locks, tool registration);
 //   - a warm call costs nothing, and the cache only expires on its TTL or on
 //     invalidateStats() (a handle swap);
+//   - the tagged total and distinct-artist counts read only the partial index
+//     idx_tracks_tagged_artist, never the wide tracks rows, and the rewritten
+//     artist query counts exactly what the original one did;
+//   - after the TTL a pick gets the previous numbers at once and the recompute
+//     runs later, off the pick path;
 //   - idsByEnergy() returns exactly the ids songsByEnergy() would, in order,
 //     without mapping rows.
 //
@@ -38,6 +43,11 @@ for (let i = 0; i < 300; i++) {
   if (i % 5 === 0) db.upsertTrackAudioVector(id, new Float32Array(512).fill(0.1));
   if (i % 4 === 0) db.upsertTrackVector(id, [1, 2, 3, 4, 5, 6, 7, 8], null);
 }
+// Blank artists on tagged rows must not count as an artist.
+for (const [id, artist] of [['blank1', '   '], ['blank2', '']] as const) {
+  db.upsertTrackMeta(id, { title: id, artist, album: 'A', duration: 200 });
+  db.upsertTrackTags(id, { moods: ['calm'], source: 'llm' } as never);
+}
 await library.load();
 
 test('every pickStats field agrees with the dashboard stats()', () => {
@@ -54,8 +64,8 @@ test('every pickStats field agrees with the dashboard stats()', () => {
     hasMoodCoverage: Object.keys(full.byMood).length > 0,
     hasEnergyCoverage: Object.keys(full.byEnergy).length > 0,
   });
-  assert.equal(p.mirrorTotal, 300);
-  assert.ok(p.total > 0 && p.total < 300, 'untagged rows are excluded from total');
+  assert.equal(p.mirrorTotal, 302);
+  assert.ok(p.total > 0 && p.total < 302, 'untagged rows are excluded from total');
 });
 
 test('an empty library reports no coverage', () => {
@@ -70,6 +80,45 @@ test('an empty library reports no coverage', () => {
   assert.equal(p.hasEnergyCoverage, false);
   d.exec('ROLLBACK TO empty');
   d.exec('RELEASE empty');
+  db.invalidateStats();
+});
+
+test('the tagged counts come from the partial index alone', () => {
+  const d = db.requireDb();
+  const H = 'moods IS NOT NULL AND json_array_length(moods) > 0';
+  const plans = [
+    `SELECT COUNT(*) AS n FROM tracks WHERE ${H}`,
+    `SELECT COUNT(DISTINCT k) AS n FROM (SELECT LOWER(TRIM(artist)) AS k FROM tracks WHERE ${H}) WHERE k != ''`,
+  ].map((sql) => (d.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as Array<{ detail: string }>).map((r) => r.detail).join(' ; '));
+  for (const plan of plans) assert.match(plan, /USING COVERING INDEX idx_tracks_tagged_artist/, plan);
+  // The original artist query, kept here as the reference for the rewrite.
+  const original = (d.prepare(
+    `SELECT COUNT(DISTINCT LOWER(TRIM(artist))) AS n FROM tracks
+      WHERE ${H} AND artist IS NOT NULL AND TRIM(artist) != ''`,
+  ).get() as { n: number }).n;
+  db.invalidateStats();
+  assert.equal(db.pickStats().distinctArtists, original);
+  assert.equal(db.stats().distinctArtists, original);
+});
+
+test('the index never refuses a write with malformed moods JSON', () => {
+  const d = db.requireDb();
+  d.exec('SAVEPOINT bad');
+  assert.doesNotThrow(() => d.prepare(`UPDATE tracks SET moods = '{not json' WHERE id = 't001'`).run());
+  d.exec('ROLLBACK TO bad');
+  d.exec('RELEASE bad');
+});
+
+test('after the TTL the old numbers are served and refreshed off the pick path', (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
+  db.invalidateStats();
+  const first = db.pickStats();
+  db.upsertTrackMeta('later', { title: 'Later', artist: 'New', album: 'B', duration: 200 });
+  t.mock.timers.tick(10 * 60 * 1000 + 1);
+  assert.deepEqual(db.pickStats(), first, 'expired: the previous numbers, no inline recompute');
+  t.mock.timers.tick(15_000);
+  assert.equal(db.pickStats().mirrorTotal, first.mirrorTotal + 1, 'the deferred refresh landed');
+  t.mock.timers.reset();
   db.invalidateStats();
 });
 
