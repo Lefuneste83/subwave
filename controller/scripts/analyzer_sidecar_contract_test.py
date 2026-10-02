@@ -325,6 +325,11 @@ async def test_facet_contract():
     assert worker_calls == [{"id": "1", "path": audio.name, "complete": False, "facets": ["tail"]}], worker_calls
     assert result == {"ok": True, "facets": facet_answer["facets"], "source": facet_answer["source"]}, result
 
+    worker_calls.clear()
+    result = await server.analyze(server.AnalyzeRequest(url="http://nav/x", facets=["tail"], ranged=True, tail_vocals=True))
+    assert worker_calls == [{"id": "1", "url": "http://nav/x", "facets": ["tail"], "ranged": True, "tail_vocals": True}], worker_calls
+    assert server.StdioWorker._wants_models({"facets": ["tail"], "tail_vocals": True}) is True
+
     # Model bookkeeping follows the facets named, not the env defaults.
     assert server.StdioWorker._wants_models({"facets": ["head", "tail"]}) is False
     assert server.StdioWorker._wants_models({"facets": ["clap"]}) is True
