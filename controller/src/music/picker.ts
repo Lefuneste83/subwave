@@ -637,7 +637,7 @@ export async function pickViaPool(queue, ctx, rankTarget: { bpm: number | null; 
   await library.load();
   ctx = await prepareEpisodeContext(ctx);
   const episodeSource = showPreparation.read({ context: ctx }).music;
-  const stats = library.stats();
+  const stats = library.pickStats(); // per pick: the narrow, cached counts (#1723)
   // Sized off the MIRROR, not `stats.total`, which counts only tagged tracks.
   const librarySize = stats.mirrorTotal || stats.total;
   const windows = recencyWindowsForLibrary(stats.distinctArtists, librarySize);
