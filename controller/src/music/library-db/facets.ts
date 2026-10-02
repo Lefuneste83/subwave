@@ -198,6 +198,10 @@ function syncTrackFacetsOn(d: Database.Database, id: string, opts: SyncOpts): vo
     const prev = stored.get(r.facet);
     stored.delete(r.facet);
     const isFresh = fresh.has(r.facet);
+    // An unmeasurable/ok row's reason describes the pass that measured it
+    // ('capped-download' vs 'tail-not-measured'); a re-sync that didn't
+    // re-measure the facet keeps it. A failure's reason is the latest error.
+    if (!isFresh && prev && prev.status === r.status && r.status !== 'failed') r.reason = prev.reason;
     const version =
       isFresh || !prev || prev.status !== r.status ? r.version : Math.min(prev.version, r.version);
     const source = isFresh ? (opts.source ?? 'unknown') : (prev?.source ?? opts.source ?? 'seed');
