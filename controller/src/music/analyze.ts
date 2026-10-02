@@ -504,6 +504,10 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
           tailSilenceMs: a.tailSilenceMs,
           tailStartMs: a.tailStartMs,
           stemsAttempted: a.stemsCached !== null,
+          // Recorded on the facet rows; 'capped' explains a missing tail.
+          source: localPath
+            ? (localComplete === true ? 'full' : localComplete === false ? 'capped' : 'unknown')
+            : 'url',
         });
         storedVocal = vocalRanges != null;
         // Surface the tail-vocal stuck case rather than retargeting it forever.

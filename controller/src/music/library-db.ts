@@ -21,6 +21,7 @@
 //   scenes.ts       the genre-tag vocabulary + its in-place merge
 //   plays.ts        play history
 //   stem-scan.ts    the stem backfill scope + its priority ranking
+//   facets.ts       per-facet analysis status (shadow of the analysis columns)
 
 export * from './library-db/handle.js';
 export * from './library-db/types.js';
@@ -40,3 +41,4 @@ export * from './library-db/browse.js';
 export * from './library-db/scenes.js';
 export * from './library-db/plays.js';
 export * from './library-db/stem-scan.js';
+export * from './library-db/facets.js';
