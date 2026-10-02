@@ -2,6 +2,7 @@
 // The write path every ingest pass (tagger, analyzer, enricher) goes through.
 
 import { ANALYSIS_VERSION, AUDIO_EMBEDDING_DIM, SQL_HAS_MOODS, TAGGER_VERSION, getEmbeddingDim, requireDb } from './handle.js';
+import { clearFacetFailures, clearFacetRows, syncTrackFacets, type Facet, type FacetSource } from './facets.js';
 import type { TagWrite, TrackEnrichment, TrackKeyRange, TrackMeta, TrackOutro, TrackPaceSpan, TrackRecord, TrackRow, TrackSection } from './types.js';
 import { normaliseYear, rowToTrack, safeParseArray } from './rows.js';
 import { runDdl } from './schema.js';
@@ -377,12 +378,17 @@ interface TrackAnalysisWrite {
   // true stamps stems_at so the backfill scope drops the track. Pass true for a
   // MISS too: the stamp records the attempt, not disk presence (migration 17).
   stemsAttempted?: boolean;
+  // Where the audio came from — recorded on the facet rows this write
+  // measures, and how an unmeasured tail is explained. Omitted = 'unknown'.
+  source?: FacetSource;
 }
 
 // Stamps ANALYSIS_VERSION so resumable runs skip analysed rows and a bump
 // re-targets stale ones. UPDATE on an existing meta row.
 export function upsertTrackAnalysis(id: string, a: TrackAnalysisWrite): void {
-  requireDb()
+  const d = requireDb();
+  d.transaction(() => {
+  d
     .prepare(
       `UPDATE tracks SET
         bpm                 = ?,
@@ -438,6 +444,19 @@ export function upsertTrackAnalysis(id: string, a: TrackAnalysisWrite): void {
       ANALYSIS_VERSION,
       id,
     );
+  // Mirror into track_facet_status in the same transaction. Only what this
+  // pass actually measured is "fresh"; a tail/vocal kept by COALESCE keeps the
+  // version it was measured at.
+  const fresh: Facet[] = ['head', 'loudness'];
+  if (a.outro != null || Number.isFinite(a.tailSilenceMs as number)) fresh.push('tail');
+  if (a.vocalRanges != null) fresh.push('vocal');
+  if (a.stemsAttempted) fresh.push('stems');
+  syncTrackFacets(id, {
+    fresh,
+    source: a.source ?? 'unknown',
+    tailReason: a.source === 'capped' ? 'capped-download' : undefined,
+  });
+  })();
 }
 
 // Consecutive failures after which a track drops out of every analysis scope.
@@ -466,15 +485,18 @@ export function needsAnalysisIds(limit?: number): string[] {
 
 // Stamp a failed attempt; `error` is trimmed for the admin panel.
 export function recordAnalysisFailure(id: string, error: string): void {
-  requireDb()
-    .prepare(
+  const d = requireDb();
+  d.transaction(() => {
+    d.prepare(
       `UPDATE tracks SET
          analyze_error      = ?,
          analyze_failed_at  = ?,
          analyze_fail_count = COALESCE(analyze_fail_count, 0) + 1
        WHERE id = ?`,
-    )
-    .run((error || 'analysis failed').slice(0, 500), new Date().toISOString(), id);
+    ).run((error || 'analysis failed').slice(0, 500), new Date().toISOString(), id);
+    // Every facet the track still lacks becomes 'failed' with this count.
+    syncTrackFacets(id);
+  })();
 }
 
 // Forget the failure history for one track (or all, id omitted) so the next pass
@@ -485,6 +507,7 @@ export function clearAnalysisFailures(id?: string): number {
   const res = id
     ? d.prepare(`UPDATE tracks SET ${set} WHERE id = ?`).run(id)
     : d.prepare(`UPDATE tracks SET ${set} WHERE analyze_fail_count IS NOT NULL`).run();
+  clearFacetFailures(id);
   return res.changes;
 }
 
@@ -557,6 +580,7 @@ export function clearAnalysis(opts: { keepVocal?: boolean; clearStems?: boolean 
   // CLAP vectors are written in the same pass, and the audio moods cleared
   // above are derived from them.
   d.prepare('DELETE FROM track_audio_vectors').run();
+  clearFacetRows(opts);
 }
 
 export function upsertTrackVector(
@@ -620,6 +644,9 @@ export function upsertTrackAudioVector(id: string, vector: number[] | Float32Arr
     vector instanceof Float32Array ? vector.buffer : new Float32Array(vector).buffer,
   );
   const d = requireDb();
-  d.prepare(`DELETE FROM track_audio_vectors WHERE id = ?`).run(id);
-  d.prepare(`INSERT INTO track_audio_vectors (id, embedding) VALUES (?, ?)`).run(id, buf);
+  d.transaction(() => {
+    d.prepare(`DELETE FROM track_audio_vectors WHERE id = ?`).run(id);
+    d.prepare(`INSERT INTO track_audio_vectors (id, embedding) VALUES (?, ?)`).run(id, buf);
+    syncTrackFacets(id, { fresh: ['clap'], source: 'analyzer' });
+  })();
 }
