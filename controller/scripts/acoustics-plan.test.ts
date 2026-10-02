@@ -36,12 +36,18 @@ function test(name: string, fn: () => void | Promise<void>) {
 // ---- fake analyzer sidecar + Navidrome stream ------------------------------
 const requests: Array<Record<string, unknown>> = [];
 let clapCapable = true;
+// Facet protocol on the stub (off = an analyzer that predates it).
+let facetsCapable = false;
+// Per-facet answers the stub gives for a facet request (default: ok).
+let facetAnswers: Record<string, Record<string, unknown>> = {};
+let streamHits = 0;
 function handler(req: IncomingMessage, res: ServerResponse) {
   if (req.url?.startsWith('/health')) {
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({
       ok: true, engines: ['analyze'],
       analyze_audio_capable: clapCapable, analyze_vocal_capable: false,
+      ...(facetsCapable ? { analyze_facets_capable: true, analyze_ranged_tail_capable: true } : {}),
     }));
     return;
   }
@@ -53,6 +59,23 @@ function handler(req: IncomingMessage, res: ServerResponse) {
       requests.push(r);
       res.setHeader('Content-Type', 'application/json');
       const vec = Array.from({ length: 512 }, () => 0.01);
+      if (Array.isArray(r.facets)) {
+        const ok: Record<string, unknown> = {
+          head: { bpm: 99, key: 'Dm', intro_ms: 500, confidence: 0.8 },
+          loudness: { loudness_lufs: -12, peak_db: -2 },
+          tail: { tail_silence_ms: 2500, tail_start_ms: 211_500, outro: { startMs: 200_000, ending: 'fade' } },
+          clap: { audio_embedding: vec },
+        };
+        const facets: Record<string, unknown> = {};
+        for (const f of r.facets) facets[f] = facetAnswers[f] ?? { status: 'ok', data: ok[f] };
+        res.end(JSON.stringify({
+          ok: true, facets,
+          source: r.ranged
+            ? { kind: 'ranged', duration_s: 214, complete: true, size: 30_000_000, bytes_read: 3_000_000 }
+            : { kind: 'path', duration_s: 214, complete: r.complete ?? null },
+        }));
+        return;
+      }
       if (r.embedding_only) {
         res.end(JSON.stringify({ ok: true, audio_embedding: vec }));
         return;
@@ -68,6 +91,7 @@ function handler(req: IncomingMessage, res: ServerResponse) {
     return;
   }
   // Navidrome stream / anything else: a few bytes of "audio".
+  if (req.url?.startsWith('/rest/stream')) streamHits += 1;
   res.setHeader('Content-Type', 'audio/flac');
   res.end(Buffer.alloc(1024, 1));
 }
@@ -217,6 +241,82 @@ async function main() {
     const stats = await runAnalysisPass({ plan: plan('tail', 'unmeasurable:capped') });
     assert.equal(stats.scope, 0);
     assert.equal(requests.length, 0);
+  });
+
+  console.log('facet protocol:');
+  facetsCapable = true;
+  analyzer._resetBackendCacheForTests();
+  const facetRow = (id: string, f: string) =>
+    sql().prepare('SELECT status, reason, source, version FROM track_facet_status WHERE track_id = ? AND facet = ?').get(id, f) as
+      { status: string; reason: string | null; source: string; version: number } | undefined;
+
+  await test('a tail-only plan sends a ranged tail request and writes only the tail', async () => {
+    db.upsertTrackMeta('t1', { title: 't1', artist: 'A', album: 'B', duration: 214 });
+    db.upsertTrackAnalysis('t1', { bpm: 128, musicalKey: 'G', loudnessLufs: -8, source: 'capped' });
+    requests.length = 0;
+    streamHits = 0;
+    const p = P.planAcoustics({ ids: ['t1'], facets: ['tail'], where: { kind: 'unmeasurable' },
+      state: db.loadFacetState(['tail']), capabilities: { clap: true, demucs: false } });
+    const stats = await runAnalysisPass({ plan: p });
+    assert.equal(stats.analyzed, 1);
+    assert.equal(requests.length, 1);
+    const r = requests[0];
+    assert.deepEqual(r.facets, ['tail']);
+    assert.equal(r.ranged, true);
+    assert.ok(typeof r.url === 'string' && !('path' in r), 'a ranged read goes by url, no staged copy');
+    assert.equal(streamHits, 0, 'no capped download for a ranged track');
+    const t = db.getTrack('t1')!;
+    assert.equal(t.tailStartMs, 211_500);
+    assert.equal(t.bpm, 128, 'a tail-only answer must not rewrite BPM');
+    assert.deepEqual(facetRow('t1', 'tail'), { status: 'ok', reason: null, source: 'ranged', version: db.FACET_VERSIONS.tail });
+  });
+
+  await test('an unmeasurable tail keeps the columns and records the worker\'s reason', async () => {
+    db.upsertTrackMeta('t2', { title: 't2', artist: 'A', album: 'B', duration: 214 });
+    db.upsertTrackAnalysis('t2', { bpm: 128, musicalKey: 'G', loudnessLufs: -8, source: 'capped' });
+    facetAnswers = { tail: { status: 'unmeasurable', reason: 'silent-tail-window' } };
+    const p = P.planAcoustics({ ids: ['t2'], facets: ['tail'], where: { kind: 'unmeasurable' },
+      state: db.loadFacetState(['tail']), capabilities: { clap: true, demucs: false } });
+    await runAnalysisPass({ plan: p });
+    facetAnswers = {};
+    assert.equal(db.getTrack('t2')!.tailStartMs ?? null, null);
+    const row = facetRow('t2', 'tail')!;
+    assert.equal(row.status, 'unmeasurable');
+    assert.equal(row.reason, 'silent-tail-window');
+  });
+
+  await test('a facet that fails counts one attempt; the others are written', async () => {
+    db.upsertTrackMeta('t3', { title: 't3', artist: 'A', album: 'B', duration: 214 });
+    facetAnswers = { clap: { status: 'failed', reason: 'decode error' } };
+    requests.length = 0;
+    const p = P.planAcoustics({ ids: ['t3'], facets: ['head', 'clap'], where: { kind: 'all' },
+      state: db.loadFacetState(['head', 'clap']), capabilities: { clap: true, demucs: false } });
+    const stats = await runAnalysisPass({ plan: p });
+    facetAnswers = {};
+    assert.equal(stats.analyzed, 1);
+    assert.ok(!requests[0].ranged, 'head + clap never asks for a ranged read');
+    assert.equal(db.getTrack('t3')!.bpm, 99);
+    assert.equal(facetRow('t3', 'head')!.status, 'ok');
+    assert.equal(facetRow('t3', 'clap')!.status, 'failed');
+    assert.equal(db.analysisFailures().find((f) => f.id === 't3')?.attempts, 1);
+  });
+
+  await test('when every facet fails, the track fails like a flat analysis', async () => {
+    db.upsertTrackMeta('t4', { title: 't4', artist: 'A', album: 'B', duration: 214 });
+    facetAnswers = { head: { status: 'failed', reason: 'boom' } };
+    const p = P.planAcoustics({ ids: ['t4'], facets: ['head'], where: { kind: 'all' },
+      state: db.loadFacetState(['head']), capabilities: { clap: true, demucs: false } });
+    const stats = await runAnalysisPass({ plan: p });
+    facetAnswers = {};
+    assert.equal(stats.failed, 1);
+    assert.equal(stats.analyzed, 0);
+  });
+
+  await test('the facet table stays consistent with the columns through facet writes', async () => {
+    const { checkFacets } = await import('../src/music/facet-check.js');
+    const r = checkFacets();
+    assert.equal(r.driftCount, 0, JSON.stringify(r.drift));
+    assert.equal(r.orphans, 0);
   });
 
   analyzer.shutdown();

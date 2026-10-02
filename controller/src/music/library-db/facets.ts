@@ -51,7 +51,7 @@ export const FACET_VERSIONS: Readonly<Record<Facet, number>> = {
 export const FACET_MAX_ATTEMPTS = 3;
 
 // Where the analysed audio came from, as far as the controller knows.
-export type FacetSource = 'seed' | 'full' | 'capped' | 'unknown' | 'url' | 'analyzer';
+export type FacetSource = 'seed' | 'full' | 'capped' | 'unknown' | 'url' | 'analyzer' | 'ranged';
 
 // What a facet status is derived from: the `tracks` columns, reduced to flags
 // in SQL (FACET_SOURCE_SELECT) so the seed never loads the JSON payloads.

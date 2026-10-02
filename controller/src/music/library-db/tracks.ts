@@ -451,6 +451,116 @@ export function upsertTrackAnalysis(id: string, a: TrackAnalysisWrite): void {
   })();
 }
 
+// One facet-protocol answer, already mapped to column values. A key is
+// present for each facet the backend measured (ok) or proved unmeasurable;
+// facets that came back unavailable are simply absent (nothing to record).
+export interface FacetWrite {
+  head?: {
+    bpm: number | null;
+    musicalKey: string | null;
+    introMs: number | null;
+    confidence: number | null;
+    sections: TrackSection[] | null;
+    pace: TrackPaceSpan[] | null;
+    beats: number[] | null;
+    bars: number[] | null;
+    keyRanges: TrackKeyRange[] | null;
+    leadSilenceMs: number | null;
+  };
+  loudness?: { loudnessLufs: number | null; peakDb: number | null } | { unmeasurable: string };
+  tail?: { outro: TrackOutro | null; tailSilenceMs: number | null; tailStartMs: number | null } | { unmeasurable: string };
+  clap?: number[];
+  vocal?: { vocalRanges: TrackSection[]; tailVocalRanges: TrackSection[] | null };
+  stems?: { attempted: true };
+  // Set when any requested facet failed: counts one failed attempt for the
+  // track, exactly like a failed flat analysis. Absent = every facet answered,
+  // which clears the failure history like a flat success.
+  failed?: string;
+  source: FacetSource;
+}
+
+const finite = (v: unknown): number | null => (Number.isFinite(v as number) ? (v as number) : null);
+const jsonOrNull = (v: unknown[] | null | undefined): string | null => (v && v.length ? JSON.stringify(v) : null);
+
+// Per-facet column writes for a facet-protocol answer, plus the facet rows,
+// in one transaction. Only the columns of the facets that answered are
+// touched — a tail-only answer never rewrites BPM, key or loudness.
+export function writeFacetResults(id: string, w: FacetWrite): void {
+  const d = requireDb();
+  d.transaction(() => {
+    const fresh: Facet[] = [];
+    if (w.head) {
+      const h = w.head;
+      d.prepare(
+        `UPDATE tracks SET bpm = ?, musical_key = ?, intro_ms = ?, analysis_confidence = ?,
+           structure_json = ?, pace_json = ?, beats_json = ?, bars_json = ?, key_ranges_json = ?,
+           lead_silence_ms = ?, analysis_version = ?
+         WHERE id = ?`,
+      ).run(
+        finite(h.bpm), h.musicalKey ?? null,
+        finite(h.introMs) != null ? Math.round(h.introMs as number) : null,
+        finite(h.confidence),
+        jsonOrNull(h.sections), jsonOrNull(h.pace), jsonOrNull(h.beats), jsonOrNull(h.bars), jsonOrNull(h.keyRanges),
+        finite(h.leadSilenceMs) != null ? Math.max(0, Math.round(h.leadSilenceMs as number)) : null,
+        ANALYSIS_VERSION, id,
+      );
+      fresh.push('head');
+    }
+    if (w.loudness) {
+      if (!('unmeasurable' in w.loudness)) {
+        d.prepare('UPDATE tracks SET loudness_lufs = ?, peak_db = ? WHERE id = ?')
+          .run(finite(w.loudness.loudnessLufs), finite(w.loudness.peakDb), id);
+      }
+      fresh.push('loudness');
+    }
+    let tailReason: string | undefined;
+    if (w.tail) {
+      if ('unmeasurable' in w.tail) {
+        tailReason = w.tail.unmeasurable;
+      } else {
+        // A fresh measurement off a proven end: overwrite, never COALESCE.
+        d.prepare('UPDATE tracks SET outro_json = ?, tail_silence_ms = ?, tail_start_ms = ? WHERE id = ?').run(
+          w.tail.outro ? JSON.stringify(w.tail.outro) : null,
+          finite(w.tail.tailSilenceMs) != null ? Math.max(0, Math.round(w.tail.tailSilenceMs as number)) : null,
+          finite(w.tail.tailStartMs) != null ? Math.max(0, Math.round(w.tail.tailStartMs as number)) : null,
+          id,
+        );
+      }
+      fresh.push('tail');
+    }
+    if (w.vocal) {
+      d.prepare('UPDATE tracks SET vocal_ranges_json = ? WHERE id = ?').run(JSON.stringify(w.vocal.vocalRanges), id);
+      if (w.vocal.tailVocalRanges) {
+        const row = d.prepare('SELECT outro_json FROM tracks WHERE id = ?').get(id) as { outro_json: string | null } | undefined;
+        if (row?.outro_json) {
+          try {
+            const outro = JSON.parse(row.outro_json);
+            outro.vocalRanges = w.vocal.tailVocalRanges;
+            d.prepare('UPDATE tracks SET outro_json = ? WHERE id = ?').run(JSON.stringify(outro), id);
+          } catch { /* a corrupt outro keeps its old value */ }
+        }
+      }
+      fresh.push('vocal');
+    }
+    if (w.stems) {
+      d.prepare('UPDATE tracks SET stems_at = ? WHERE id = ?').run(new Date().toISOString(), id);
+      fresh.push('stems');
+    }
+    if (w.failed) {
+      d.prepare(
+        `UPDATE tracks SET analyze_error = ?, analyze_failed_at = ?,
+           analyze_fail_count = COALESCE(analyze_fail_count, 0) + 1 WHERE id = ?`,
+      ).run(w.failed.slice(0, 500), new Date().toISOString(), id);
+    } else {
+      d.prepare(
+        'UPDATE tracks SET analyze_error = NULL, analyze_failed_at = NULL, analyze_fail_count = NULL WHERE id = ?',
+      ).run(id);
+    }
+    syncTrackFacets(id, { fresh, source: w.source, tailReason });
+    if (w.clap) upsertTrackAudioVector(id, w.clap);
+  })();
+}
+
 // Consecutive failures after which a track drops out of every analysis scope.
 // Three, not one: a single failure is usually transient.
 export const MAX_ANALYSIS_FAILURES = 3;
