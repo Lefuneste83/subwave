@@ -138,7 +138,7 @@ function BackgroundImageField({
   const selectValue = selectedAsset ? `asset:${selectedAsset}` : isCustom ? 'custom' : '';
   const previewSrc = selectedAsset
     ? themeAssetUrl(selectedAsset)
-    : isCustom ? /^url\((['"]?)(https?:\/\/[^'")]+)\1\)$/.exec(trimmed)?.[2] ?? null : null;
+    : isCustom ? /^url\((['"]?)(https:\/\/[^'")]+)\1\)$/.exec(trimmed)?.[2] ?? null : null;
 
   const onSelect = (v: string) => {
     setErr(null);

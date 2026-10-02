@@ -88,7 +88,7 @@ test('display + mono font sets validate disjointly', () => {
   assert.ok(!isValidTokenValue('--mono-font', 'fraunces'), 'display id rejected for mono token');
 });
 
-test('background image accepts none, theme assets and http(s) URLs only', () => {
+test('background image accepts none, theme assets and https URLs only', () => {
   for (const v of [
     'none',
     'url("/theme-assets/sky.jpg")',
@@ -97,6 +97,11 @@ test('background image accepts none, theme assets and http(s) URLs only', () => 
     'url("https://example.com/bg.jpg")',
   ]) assert.ok(isValidTokenValue('--bg-image', v), `bg-image ${v}`);
   for (const v of [
+    'url("http://example.com/bg.jpg")',
+    "url('http://example.com/bg.jpg')",
+    'url(http://example.com/bg.jpg)',
+    'url("HTTP://example.com/bg.jpg")',
+    'url("//example.com/bg.jpg")',
     'url("javascript:alert(1)")',
     'url("data:image/png;base64,AAAA")',
     'url("/theme-assets/../settings.json")',
