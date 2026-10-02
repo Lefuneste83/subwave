@@ -478,8 +478,12 @@ export async function maybeRoll(ctx: SessionContext): Promise<Session> {
 function stampRolledFrom(next: Session, prev: Session) {
   const prevId = prev?.persona?.id ?? null;
   const nextId = next?.persona?.id ?? null;
+  // A genuine change of show only. The 4h safety cap also hard-rolls, with the
+  // key unchanged: without the key check a long show (e.g. 23:00-06:00) had
+  // its host "acknowledge a show change" to themself four hours in.
   const sameHostShowChange = !!prevId && !!nextId && prevId === nextId
     && prev.key.startsWith('show:') && next.key.startsWith('show:')
+    && prev.key !== next.key
     && settings.get().djBehaviour.sameHostAcknowledgement;
   next.handoffAired = false;
   next.rolledFrom = (prevId && nextId && (prevId !== nextId || sameHostShowChange))
