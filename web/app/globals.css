@@ -343,8 +343,8 @@ body::after {
    Sits UNDER a skin's own translucent panels/washes and under the paper-grain
    `body::after` above (still glazes over it — turn --grain down per-theme for
    a crisper image). Showcase embeds (`contained`) intentionally don't get
-   this class, so landing-page frames always follow the remote station's
-   plain swatches. */
+   this class, and their root resets --bg-image to none (player/shellClass.ts)
+   so a skin that paints the token itself stays plain there too. */
 .sw-player-shell {
     background-image: var(--bg-image, none);
     background-size: cover;

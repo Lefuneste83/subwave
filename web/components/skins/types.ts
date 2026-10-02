@@ -16,6 +16,10 @@
 // needs no code for this — just don't give your own root an opaque full-bleed
 // background that would hide it; render on top with translucent panels the
 // way ClassicSkin's ambient cover wash and Drift's colour washes already do.
+// A skin that paints the image itself (Platter, Subamp) must read it only as
+// var(--bg-image): a contained showcase resets that token on the shell root
+// (player/shellClass.ts), which is what keeps this station's background out of
+// another station's frame. Never set --bg-image or a literal url() in a skin.
 //
 // Skin styles are co-located, never added to globals.css. Keyboard shortcuts are
 // skin-owned; register them with useKeyboardShortcuts.
