@@ -22,6 +22,7 @@ import {
   SYSTEMIC_FAILURE_RUN,
 } from './analyze-capability.js';
 import { probeListenerCount } from '../broadcast/listeners.js';
+import type { AcousticsPlan, WorkRequest } from './acoustics-plan.js';
 
 // Status events for the panel, mirrored to the `[analyze] …` console line.
 const logEvent = makeEventLogger('analyze');
@@ -38,6 +39,10 @@ export interface AnalyzeOptions {
   // Widen to tracks with vocal_ranges_json NULL. Demucs is expensive and opt-in;
   // defaults from ANALYZE_VOCAL_ACTIVITY / settings.audio.vocalActivity.
   vocalBackfill?: boolean;
+  // A facet plan (music/acoustics-plan.ts) REPLACES the scope: exactly its
+  // tracks, each with its own worker flags. reAnalyze and the four widenings
+  // are ignored. Absent = today's pass, unchanged.
+  plan?: AcousticsPlan;
 }
 
 // Env wins ON, never off; else the admin toggle (settings.audio.embeddings).
@@ -231,7 +236,9 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   // Snapshot the already-analysed ids BEFORE the clear wipes the bpm marker.
   // A raw --re-analyze leaves the scope null and redoes the whole library.
   let reAnalyzeScope: string[] | null = null;
-  if (opts.reAnalyze) {
+  const plan = opts.plan;
+  if (plan && opts.reAnalyze) console.log('[analyze] facet plan given — ignoring --re-analyze');
+  if (opts.reAnalyze && !plan) {
     if (opts.rescan) reAnalyzeScope = db.analysedIds();
     db.clearAnalysis({ keepVocal: !vocalBackfill, clearStems: stemCache });
     console.log(
@@ -241,9 +248,12 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   }
 
   const cap = opts.limit && opts.limit > 0 ? opts.limit : undefined;
-  const bpmIds = reAnalyzeScope
-    ? (cap ? reAnalyzeScope.slice(0, cap) : reAnalyzeScope)
-    : db.needsAnalysisIds(cap);
+  // A facet plan brings its own scope: skip the legacy scope queries entirely.
+  const bpmIds = plan
+    ? []
+    : reAnalyzeScope
+      ? (cap ? reAnalyzeScope.slice(0, cap) : reAnalyzeScope)
+      : db.needsAnalysisIds(cap);
   let ids = bpmIds;
 
   // Audio backfill: also target analysed tracks lacking a CLAP vector, so
@@ -259,14 +269,14 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     backend,
   });
   const audioBackfill = audioDecision.widen;
-  if (audioBackfill && !reAnalyzeScope) {
+  if (audioBackfill && !reAnalyzeScope && !plan) {
     const seen = new Set(bpmIds);
     const audioIds = db.unanalysedAudioIds(cap).filter(id => !seen.has(id));
     ids = cap ? [...bpmIds, ...audioIds].slice(0, cap) : [...bpmIds, ...audioIds];
     if (audioIds.length > 0) {
       console.log(`[analyze] audio backfill: +${ids.length - bpmIds.length} already-analysed tracks missing an audio vector`);
     }
-  } else if (audioDecision.notice && !reAnalyzeScope) {
+  } else if (audioDecision.notice && !reAnalyzeScope && !plan) {
     // Warn on a broken model (operator-clearable), info when it was never built.
     logEvent(analyzer.audioEmbeddingError() ? 'warning' : 'info', audioDecision.notice);
   }
@@ -276,7 +286,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   // detection, only on an explicit `=== true` — old sidecars never report the
   // flag and a stale image must keep the head-only scope.
   const includeTailMissing = analyzer.tailVocalAvailable() === true;
-  if (vocalBackfill && !reAnalyzeScope) {
+  if (vocalBackfill && !reAnalyzeScope && !plan) {
     const seen = new Set(ids);
     const vocalIds = db.needsVocalIds(cap, includeTailMissing).filter(id => !seen.has(id));
     const before = ids.length;
@@ -284,7 +294,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     if (ids.length > before) {
       console.log(`[analyze] vocal backfill: +${ids.length - before} tracks missing vocal-activity ranges`);
     }
-  } else if (vocalDecision.notice && !reAnalyzeScope) {
+  } else if (vocalDecision.notice && !reAnalyzeScope && !plan) {
     // Only when widening was actually attempted.
     logEvent(analyzer.vocalActivityError() ? 'warning' : 'info', vocalDecision.notice);
   }
@@ -295,14 +305,18 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   // EVERY stem write in the loop below (#1257), decremented per NET-NEW dir.
   let stemSlotsLeft = 0;
   let existingStemDirs: Set<string> = new Set();
-  if (stemCache) {
+  // Sizing the budget walks every file in the stem cache. A facet plan decides
+  // stems per track and sizes the budget itself below, only when it asks for
+  // stems: walked here, a tail-only plan waited 12 min on a 45k-dir NFS cache
+  // before its first request (5 Oct 2026) for figures it never reads.
+  if (stemCache && !plan) {
     stemSlotsLeft = await stemCacheStore.headroomTracks();
     existingStemDirs = await stemCacheStore.cachedTrackIdSet();
   }
   // Net-new stem dirs this pass allocated (settled at the end of the pass).
   const newStemIds: string[] = [];
   let rewroteExistingStems = false;
-  if (stemCache && !reAnalyzeScope) {
+  if (stemCache && !reAnalyzeScope && !plan) {
     // The loop spends stemSlotsLeft in ids order and the earlier widenings'
     // tracks run FIRST, draining slots before this slice is reached. Reserve
     // them up front, or the announcement over-promises.
@@ -340,7 +354,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
         );
       }
     }
-  } else if (stemDecision.notice && !reAnalyzeScope) {
+  } else if (stemDecision.notice && !reAnalyzeScope && !plan) {
     // Same warn/info split as audio and vocal above.
     logEvent(analyzer.vocalActivityError() ? 'warning' : 'info', stemDecision.notice);
   }
@@ -351,6 +365,39 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   if (vocalBackfill || stemCache) {
     for (const id of ids) fullAnalysisIds.add(id);
   }
+
+  // A facet plan replaces everything the widenings above decided: the plan's
+  // tracks, in the plan's order, each with its own request flags.
+  const planned = new Map<string, WorkRequest>();
+  let planStemsOffline = false;
+  if (plan) {
+    for (const item of plan.items) planned.set(item.id, item.request);
+    ids = plan.items.map(i => i.id);
+    logEvent(
+      'info',
+      `Facet plan: ${plan.facets.join(', ')} where ${plan.where.kind}` +
+        `${plan.where.reason ? ':' + plan.where.reason : ''} — ${ids.length} tracks`,
+    );
+    const wantsStems = plan.items.some(i => i.request.stems);
+    if (wantsStems) {
+      // The plan's own root check: the one above only runs with the settings
+      // toggle on, and an unmounted share must not read as an empty cache.
+      const root = await stemCacheStore.stemsRootStatus({ prepare: true });
+      if (!root.online) {
+        planStemsOffline = true;
+        logEvent('warning', root.message ?? 'Stem cache offline: stems skipped this plan');
+      } else {
+        if (root.message) logEvent('warning', root.message);
+        // The only place a plan sizes the budget (the widening above skips plans),
+        // whether or not the settings toggle is on: an explicit stems plan needs it.
+        stemSlotsLeft = await stemCacheStore.headroomTracks();
+        existingStemDirs = await stemCacheStore.cachedTrackIdSet();
+      }
+    }
+  }
+  // Pass-wide flags the tail of the pass reports on (sweep, Demucs warning).
+  const passStems = plan ? !planStemsOffline && plan.items.some(i => i.request.stems) : stemCache;
+  const passVocal = plan ? plan.items.some(i => i.request.vocal) : vocalBackfill;
 
   // Say what the scope leaves out: "all tracks current" is also true of a
   // library whose files can never be analysed.
@@ -369,7 +416,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     await scoreAudioMoods();
     return { available: true, backend, analyzed: 0, failed: 0, scope: 0, audioEmbedded: 0, vocalAnalyzed: 0 };
   }
-  if (stemCache) await stemCacheStore.markPassPending();
+  if (passStems) await stemCacheStore.markPassPending();
   logEvent('info', `Analysing audio for ${ids.length.toLocaleString('en-GB')} tracks…`);
   reportProgress({ phase: 'analyze', label: 'Analysing audio', done: 0, total: ids.length });
 
@@ -423,8 +470,11 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   }
 
   const allocateStems = (id: string): string | undefined => {
+    const want = planned.get(id);
+    // A planned track gets stems only when its plan asks for them.
+    if (plan && (!want?.stems || planStemsOffline)) return undefined;
     const trackStemDecision = stemCacheStore.stemWriteDecision({
-      cacheOn: stemCache,
+      cacheOn: plan ? true : stemCache,
       slotsLeft: stemSlotsLeft,
       hasExistingDir: existingStemDirs.has(id),
     });
@@ -433,7 +483,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
       newStemIds.push(id);
     }
     if (trackStemDecision.want && existingStemDirs.has(id)) rewroteExistingStems = true;
-    if (stemCache && !trackStemDecision.want && !stemGateAnnounced) {
+    if ((plan ? true : stemCache) && !trackStemDecision.want && !stemGateAnnounced) {
       stemGateAnnounced = true;
       console.log(
         `[analyze] stem cache budget reached mid-pass — stems skipped for the remaining net-new tracks ` +
@@ -448,7 +498,10 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     downloadPromise?: Prefetch,
     admittedStems?: { dir: string | undefined },
   ): Promise<TrackWorkResult> => {
-    const embeddingOnly = analysisModeForTrack(id, fullAnalysisIds, audioBackfill) === 'embedding-only';
+    const want = planned.get(id);
+    const embeddingOnly = want
+      ? want.embeddingOnly
+      : analysisModeForTrack(id, fullAnalysisIds, audioBackfill) === 'embedding-only';
     let localPath: string | null = null;
     let localComplete: boolean | undefined;
 
@@ -466,10 +519,12 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
       }
       // embed:true lazy-loads CLAP on the backend; omitted when audio is off so
       // it keeps its env-driven default.
-      const embed = audioBackfill ? true : undefined;
+      // A planned track says CLAP on or off explicitly (false = no CLAP for it).
+      const embed = want ? want.clap : audioBackfill ? true : undefined;
+      const vocalWantedHere = want ? want.vocal : vocalBackfill;
       // Lyric-first vocal ranges (#1125), before spending a Demucs separation.
       let lyricVocal: LyricVocalResult | null = null;
-      if (vocalBackfill) {
+      if (vocalWantedHere) {
         try {
           lyricVocal = deriveVocalFromLyrics(await subsonic.getStructuredLyrics(id));
         } catch {
@@ -479,7 +534,11 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
       // The concurrent path reserved headroom at admission; serial spends here.
       const stems_dir = admittedStems ? admittedStems.dir : allocateStems(id);
       // A lyric-decided track skips Demucs unless stem caching needs it anyway.
-      const vocal = vocalBackfill ? (lyricVocal && !stems_dir ? false : true) : undefined;
+      // Planned: vocal off unless asked — except that a stems request needs the
+      // separation, which an explicit vocal=false would veto in the worker.
+      const vocal = want
+        ? (want.vocal ? (lyricVocal && !stems_dir ? false : true) : (stems_dir ? undefined : false))
+        : vocalBackfill ? (lyricVocal && !stems_dir ? false : true) : undefined;
       const a = localPath
         ? await analyzer.analyzePathWithUrlFallback(id, localPath, {
             embed,
@@ -660,7 +719,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   // may have written hundreds of new stem dirs (lowest stem-priority first —
   // NOT oldest first, or this pass's best writes would be the first evicted;
   // the hourly cleanup cron sweeps too, this just settles the bill promptly).
-  if (stemCache) {
+  if (passStems) {
     // New dirs can be added to the baseline. Rewrites and failed settlement
     // require a fresh walk, even if an old under-budget snapshot remains.
     const settled = await stemCacheStore.settlePassWrites(newStemIds, undefined, {
@@ -688,7 +747,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
 
   // The worker degrades silently when Demucs fails to load: every track reads
   // "ok" with vocal_ranges omitted, re-targeting the same tracks forever (#996).
-  if (vocalBackfill && analyzed > 0 && vocalAnalyzed === 0) {
+  if (passVocal && analyzed > 0 && vocalAnalyzed === 0) {
     logEvent(
       'warning',
       'Vocal backfill stored no vocal-activity ranges — Demucs likely failed to load at runtime; check the analyzer container logs for "Demucs load failed"',
