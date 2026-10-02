@@ -380,3 +380,35 @@ export function facetCounts(): FacetCount[] {
     };
   });
 }
+
+// One stored facet row, as the planner (music/acoustics-plan.ts) reads it.
+export interface FacetCell {
+  status: FacetStatus;
+  version: number;
+  attempts: number;
+  reason: string | null;
+}
+
+// Stored rows for `facets`, keyed by track then facet. Tracks with no row for
+// a facet are simply absent from that inner map (= never attempted).
+export function loadFacetState(facets: readonly Facet[]): Map<string, Map<Facet, FacetCell>> {
+  const out = new Map<string, Map<Facet, FacetCell>>();
+  if (facets.length === 0) return out;
+  const rows = requireDb()
+    .prepare(
+      `SELECT track_id, facet, status, version, attempts, reason FROM track_facet_status
+        WHERE facet IN (${facets.map(() => '?').join(',')})`,
+    )
+    .all(...facets) as Array<FacetCell & { track_id: string; facet: Facet }>;
+  for (const r of rows) {
+    let m = out.get(r.track_id);
+    if (!m) out.set(r.track_id, (m = new Map()));
+    m.set(r.facet, { status: r.status, version: r.version, attempts: r.attempts, reason: r.reason });
+  }
+  return out;
+}
+
+// Every catalogued track id, in the stable order the passes resume in.
+export function allTrackIdsOrdered(): string[] {
+  return (requireDb().prepare('SELECT id FROM tracks ORDER BY id').all() as Array<{ id: string }>).map(r => r.id);
+}
