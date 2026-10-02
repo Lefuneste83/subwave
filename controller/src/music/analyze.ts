@@ -23,6 +23,7 @@ import {
 } from './analyze-capability.js';
 import { probeListenerCount } from '../broadcast/listeners.js';
 import type { AcousticsPlan, WorkRequest } from './acoustics-plan.js';
+import type { Facet } from './library-db/facets.js';
 
 // Status events for the panel, mirrored to the `[analyze] …` console line.
 const logEvent = makeEventLogger('analyze');
@@ -347,8 +348,12 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   // A facet plan replaces everything the widenings above decided: the plan's
   // tracks, in the plan's order, each with its own request flags.
   const planned = new Map<string, WorkRequest>();
+  const plannedFacets = new Map<string, Facet[]>();
   if (plan) {
-    for (const item of plan.items) planned.set(item.id, item.request);
+    for (const item of plan.items) {
+      planned.set(item.id, item.request);
+      plannedFacets.set(item.id, item.facets);
+    }
     ids = plan.items.map(i => i.id);
     logEvent(
       'info',
@@ -363,6 +368,27 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
       existingStemDirs = await stemCacheStore.cachedTrackIdSet();
     }
   }
+  // A facet plan on a backend that speaks the facet protocol asks for exactly
+  // the planned facets; an older backend gets the flat request (flags above).
+  const useFacets = !!plan && analyzer.facetsAvailable() === true;
+  const rangedOk = useFacets && analyzer.rangedTailAvailable() === true;
+  const isRanged = (id: string): boolean => {
+    const f = plannedFacets.get(id);
+    return rangedOk && !!f && f.length === 1 && f[0] === 'tail';
+  };
+  if (plan) {
+    logEvent(
+      'info',
+      useFacets
+        ? `Analyzer speaks the facet protocol${rangedOk ? ' (tail-only tracks read by HTTP Range)' : ''}`
+        : 'Analyzer predates the facet protocol — planned tracks get a flat analysis',
+    );
+  }
+  let rangedTracks = 0;
+  let rangedBytes = 0;
+  let rangedSize = 0;
+  const fallbackReasons = new Map<string, number>();
+
   // Pass-wide flags the tail of the pass reports on (sweep, Demucs warning).
   const passStems = plan ? plan.items.some(i => i.request.stems) : stemCache;
   const passVocal = plan ? plan.items.some(i => i.request.vocal) : vocalBackfill;
@@ -427,9 +453,13 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
 
   // Concurrent sidecar jobs stage only AFTER admission, so a quiet-time pause
   // never keeps downloading work that has not started.
-  type Prefetch = Promise<{ path: string; complete: boolean } | { err: any }>;
+  type Prefetch = Promise<{ path: string; complete: boolean } | { err: any } | { skip: true }>;
+  // A ranged tail read fetches its own few MB from Navidrome: no capped
+  // download to stage for it.
   const prefetch = (songId: string): Prefetch =>
-    analyzer.downloadCapped(songId).then((r) => r, (err) => ({ err }));
+    isRanged(songId)
+      ? Promise.resolve({ skip: true as const })
+      : analyzer.downloadCapped(songId).then((r) => r, (err) => ({ err }));
 
   interface TrackWorkResult {
     audioEmbedded: boolean;
@@ -456,6 +486,88 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     return trackStemDecision.want ? stemCacheStore.dirFor(id) : undefined;
   };
 
+  // One planned track over the facet protocol: ask for exactly its facets,
+  // write each answer to its own columns + facet row (writeFacetResults).
+  const runFacetTrack = async (
+    id: string,
+    localPath: string | null,
+    localComplete: boolean | undefined,
+    admittedStems?: { dir: string | undefined },
+  ): Promise<TrackWorkResult> => {
+    const facets = plannedFacets.get(id)!;
+    const ranged = isRanged(id);
+    const stems_dir = facets.includes('stems')
+      ? (admittedStems ? admittedStems.dir : allocateStems(id))
+      : undefined;
+    // A tail measured on its own also brings the outro's vocal ranges when the
+    // station uses vocal activity — otherwise the vocal facet turns head-only
+    // and the regular vocal backfill would chase these tracks forever.
+    const tailVocals = facets.includes('tail') && !facets.includes('vocal') && vocalBackfill;
+    const res = await analyzer.analyzeFacets(
+      id,
+      { facets: facets as analyzer.FacetName[], ranged, tailVocals, stems_dir, complete: localComplete },
+      ranged ? undefined : (localPath ?? undefined),
+    );
+    if (res.source.kind === 'ranged') {
+      rangedTracks += 1;
+      rangedBytes += res.source.bytesRead ?? 0;
+      rangedSize += res.source.size ?? 0;
+    } else if (res.source.fallback) {
+      fallbackReasons.set(res.source.fallback, (fallbackReasons.get(res.source.fallback) ?? 0) + 1);
+    }
+    const source: db.FacetSource =
+      res.source.kind === 'ranged' ? 'ranged'
+        : res.source.kind === 'capped-download' ? (res.source.complete === false ? 'capped' : 'url')
+          : localComplete === true ? 'full' : localComplete === false ? 'capped' : 'unknown';
+
+    const w: db.FacetWrite = { source };
+    const failures: string[] = [];
+    let wroteClap = false;
+    for (const f of facets) {
+      const a = res.facets[f as analyzer.FacetName];
+      if (!a) continue;
+      if (a.status === 'failed') { failures.push(`${f}: ${a.reason ?? 'failed'}`); continue; }
+      if (a.status === 'unavailable') continue;
+      const r = a.result;
+      if (f === 'head' && a.status === 'ok') {
+        w.head = {
+          bpm: r.bpm, musicalKey: r.musicalKey, introMs: r.introMs, confidence: r.confidence,
+          sections: r.sections, pace: r.paceCurve, beats: r.beats, bars: r.bars, keyRanges: r.keyRanges,
+          leadSilenceMs: r.leadSilenceMs,
+        };
+      } else if (f === 'loudness') {
+        w.loudness = a.status === 'ok'
+          ? { loudnessLufs: r.loudnessLufs, peakDb: r.peakDb }
+          : { unmeasurable: a.reason ?? 'not-measured' };
+      } else if (f === 'tail') {
+        w.tail = a.status === 'ok'
+          ? { outro: r.outro, tailSilenceMs: r.tailSilenceMs, tailStartMs: r.tailStartMs }
+          : { unmeasurable: a.reason ?? 'tail-not-measured' };
+      } else if (f === 'clap' && a.status === 'ok' && r.audioEmbedding?.length === db.AUDIO_EMBEDDING_DIM) {
+        w.clap = r.audioEmbedding;
+        wroteClap = true;
+      } else if (f === 'vocal' && a.status === 'ok') {
+        w.vocal = { vocalRanges: r.vocalRanges ?? [], tailVocalRanges: a.tailVocalRanges };
+      } else if (f === 'stems' && a.status === 'ok') {
+        w.stems = { attempted: true };
+      }
+    }
+    const answered = facets.filter((f) => {
+      const a = res.facets[f as analyzer.FacetName];
+      return a && a.status !== 'failed' && a.status !== 'unavailable';
+    });
+    // Nothing usable came back: fail the track like a flat analysis would, so
+    // the pass's systemic-failure guard sees it.
+    if (failures.length > 0 && answered.length === 0) throw new Error(failures.join('; '));
+    if (failures.length > 0) w.failed = failures.join('; ');
+    if (wroteClap && !audioMetaStamped) {
+      db.setAudioEmbeddingMeta(audioModelLabel, db.AUDIO_EMBEDDING_DIM);
+      audioMetaStamped = true;
+    }
+    db.writeFacetResults(id, w);
+    return { audioEmbedded: wroteClap, vocalAnalyzed: !!w.vocal };
+  };
+
   const runTrack = async (
     id: string,
     index: number,
@@ -471,7 +583,9 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
 
     try {
       const settled = await (downloadPromise ?? prefetch(id));
-      if ('err' in settled) {
+      if ('skip' in settled) {
+        // ranged: nothing staged
+      } else if ('err' in settled) {
         const err: any = settled.err;
         // A non-audio response (stale library entry) is not retryable by url.
         if (err instanceof analyzer.NonAudioResponseError) throw err;
@@ -480,6 +594,9 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
       } else {
         localPath = settled.path;
         localComplete = settled.complete;
+      }
+      if (useFacets && plannedFacets.has(id)) {
+        return await runFacetTrack(id, localPath, localComplete, admittedStems);
       }
       // embed:true lazy-loads CLAP on the backend; omitted when audio is off so
       // it keeps its env-driven default.
@@ -673,6 +790,17 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   // A trailing failure run shorter than the systemic threshold never met a
   // success, but nothing proved the pass unhealthy either, so those stamps land.
   flushFailureStamps();
+
+  if (rangedTracks > 0) {
+    logEvent(
+      'info',
+      `Ranged tail reads: ${rangedTracks} tracks, ${(rangedBytes / 1024 ** 2).toFixed(0)} MB fetched` +
+        (rangedSize > 0 ? ` (${Math.round((rangedBytes / rangedSize) * 100)} % of their total size)` : ''),
+    );
+  }
+  for (const [why, n] of fallbackReasons) {
+    console.log(`[analyze] ${n} track(s) fell back to the capped download: ${why}`);
+  }
 
   // Best-effort sweep of the staging dir in case a prefetch left an orphan.
   await rm(`${config.stateRoot}/analyze-tmp`, { recursive: true, force: true }).catch(() => {});

@@ -184,7 +184,7 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
   }
   if (facets.includes('tail')) {
     warnings.push(
-      'tail: the analyzer still reads a byte-capped download, so a large file can come back unmeasurable again (ranged fetch is a later change)',
+      'tail: without ranged reads (older analyzer, VBR MP3 without a header, WAV/m4a) the capped download is used and a large file can come back unmeasurable again',
     );
   }
   if (facets.includes('stems')) {
@@ -238,9 +238,14 @@ export function formatPlan(plan: AcousticsPlan, sample = 10): string[] {
     out.push(`  ${c.facet.padEnd(9)} ${String(c.matched).padStart(8)} ${String(c.planned).padStart(8)}  ${skipped}`);
   }
   const embedOnly = plan.items.filter((i) => i.request.embeddingOnly).length;
-  out.push(`  worker requests: ${plan.items.length - embedOnly} full analysis, ${embedOnly} CLAP-only`);
+  const tailOnly = plan.items.filter((i) => i.facets.length === 1 && i.facets[0] === 'tail').length;
+  out.push(
+    `  facet-capable analyzer: one request per track for exactly its facets` +
+      (tailOnly ? ` (${tailOnly} tail-only, read by HTTP Range where possible)` : ''),
+  );
+  out.push(`  older analyzer: ${plan.items.length - embedOnly} full analysis, ${embedOnly} CLAP-only`);
   if (plan.rideAlong.length) {
-    out.push(`  note: a full analysis also recomputes ${plan.rideAlong.join(', ')} (one worker call per track)`);
+    out.push(`  note: on an older analyzer a full analysis also recomputes ${plan.rideAlong.join(', ')}`);
   }
   for (const w of plan.warnings) out.push(`  note: ${w}`);
   if (plan.items.length) {
