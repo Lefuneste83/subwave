@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useDynamicStyle } from '../../../hooks/useDynamicStyle';
 import { notify, errorMessage } from '../../../lib/notify';
-import { adminJson, useAdminMutation } from '../../../lib/admin-query';
+import { adminJson, useAdminMutation, useAdminQuery } from '../../../lib/admin-query';
 import { applyTheme, cacheTheme, resolveTokenValue, themeAssetUrl } from '../../../lib/theme';
 import { useThemeSwitcher } from '../../ThemeProvider';
 import { V3AlertDialog } from '../../ui/alert-dialog';
@@ -115,18 +115,38 @@ function BackgroundImageField({
   adminFetch: (path: string, init?: RequestInit) => Promise<Response>;
   label: string;
 }) {
-  const [assets, setAssets] = useState<ThemeAssetRow[] | null>(null);
-  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
-    let live = true;
-    adminJson<{ assets: ThemeAssetRow[] }>(adminFetch, '/themes/assets')
-      .then(r => { if (live) setAssets(r.assets); })
-      .catch(e => { if (live) { setAssets([]); setErr(errorMessage(e)); } });
-    return () => { live = false; };
-  }, [adminFetch]);
+  // Cacheable admin read → TanStack Query (web/AGENTS.md). The list failing is
+  // shown under the field like an upload error; the picker then offers only
+  // "none" and a custom URL.
+  const assetsQuery = useAdminQuery<ThemeAssetRow[]>({
+    key: adminThemeKeys.assets(),
+    adminFetch,
+    request: async (fetcher, signal) => {
+      const r = await adminJson<{ assets?: ThemeAssetRow[] }>(fetcher, '/themes/assets', undefined, signal);
+      return Array.isArray(r?.assets) ? r.assets : [];
+    },
+    toastOnError: false,
+  });
+  const assets = assetsQuery.data ?? (assetsQuery.error ? [] : null);
+  const listErr = assetsQuery.error ? errorMessage(assetsQuery.error) : null;
+
+  // The upload's receipt carries the whole list, so it replaces the cached
+  // one instead of costing a refetch.
+  const uploadMutation = useAdminMutation<{ asset: ThemeAssetRow; assets: ThemeAssetRow[] }, File>({
+    adminFetch,
+    request: (file, fetcher) => {
+      const body = new FormData();
+      body.append('file', file);
+      // No Content-Type header: the browser sets the multipart boundary.
+      return adminJson(fetcher, '/themes/assets', { method: 'POST', body });
+    },
+    onDone: (r, _file, client) => { client.setQueryData(adminThemeKeys.assets(), r.assets); },
+    toastOnError: false,
+  });
+  const busy = uploadMutation.isPending;
 
   const trimmed = value.trim();
   const selectedAsset = ASSET_TOKEN_RE.exec(trimmed)?.[2] ?? null;
@@ -138,7 +158,7 @@ function BackgroundImageField({
   const selectValue = selectedAsset ? `asset:${selectedAsset}` : isCustom ? 'custom' : '';
   const previewSrc = selectedAsset
     ? themeAssetUrl(selectedAsset)
-    : isCustom ? /^url\((['"]?)(https?:\/\/[^'")]+)\1\)$/.exec(trimmed)?.[2] ?? null : null;
+    : isCustom ? /^url\((['"]?)(https:\/\/[^'")]+)\1\)$/.exec(trimmed)?.[2] ?? null : null;
 
   const onSelect = (v: string) => {
     setErr(null);
@@ -149,23 +169,15 @@ function BackgroundImageField({
   };
 
   const upload = async (file: File) => {
-    setBusy(true);
     setErr(null);
     try {
-      const body = new FormData();
-      body.append('file', file);
-      // No Content-Type header: the browser sets the multipart boundary.
-      const r = await adminJson<{ asset: ThemeAssetRow; assets: ThemeAssetRow[] }>(
-        adminFetch, '/themes/assets', { method: 'POST', body },
-      );
-      setAssets(r.assets);
+      const r = await uploadMutation.mutateAsync(file);
       setCustomMode(false);
       onChange(assetToken(r.asset.name));
       notify.ok(`uploaded ${r.asset.name}`);
     } catch (e) {
       setErr(errorMessage(e));
     } finally {
-      setBusy(false);
       if (fileRef.current) fileRef.current.value = '';
     }
   };
@@ -212,7 +224,7 @@ function BackgroundImageField({
       {previewSrc && (
         <img src={previewSrc} alt="" className="h-20 w-36 border border-line object-cover" />
       )}
-      {err && <span className="text-[11px] text-[var(--danger)]">{err}</span>}
+      {(err || listErr) && <span className="text-[11px] text-[var(--danger)]">{err || listErr}</span>}
       <span className="text-[10px] text-ink-faint">
         JPEG, PNG, WebP or GIF, up to 8 MB. Stored in <code>state/themes/</code>; turn grain down for a crisper picture.
       </span>

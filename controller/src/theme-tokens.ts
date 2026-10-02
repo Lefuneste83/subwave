@@ -102,11 +102,13 @@ export const COLOR_VAL_RE = /^[^;{}<>]{1,100}$/;
 
 // Background image → "none", or a CSS url(...) pointing at either our own
 // /theme-assets/<file> static route (an image an operator drops into
-// ${STATE_DIR}/themes/, served by routes/public.ts) or an https(s) URL —
-// never a bare scheme like javascript:/data: that could smuggle a payload
-// into an inline style. Quotes are optional but must match.
+// ${STATE_DIR}/themes/, served by routes/public.ts) or an https:// URL —
+// never plain http:// (mixed content on an HTTPS station, and a cleartext
+// fetch the operator did not ask for), and never a bare scheme like
+// javascript:/data: that could smuggle a payload into an inline style.
+// Quotes are optional but must match.
 export const IMAGE_VAL_RE =
-  /^url\((['"]?)(\/theme-assets\/[a-zA-Z0-9._-]{1,120}|https?:\/\/[^\s'"()<>{};]{1,300})\1\)$/;
+  /^url\((['"]?)(\/theme-assets\/[a-zA-Z0-9._-]{1,120}|https:\/\/[^\s'"()<>{};]{1,300})\1\)$/;
 
 // Colour → the safety regex. Font → a curated id, never a free font string.
 // Grain → a number in [0,1]. Image → "none" or the url() shape above.
