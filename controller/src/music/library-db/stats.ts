@@ -44,6 +44,10 @@ export function invalidateStats(): void {
   statsCache = null;
   labelOnlyCache = null;
   pickStatsCache = null;
+  if (pickStatsRefresh) {
+    clearTimeout(pickStatsRefresh);
+    pickStatsRefresh = null;
+  }
 }
 
 // The five numbers a live pick reads (#1723), without the dashboard's ~9 full
@@ -51,9 +55,9 @@ export function invalidateStats(): void {
 // pick paid the whole dashboard bill on the synchronous DB thread (4.6 s on a
 // 76k-track library, measured with trace.phase). These only move when the
 // library is walked or tagged, and they size recency windows and gate show
-// locks, so a few minutes of staleness is harmless. Two scans remain (tagged
-// total, distinct artists) instead of ~9, once per TTL; the coverage checks
-// stop at the first matching row.
+// locks, so a few minutes of staleness is harmless. The tagged total and
+// distinct artists come from a partial index; the coverage checks stop at the
+// first matching row.
 const PICK_STATS_TTL_MS = 10 * 60 * 1000;
 
 export interface PickStats {
@@ -66,7 +70,29 @@ export interface PickStats {
   hasEnergyCoverage: boolean;
 }
 
+// After the TTL a pick still gets the last numbers at once; the recompute runs
+// off the pick path, a little later. Only the very first call (or the first
+// after invalidateStats) computes inline.
+const PICK_STATS_REFRESH_DELAY_MS = 15_000;
+
 let pickStatsCache: { at: number; value: PickStats } | null = null;
+let pickStatsRefresh: ReturnType<typeof setTimeout> | null = null;
+
+function schedulePickStatsRefresh(): void {
+  if (pickStatsRefresh) return;
+  const nonce = getDbNonce();
+  pickStatsRefresh = setTimeout(() => {
+    pickStatsRefresh = null;
+    // A handle swap in between already cleared the cache; the next call recomputes.
+    if (getDbNonce() !== nonce || !pickStatsCache) return;
+    try {
+      pickStatsCache = { at: Date.now(), value: computePickStats() };
+    } catch (err) {
+      console.warn('[library-db] pick stats refresh failed:', (err as Error).message);
+    }
+  }, PICK_STATS_REFRESH_DELAY_MS);
+  pickStatsRefresh.unref?.();
+}
 
 export function pickStats(): PickStats {
   const now = Date.now();
@@ -86,27 +112,53 @@ export function pickStats(): PickStats {
     pickStatsCache = { at: now, value };
     return value;
   }
+  if (pickStatsCache) {
+    schedulePickStatsRefresh();
+    return pickStatsCache.value;
+  }
   const value = computePickStats();
   pickStatsCache = { at: Date.now(), value };
   return value;
 }
 
+// Tagged-track counts without the wide tracks rows (#1723): the tagged total and
+// the distinct-artist count are answered from this covering index alone. The
+// index condition is JSON-free on purpose: a partial index WHERE runs on every
+// write, and json_array_length() there would refuse to save a row whose moods
+// JSON is malformed. The JSON check runs at query time on the indexed moods
+// copy instead. Created at open, outside the user_version chain so it never
+// takes an upstream migration number; idempotent, built once (~1 s at 76k).
+export function ensureStatsIndexes(): void {
+  requireDb()
+    .prepare(
+      'CREATE INDEX IF NOT EXISTS idx_tracks_tagged_artist ON tracks(LOWER(TRIM(artist)), moods) WHERE moods IS NOT NULL',
+    )
+    .run();
+}
+
+// Shared by stats() and pickStats() so the two can never disagree. Both are
+// answered from idx_tracks_tagged_artist alone: the artist key must be the
+// indexed expression, or SQLite falls back to reading every tracks row.
+// `k != ''` drops blank artists; COUNT(DISTINCT) already skips NULL.
+function countTagged(): number {
+  return (requireDb().prepare(`SELECT COUNT(*) AS n FROM tracks WHERE ${SQL_HAS_MOODS}`).get() as { n: number }).n;
+}
+
+function countDistinctTaggedArtists(): number {
+  return (requireDb()
+    .prepare(
+      `SELECT COUNT(DISTINCT k) AS n
+         FROM (SELECT LOWER(TRIM(artist)) AS k FROM tracks WHERE ${SQL_HAS_MOODS})
+        WHERE k != ''`,
+    )
+    .get() as { n: number }).n;
+}
+
 function computePickStats(): PickStats {
   const d = requireDb();
   const mirrorTotal = (d.prepare('SELECT COUNT(*) AS n FROM tracks').get() as { n: number }).n;
-  // Same predicates as computeStats(), so the two can never disagree.
-  const distinctArtists = (
-    d
-      .prepare(
-        `SELECT COUNT(DISTINCT LOWER(TRIM(artist))) AS n
-         FROM tracks
-         WHERE ${SQL_HAS_MOODS}
-           AND artist IS NOT NULL
-           AND TRIM(artist) != ''`,
-      )
-      .get() as { n: number }
-  ).n;
-  const total = (d.prepare(`SELECT COUNT(*) AS n FROM tracks WHERE ${SQL_HAS_MOODS}`).get() as { n: number }).n;
+  const distinctArtists = countDistinctTaggedArtists();
+  const total = countTagged();
   const withEmbedding = (d.prepare('SELECT COUNT(*) AS n FROM track_vectors').get() as { n: number }).n;
   const withAudioEmbedding = (d.prepare('SELECT COUNT(*) AS n FROM track_audio_vectors').get() as { n: number }).n;
   // byMood has a key iff some row's moods JSON holds a value; byEnergy iff some
@@ -140,26 +192,12 @@ export function changeToken(): string {
 
 function computeStats(): LibraryStats {
   const d = requireDb();
-  const total =
-    (d.prepare(`SELECT COUNT(*) AS n FROM tracks WHERE ${SQL_HAS_MOODS}`).get() as {
-      n: number;
-    }).n;
+  const total = countTagged();
   // Every row, tagged or not. `total` counts only TAGGED tracks and is the wrong
   // denominator for the recency windows, no-repeat clamp and deepCuts gate.
   const mirrorTotal =
     (d.prepare(`SELECT COUNT(*) AS n FROM tracks`).get() as { n: number }).n;
-  const distinctArtists =
-    (
-      d
-        .prepare(
-          `SELECT COUNT(DISTINCT LOWER(TRIM(artist))) AS n
-           FROM tracks
-           WHERE ${SQL_HAS_MOODS}
-             AND artist IS NOT NULL
-             AND TRIM(artist) != ''`,
-        )
-        .get() as { n: number }
-    ).n;
+  const distinctArtists = countDistinctTaggedArtists();
   const byMood: Record<string, number> = {};
   for (const r of d
     .prepare(
