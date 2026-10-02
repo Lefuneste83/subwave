@@ -213,6 +213,129 @@ def t_embed_windows_is_decode_then_facet():
     assert via_path == direct, f"{via_path} != {direct}"
 
 
+
+# ── facet protocol ────────────────────────────────────────────────────────
+
+class FakeSource:
+    """Stands in for FileSource: records what was decoded."""
+
+    def __init__(self, tail=None, duration_s=200.0):
+        self.loads = []
+        self._tail = tail
+        self.duration_s = duration_s
+
+    def load(self, librosa, sr, mono, offset=0.0, duration=None):
+        self.loads.append((sr, offset, duration))
+        return tone(duration or 20.0, sr=SR), sr
+
+    def tail(self, librosa):
+        return self._tail
+
+    def clap_windows(self, librosa):
+        self.loads.append(("clap",))
+        return iter([np.ones(10)])
+
+
+def t_parse_facets_rejects_unknown_and_dedupes():
+    assert aw.parse_facets(["tail", "head", "tail"]) == ["tail", "head"]
+    for bad in ([], "tail", ["bogus"]):
+        try:
+            aw.parse_facets(bad)
+        except aw.FacetRequestError:
+            continue
+        raise AssertionError(f"accepted {bad!r}")
+
+
+def t_clap_only_decodes_nothing_but_clap_windows():
+    src = FakeSource()
+    with Patched(get_embedder=lambda force=False: Batched(), get_vocal_detector=no_decode):
+        out = aw.analyze_facets(FakeLibrosa, src, ["clap"])
+    assert src.loads == [("clap",)], src.loads
+    assert out["clap"]["status"] == "ok" and len(out["clap"]["data"]["audio_embedding"]) == 2, out
+
+
+def t_missing_models_answer_unavailable_with_the_reason():
+    src = FakeSource(tail="capped-download")
+    with Patched(get_embedder=lambda force=False: None, get_vocal_detector=lambda force=False: None,
+                 _embed_error="CLAP load failed: offline", _vocal_error=None):
+        out = aw.analyze_facets(FakeLibrosa, src, ["clap", "vocal", "stems"])
+    assert out["clap"] == {"status": "unavailable", "reason": "CLAP load failed: offline"}, out
+    assert out["vocal"]["status"] == "unavailable" and "WITH_DEMUCS" in out["vocal"]["reason"], out
+    assert out["stems"]["status"] == "unavailable", out
+
+
+def t_head_only_never_loads_a_model():
+    src = FakeSource()
+    with Patched(get_embedder=no_decode, get_vocal_detector=no_decode, measure_loudness=fixed_loudness,
+                 facet_head=lambda y, sr, librosa: {"bpm": 120.0, "key": "Am", "intro_ms": 0, "confidence": 1.0}):
+        out = aw.analyze_facets(FakeLibrosa, src, ["head", "loudness"])
+    assert [l[0] for l in src.loads] == [aw.ANALYZE_SR], src.loads  # one shared head decode
+    assert out["head"]["data"]["bpm"] == 120.0
+    assert out["loudness"] == {"status": "ok", "data": {"loudness_lufs": -11.0, "peak_db": -1.5}}, out
+
+
+def t_tail_reports_why_it_is_unmeasurable():
+    for reason in ("capped-download", "unknown-completeness", "tail-not-reached"):
+        out = aw.analyze_facets(FakeLibrosa, FakeSource(tail=reason), ["tail"])
+        assert out["tail"] == {"status": "unmeasurable", "reason": reason}, out
+    silent = (np.zeros(SR * 20, dtype=np.float32), SR, 180.0)
+    with Patched(log=lambda *_a: None):
+        out = aw.analyze_facets(FakeLibrosa, FakeSource(tail=silent), ["tail"])
+    assert out["tail"] == {"status": "unmeasurable", "reason": "silent-tail-window"}, out
+
+
+def t_tail_ok_lifts_silence_fields_like_the_flat_response():
+    y = np.concatenate([tone(12.0), silence(8.0)])
+    with Patched(measure_loudness=fixed_loudness, log=lambda *_a: None):
+        out = aw.analyze_facets(FakeLibrosa, FakeSource(tail=(y, SR, 180.0)), ["tail"])
+    data = out["tail"]["data"]
+    assert abs(data["tail_start_ms"] - 192000) <= 100, data
+    assert "tail_silence_ms" not in data["outro"] and data["outro"]["ending"] == "fade", data
+
+
+def t_file_source_tail_gates():
+    src = aw.FileSource("x.flac", complete=False)
+    assert src.tail(FakeLibrosa) == "capped-download"
+    src = aw.FileSource("x.flac", complete=None)
+    src.decoded_tmp = "/tmp/x.wav"
+    assert src.tail(FakeLibrosa) == "unknown-completeness"
+
+
+def t_vocal_and_stems_share_one_separation_and_shift_tail_ranges():
+    calls = []
+
+    class Detector:
+        def separate(self, y):
+            calls.append("separate")
+            return {"vocals": y}
+
+        def detect(self, y, sr, librosa, min_loud=None, stems=None):
+            return [{"startMs": 1000, "endMs": 3000}]
+
+    written = []
+    y = np.concatenate([tone(12.0), silence(8.0)])
+    with Patched(get_vocal_detector=lambda force=False: Detector(), measure_loudness=fixed_loudness,
+                 write_stems=lambda stems, window, d: written.append(window),
+                 write_tail_meta=lambda d, off, dur: written.append("meta"), log=lambda *_a: None):
+        out = aw.analyze_facets(FakeLibrosa, FakeSource(tail=(y, SR, 180.0)), ["vocal", "stems"], stems_dir="/x")
+    assert calls == ["separate", "separate"], calls  # head + tail, shared by both facets
+    assert written == ["head", "tail", "meta"], written
+    assert out["vocal"]["data"]["vocal_ranges"] == [{"startMs": 1000, "endMs": 3000}], out
+    # Tail ranges are ABSOLUTE: shifted by the tail window's offset (200 - 20 s).
+    assert out["vocal"]["data"]["tail_vocal_ranges"] == [{"startMs": 181000, "endMs": 183000}], out
+    assert out["stems"] == {"status": "ok", "data": {"stems_cached": True, "tail_stems": True}}, out
+
+
+def t_a_facet_failure_stays_in_its_facet():
+    def boom(*_a, **_k):
+        raise RuntimeError("loudness meter exploded")
+    with Patched(measure_loudness=boom,
+                 facet_head=lambda y, sr, librosa: {"bpm": 1.0, "key": None, "intro_ms": None, "confidence": 0.0}):
+        out = aw.analyze_facets(FakeLibrosa, FakeSource(), ["head", "loudness"])
+    assert out["head"]["status"] == "ok", out
+    assert out["loudness"] == {"status": "failed", "reason": "loudness meter exploded"}, out
+
+
 test("facet_tail is pure and equals analyze_outro", t_facet_tail_is_pure_and_matches_analyze_outro)
 test("decode_tail refuses a short track of unknown completeness before decoding",
      t_decode_tail_refuses_unknown_short_track_without_decoding)
@@ -221,6 +344,15 @@ test("facet_loudness omits unmeasured fields", t_facet_loudness_omits_unmeasured
 test("facet_clap embeds the windows it is given, no decode", t_facet_clap_embeds_given_windows_without_decoding)
 test("iter_clap_windows skips failed and truncated windows", t_iter_clap_windows_skips_failed_and_truncated_windows)
 test("embed_windows is iter_clap_windows + facet_clap", t_embed_windows_is_decode_then_facet)
+test("parse_facets rejects unknown names and dedupes", t_parse_facets_rejects_unknown_and_dedupes)
+test("a clap-only request decodes only the CLAP windows", t_clap_only_decodes_nothing_but_clap_windows)
+test("missing models answer 'unavailable' with the reason", t_missing_models_answer_unavailable_with_the_reason)
+test("head + loudness share one decode and load no model", t_head_only_never_loads_a_model)
+test("an unmeasurable tail says why", t_tail_reports_why_it_is_unmeasurable)
+test("a measured tail lifts the silence fields like the flat response", t_tail_ok_lifts_silence_fields_like_the_flat_response)
+test("FileSource refuses to prove the end of a capped or unprovable file", t_file_source_tail_gates)
+test("a failure in one facet does not fail the others", t_a_facet_failure_stays_in_its_facet)
+test("vocal + stems share one separation; tail ranges are absolute", t_vocal_and_stems_share_one_separation_and_shift_tail_ranges)
 
 if failures:
     print(f"✗ analyzer_facets_test.py: {failures} failure(s)")
