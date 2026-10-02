@@ -19,6 +19,7 @@
 //     used to resolve the agent's chosen id to a full song object).
 
 import { djAgent } from './strategy/agent.js';
+import { timePhase } from '../../observability/events.js';
 
 // TArgs is the run-argument shape this agent accepts — the same object
 // buildSystem and buildTools are handed. Naming it makes the hand-off from the
@@ -98,13 +99,13 @@ export function defineAgent<TArgs = Record<string, any>, TExtras = any>(
     providerDiscoveryBudget: def.providerDiscoveryBudget === true,
     async run({ messages, telemetry, ...rest }) {
       const toolArgs = rest as TArgs;
-      const system = def.buildSystem(toolArgs);
+      const system = timePhase(`${def.kind}.buildSystem`, () => def.buildSystem(toolArgs));
       // An agent with no buildTools has no extras. `extras` stays typed as
       // TExtras on the result rather than TExtras | undefined, because the only
       // agents that read it are the ones that build tools — widening it would
       // push a null check into every call site to describe a case they can't hit.
       const built = def.buildTools
-        ? def.buildTools(toolArgs)
+        ? timePhase(`${def.kind}.buildTools`, () => def.buildTools!(toolArgs))
         : { tools: undefined, extras: undefined };
       const extras = built.extras as TExtras;
       const result = await djAgent({

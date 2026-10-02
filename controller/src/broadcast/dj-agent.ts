@@ -33,7 +33,7 @@ import { energyForDaypart, getClockContext, getDateContext, getTimeContext } fro
 import { linkClockAt, linkClockStampFor } from './queue/pure.js';
 import { djObject, nearestId, modelTolerant } from '../llm/sdk.js';
 import * as budget from './dj-budget.js';
-import { withTrace, logEvent } from '../observability/events.js';
+import { withTrace, logEvent, timePhase } from '../observability/events.js';
 import { recencyWindowsForLibrary } from '../music/recency.js';
 import { showNoRepeatGuard } from '../music/show-recency.js';
 import { EXPLORE_SEED_PROBABILITY } from '../music/airing.js';
@@ -185,7 +185,7 @@ async function repickRequestFromSeen({ seen, badId, requester, text, persona }:
 // as the DJ rather than a convenient-but-different approximation.
 export async function livePickerScope(queue: any, { audioWaypoint = null, showAt = null }: { audioWaypoint?: number[] | null; showAt?: Date | null } = {}) {
   await library.load();
-  const stats = library.stats();
+  const stats = timePhase('pick.libraryStats', () => library.stats());
   // Sized off the MIRROR, not `stats.total` (TAGGED tracks only) — see the same
   // note in music/picker.ts. Both paths must agree on how big the library is.
   const librarySize = stats.mirrorTotal || stats.total;
@@ -196,7 +196,7 @@ export async function livePickerScope(queue: any, { audioWaypoint = null, showAt
   // Artist-recency is intentionally NOT applied at the agent-tool layer — see
   // the buildPickerTools note (the similarity tools cluster on the just-played
   // artist, so an artist strip starved them).
-  const { ids: recentIds, keys: recentKeys } = queue.recentlyPlayed(windows.trackHours);
+  const { ids: recentIds, keys: recentKeys } = timePhase('pick.recentlyPlayed', () => queue.recentlyPlayed(windows.trackHours));
   // Queued-but-not-yet-aired ids belong in the RELAXABLE set — they're not
   // "recently played", just in-flight, and shouldn't tighten the hard guard.
   for (const id of queue.queuedIds()) recentIds.add(id);
@@ -210,10 +210,10 @@ export async function livePickerScope(queue: any, { audioWaypoint = null, showAt
   // that will be on air when the pick plays — same clock as pickSystem's brief
   // and buildTools' locks.
   const activeShow = settings.resolveActiveShow(showAt ?? undefined);
-  const playlistPool = activeShow ? await resolveShowPlaylistPool(activeShow) : null;
+  const playlistPool = activeShow ? await timePhase('pick.playlistPool', () => resolveShowPlaylistPool(activeShow)) : null;
   const playlistLock = playlistPool && activeShow?.playlistStrict ? playlistPool.ids : null;
   const playlistTracks = playlistPool?.tracks ?? null;
-  const excludedIds = activeShow ? await resolveExcludedPlaylistIds(activeShow) : null;
+  const excludedIds = activeShow ? await timePhase('pick.excludedPlaylists', () => resolveExcludedPlaylistIds(activeShow)) : null;
 
   // Strict music locks for the discovery tools (filtersStrict). Resolved HERE,
   // once, off the same show snapshot as the playlist pool — the async work the
@@ -255,7 +255,7 @@ export async function livePickerScope(queue: any, { audioWaypoint = null, showAt
   // than the exception, and a hard lock would empty every tool for the whole
   // show. Counted lazily — only a show that actually pins vocal steering pays
   // for the query.
-  const vocalLock = strict && activeShow?.vocals && library.vocalAnalyzedCount() > 0
+  const vocalLock = strict && activeShow?.vocals && timePhase('pick.vocalAnalyzedCount', () => library.vocalAnalyzedCount()) > 0
     ? (activeShow.vocals as VocalMode)
     : null;
 
@@ -269,7 +269,7 @@ export async function livePickerScope(queue: any, { audioWaypoint = null, showAt
   // starvation cascade. A resolved strict playlist is its own catalogue, so
   // clamp to its real identity count using the same resolved genre lock as the
   // tools; 0 leaves the relaxable window in charge.
-  const effN = showNoRepeatGuard(
+  const effN = timePhase('pick.noRepeatGuard', () => showNoRepeatGuard(
     settings.get().llm?.noRepeatWindow ?? 0,
     librarySize,
     {
@@ -279,8 +279,8 @@ export async function livePickerScope(queue: any, { audioWaypoint = null, showAt
       resolvedGenres: genreLock ?? [],
       minTrackSec,
     },
-  ).window;
-  const { ids: hardRecentIds, keys: hardRecentKeys } = queue.recentlyPlayedByCount(effN);
+  )).window;
+  const { ids: hardRecentIds, keys: hardRecentKeys } = timePhase('pick.recentlyPlayedByCount', () => queue.recentlyPlayedByCount(effN));
   // A pinned anchor that resolves to nothing (deleted/recreated playlist →
   // stale id, or a Navidrome error — resolveShowPlaylistPool swallows both)
   // silently un-anchors the show: no lock, no showPlaylistTracks tool. Say so,
@@ -330,8 +330,8 @@ async function pickViaAgent(queue, ctx, { wantLink, audioWaypoint = null, pickAn
   const pickStarted = performance.now();
   const { scope, playlistTracks, activeShow } = await livePickerScope(queue, { audioWaypoint, showAt });
   const useShortlist = settings.get().llm?.trackSelection === 'shortlist';
-  const anchorAnalysis = pickAnchor ? library.bpmKeyFor(pickAnchor) : null;
-  const anchorRecord = pickAnchor?.id ? library.get(pickAnchor.id) : null;
+  const anchorAnalysis = timePhase('pick.anchorAnalysis', () => (pickAnchor ? library.bpmKeyFor(pickAnchor) : null));
+  const anchorRecord = timePhase('pick.anchorRecord', () => (pickAnchor?.id ? library.get(pickAnchor.id) : null));
   const recentTransitions = settings.effectsActive()
     ? (typeof queue.recentTransitionChoices === 'function' ? queue.recentTransitionChoices() : [])
     : undefined;
@@ -412,7 +412,7 @@ async function pickViaAgent(queue, ctx, { wantLink, audioWaypoint = null, pickAn
       usedMusicalLeanings: false,
     };
     const run = await pickerAgent.run({
-      messages: session.windowMessages(),
+      messages: timePhase('pick.windowMessages', () => session.windowMessages()),
       scope,
       showAt,
       telemetry: { agentPickResolution },
@@ -1237,7 +1237,7 @@ export async function runTrackEvent(queue, ctx, { wantLink, showAt = null, pickA
     // Resolve once for the complete logical selection: the prompt event, main
     // model run and every corrective re-pick must agree on whether the rare
     // guest nudge was present.
-    const editorialLeanings = resolveEditorialLeanings(showAt);
+    const editorialLeanings = timePhase('pick.editorialLeanings', () => resolveEditorialLeanings(showAt));
     // Station voice off (settings.tts.enabled) → still pick, never link. The
     // agent path's event message then orders silence (`say` stays in the
     // schema but nullable, and a disobedient line is dropped at the
@@ -1253,7 +1253,7 @@ export async function runTrackEvent(queue, ctx, { wantLink, showAt = null, pickA
     // Feature 4 + Phase 2 — advance/maybe-start a mini-run; get the tempo/key
     // re-rank target and (when the audio index supports it) a sonic-journey
     // waypoint for the pool's audio anchor.
-    const { rankTarget, audioWaypoint } = advanceRun(djMode, pickAnchor);
+    const { rankTarget, audioWaypoint } = timePhase('pick.advanceRun', () => advanceRun(djMode, pickAnchor));
     const inRun = runActive();
 
     // Selection steering stays in this prompt, but it no longer shares a
@@ -1299,7 +1299,7 @@ export async function runTrackEvent(queue, ctx, { wantLink, showAt = null, pickA
     // windowMessages keeps only the latest pick event, so the list never
     // multiplies across the window. Mirrored by the pool picker's listener-liked
     // source so both paths lean the same way — a lean, never a lock.
-    const favClause = likes.favouritesClause(settings.get()?.likes);
+    const favClause = timePhase('pick.favouritesClause', () => likes.favouritesClause(settings.get()?.likes));
     // Exploration nudge (ε-greedy seed break, music/airing.ts): every pick
     // seeding discovery from the expected predecessor is a random walk that never
     // leaves its similarity cluster, so a fraction of picks steer the round
@@ -1323,10 +1323,10 @@ export async function runTrackEvent(queue, ctx, { wantLink, showAt = null, pickA
         + (anchorPriorTrack ? ` (after "${anchorPriorTrack.title}" by ${anchorPriorTrack.artist})` : '')
         + '. Pick the track to play next.';
     const promptSuffix = `${favClause}${effectClause}${runClause}${journeyClause}${exploreClause}`;
-    session.appendTurn({
+    timePhase('pick.appendTurn', () => session.appendTurn({
       role: 'event', kind: 'pick', text: eventText,
       meta: promptSuffix ? { promptSuffix } : {},
-    });
+    }));
 
     // `!cheap`: in the soft budget tier we skip the multi-step agent tool-loop
     // and go straight to the one-call pool picker below to stretch the budget.
