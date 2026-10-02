@@ -156,6 +156,14 @@ async function main() {
     assertConsistent();
   });
 
+  await test('a later write that does not re-measure the tail keeps its reason', () => {
+    // The CLAP write re-syncs every facet of the track; the tail's
+    // 'capped-download' must survive it (the planner filters on reasons).
+    db.upsertTrackAudioVector('fresh', clap());
+    assert.equal(rows('fresh').tail.reason, 'capped-download');
+    assertConsistent();
+  });
+
   await test('a later full pass turns the tail ok at the current version', () => {
     db.upsertTrackAnalysis('fresh', {
       bpm: 128, musicalKey: 'F', loudnessLufs: -8, source: 'full',
@@ -181,10 +189,11 @@ async function main() {
   });
 
   await test('a CLAP-only write marks the clap facet', () => {
-    assert.ok(db.facetNeedsIds('clap').includes('fresh'));
-    db.upsertTrackAudioVector('fresh', clap());
-    assert.equal(rows('fresh').clap.status, 'ok');
-    assert.ok(!db.facetNeedsIds('clap').includes('fresh'));
+    db.upsertTrackMeta('clapless', { title: 'c', artist: 'A', album: 'B', duration: 100 });
+    assert.ok(db.facetNeedsIds('clap').includes('clapless'));
+    db.upsertTrackAudioVector('clapless', clap());
+    assert.equal(rows('clapless').clap.status, 'ok');
+    assert.ok(!db.facetNeedsIds('clap').includes('clapless'));
     assertConsistent();
   });
 
