@@ -205,7 +205,8 @@ export function buildPickerContext(scope: PickerScope): PickerContext {
   // library.load() first, so stats() never returns its empty-sentinel zeros
   // here. Tools whose backing index is empty are conditionally registered —
   // offering a dead tool spends the discovery call on a guaranteed-empty result.
-  const stats = library.stats();
+  // pickStats(), not the dashboard's stats(): this runs on every pick (#1723).
+  const stats = library.pickStats();
   const hasTextEmbeddings = (stats.withEmbedding ?? 0) > 0;
   const hasAudioEmbeddings = (stats.withAudioEmbedding ?? 0) > 0;
   const hasEmbeddingProvider = embeddings.isAvailable();

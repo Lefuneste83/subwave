@@ -63,6 +63,13 @@ export function allTaggedIds(): string[] {
   ).map(r => r.id);
 }
 
+// Ids of one energy bucket, in table order (the same order songsByEnergy uses).
+export function idsByEnergy(energy: EnergyValue): string[] {
+  if (!energy) return [];
+  return (requireDb().prepare('SELECT id FROM tracks WHERE energy = ? ORDER BY rowid').all(energy) as Array<{ id: string }>)
+    .map((r) => r.id);
+}
+
 // Trusted sample for the propagation self-check: no 'propagated' rows (circular)
 // and no vectorless rows (KNN can't run). Null source = legacy LLM import, counts.
 export function trustedTaggedIds(): string[] {

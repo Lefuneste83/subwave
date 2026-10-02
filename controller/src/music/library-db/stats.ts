@@ -43,6 +43,79 @@ function computeLabelOnlyVectorCount(): number {
 export function invalidateStats(): void {
   statsCache = null;
   labelOnlyCache = null;
+  pickStatsCache = null;
+}
+
+// The five numbers a live pick reads (#1723), without the dashboard's ~9 full
+// scans. stats() above expires after 5 s and picks are minutes apart, so every
+// pick paid the whole dashboard bill on the synchronous DB thread (4.6 s on a
+// 76k-track library, measured with trace.phase). These only move when the
+// library is walked or tagged, and they size recency windows and gate show
+// locks, so a few minutes of staleness is harmless. Two scans remain (tagged
+// total, distinct artists) instead of ~9, once per TTL; the coverage checks
+// stop at the first matching row.
+const PICK_STATS_TTL_MS = 10 * 60 * 1000;
+
+export interface PickStats {
+  total: number;              // tagged tracks
+  mirrorTotal: number;        // every row
+  distinctArtists: number;    // among tagged tracks
+  withEmbedding: number;      // text vectors (tool registration + notes)
+  withAudioEmbedding: number; // CLAP vectors
+  hasMoodCoverage: boolean;
+  hasEnergyCoverage: boolean;
+}
+
+let pickStatsCache: { at: number; value: PickStats } | null = null;
+
+export function pickStats(): PickStats {
+  const now = Date.now();
+  if (pickStatsCache && now - pickStatsCache.at < PICK_STATS_TTL_MS) return pickStatsCache.value;
+  // A fresh dashboard read (admin open) already holds every number: reuse it.
+  if (statsCache && now - statsCache.at < STATS_TTL_MS) {
+    const s = statsCache.value;
+    const value: PickStats = {
+      total: s.total,
+      mirrorTotal: s.mirrorTotal,
+      distinctArtists: s.distinctArtists,
+      withEmbedding: s.withEmbedding,
+      withAudioEmbedding: s.withAudioEmbedding,
+      hasMoodCoverage: Object.keys(s.byMood ?? {}).length > 0,
+      hasEnergyCoverage: Object.keys(s.byEnergy ?? {}).length > 0,
+    };
+    pickStatsCache = { at: now, value };
+    return value;
+  }
+  const value = computePickStats();
+  pickStatsCache = { at: Date.now(), value };
+  return value;
+}
+
+function computePickStats(): PickStats {
+  const d = requireDb();
+  const mirrorTotal = (d.prepare('SELECT COUNT(*) AS n FROM tracks').get() as { n: number }).n;
+  // Same predicates as computeStats(), so the two can never disagree.
+  const distinctArtists = (
+    d
+      .prepare(
+        `SELECT COUNT(DISTINCT LOWER(TRIM(artist))) AS n
+         FROM tracks
+         WHERE ${SQL_HAS_MOODS}
+           AND artist IS NOT NULL
+           AND TRIM(artist) != ''`,
+      )
+      .get() as { n: number }
+  ).n;
+  const total = (d.prepare(`SELECT COUNT(*) AS n FROM tracks WHERE ${SQL_HAS_MOODS}`).get() as { n: number }).n;
+  const withEmbedding = (d.prepare('SELECT COUNT(*) AS n FROM track_vectors').get() as { n: number }).n;
+  const withAudioEmbedding = (d.prepare('SELECT COUNT(*) AS n FROM track_audio_vectors').get() as { n: number }).n;
+  // byMood has a key iff some row's moods JSON holds a value; byEnergy iff some
+  // row has an energy. Both stop at the first hit.
+  const hasMoodCoverage = !!d
+    .prepare('SELECT 1 FROM tracks, json_each(tracks.moods) WHERE tracks.moods IS NOT NULL LIMIT 1')
+    .get();
+  const hasEnergyCoverage = !!d.prepare('SELECT 1 FROM tracks WHERE energy IS NOT NULL LIMIT 1').get();
+  return { total, mirrorTotal, distinctArtists, withEmbedding, withAudioEmbedding, hasMoodCoverage, hasEnergyCoverage };
 }
 
 export function stats(): LibraryStats {

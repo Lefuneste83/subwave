@@ -134,7 +134,7 @@ async function refreshAutoPlaylistInner(canPublish: () => boolean): Promise<Refr
   // lowercased `title|artist` — an id-only filter lets duplicate copies of a
   // just-played song back in (#874).
   await library.load();
-  const libStats = library.stats();
+  const libStats = library.pickStats(); // only the recency-window inputs (#1723)
   // mirrorTotal, not `total` (tagged only), so an untagged 50k catalogue does
   // not read as empty.
   const windows = recencyWindowsForLibrary(libStats.distinctArtists, libStats.mirrorTotal || libStats.total);
