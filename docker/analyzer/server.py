@@ -347,7 +347,7 @@ class StdioWorker:
         facets = payload.get("facets")
         if isinstance(facets, list):
             # A facet request loads exactly the models its facets name.
-            return any(f in ("clap", "vocal", "stems") for f in facets)
+            return bool(payload.get("tail_vocals")) or any(f in ("clap", "vocal", "stems") for f in facets)
         return bool(
             payload.get("embed") or payload.get("vocal") or payload.get("stems_dir")
             or EMBED_DEFAULT or VOCAL_DEFAULT
@@ -644,6 +644,8 @@ async def health():
         # older workers never emit the key, so this stays None and the
         # controller keeps sending flat requests to them.
         "analyze_facets_capable": analyzer_pool.capability("facets_capable", "facets"),
+        # Tail-only facet requests may set `ranged` (same version-signal rule).
+        "analyze_ranged_tail_capable": analyzer_pool.capability("ranged_tail_capable", "facets"),
         # Best-effort residency (#1204): whether CLAP/Demucs are believed
         # loaded right now — lets an operator confirm the idle release
         # without grepping logs. None while the worker is down.
@@ -685,6 +687,13 @@ class AnalyzeRequest(BaseModel):
     # Absent = the flat response above, unchanged. embed / vocal /
     # embedding_only are ignored when this is set: the facets say it all.
     facets: list[str] | None = None
+    # With facets that read only the tail and a `url`: read just the end of
+    # the file by HTTP Range (FLAC / MP3 with a provable length); anything
+    # else falls back to the capped download, reported in source.fallback.
+    ranged: bool = False
+    # Tail facet also measures the outro's vocal ranges (one Demucs pass over
+    # the tail window), as the flat response does when Demucs is loaded.
+    tail_vocals: bool = False
 
 
 @app.post("/analyze")
@@ -720,6 +729,10 @@ async def analyze(req: AnalyzeRequest):
     facets = getattr(req, "facets", None)
     if facets is not None:
         payload["facets"] = facets
+        if getattr(req, "ranged", False):
+            payload["ranged"] = True
+        if getattr(req, "tail_vocals", False):
+            payload["tail_vocals"] = True
     msg = await analyzer_pool.request(payload)
     if not msg.get("ok"):
         raise HTTPException(500, msg.get("error") or "analyze failed")

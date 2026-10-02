@@ -2353,6 +2353,331 @@ class FileSource:
                 pass
 
 
+
+# ---------------------------------------------------------------------------
+# Ranged tail: read only the end of a remote file (HTTP Range) and prove it is
+# the end. Lab + production measurements: claude/acoustic-analysis-fetch-and-
+# stems.md §3. FLAC: STREAMINFO gives the exact length and the decoder resyncs
+# on frame headers, so "header + last N bytes" decodes standalone, sample-exact
+# at the end. MP3: the Xing/Info (+LAME) header gives the exact length; the
+# last N bytes decode standalone; LAME end padding is trimmed. CBR MP3 without
+# a header: length from size / bitrate. Anything else (VBR without a header,
+# WAV, m4a, Opus, a server that ignores Range) falls back to the capped
+# download — never a guess.
+# ---------------------------------------------------------------------------
+
+RANGED_HEAD_BYTES = 128 * 1024
+# Bytes per second are estimated from size / duration; fetch this much more
+# than OUTRO_SECONDS so a denser-than-average ending still fits.
+RANGED_TAIL_MARGIN = 1.35
+RANGED_TAIL_MIN_BYTES = 256 * 1024
+
+
+class RangeUnsupported(Exception):
+    """The server or the file can't give a provable ranged tail; use the
+    capped download instead. The message is the reason, reported back."""
+
+
+def http_range(url, start=None, end=None, suffix=None):
+    """GET a byte range. Returns (bytes, total_size). Raises RangeUnsupported
+    unless the server answers 206 with a Content-Range total: a 200 means it
+    ignored Range, and seeking on that silently reads the wrong audio."""
+    if suffix is not None:
+        rng = f"bytes=-{int(suffix)}"
+    else:
+        rng = f"bytes={int(start)}-{'' if end is None else int(end)}"
+    req = urllib.request.Request(url, headers={"User-Agent": "subwave-analyzer/1", "Range": rng})
+    with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT_S) as resp:
+        if resp.status != 206:
+            raise RangeUnsupported(f"server answered {resp.status} to a Range request")
+        cr = resp.headers.get("Content-Range") or ""
+        m = re.match(r"bytes\s+(\d+)-(\d+)/(\d+)", cr)
+        if not m:
+            raise RangeUnsupported("no Content-Range total in a 206 answer")
+        return resp.read(), int(m.group(3))
+
+
+def _id3v2_size(head):
+    """Bytes taken by a leading ID3v2 tag (0 when none)."""
+    if len(head) < 10 or head[:3] != b"ID3":
+        return 0
+    size = 0
+    for b in head[6:10]:
+        size = (size << 7) | (b & 0x7F)
+    footer = 10 if head[5] & 0x10 else 0
+    return 10 + size + footer
+
+
+def parse_flac_streaminfo(data):
+    """(streaminfo_block_bytes, sample_rate, total_samples, channels) from
+    bytes starting at 'fLaC'. Raises RangeUnsupported when unusable."""
+    if data[:4] != b"fLaC" or len(data) < 42:
+        raise RangeUnsupported("not a FLAC stream")
+    block_type = data[4] & 0x7F
+    length = int.from_bytes(data[5:8], "big")
+    if block_type != 0 or length != 34:
+        raise RangeUnsupported("FLAC without a leading STREAMINFO")
+    si = data[8:42]
+    sample_rate = (si[10] << 12) | (si[11] << 4) | (si[12] >> 4)
+    channels = ((si[12] >> 1) & 0x07) + 1
+    total = ((si[13] & 0x0F) << 32) | int.from_bytes(si[14:18], "big")
+    if not sample_rate or not total:
+        raise RangeUnsupported("FLAC STREAMINFO without a sample count")
+    return si, sample_rate, total, channels
+
+
+_MP3_BITRATES = {
+    (1, 3): [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+    (2, 3): [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+}
+_MP3_RATES = {1: [44100, 48000, 32000], 2: [22050, 24000, 16000], 25: [11025, 12000, 8000]}
+
+
+def parse_mp3_frame_header(b, pos):
+    """Layer III frame header at `pos` → dict or None."""
+    if pos + 4 > len(b) or b[pos] != 0xFF or (b[pos + 1] & 0xE0) != 0xE0:
+        return None
+    ver_bits = (b[pos + 1] >> 3) & 0x03
+    layer_bits = (b[pos + 1] >> 1) & 0x03
+    if ver_bits == 1 or layer_bits != 1:  # reserved version / not layer III
+        return None
+    version = {3: 1, 2: 2, 0: 25}[ver_bits]
+    br_idx = (b[pos + 2] >> 4) & 0x0F
+    sr_idx = (b[pos + 2] >> 2) & 0x03
+    if br_idx in (0, 15) or sr_idx == 3:
+        return None
+    pad = (b[pos + 2] >> 1) & 0x01
+    mono = ((b[pos + 3] >> 6) & 0x03) == 3
+    bitrate = _MP3_BITRATES[(1 if version == 1 else 2, 3)][br_idx] * 1000
+    rate = _MP3_RATES[version][sr_idx]
+    spf = 1152 if version == 1 else 576
+    size = (spf // 8) * bitrate // rate + pad
+    return {"version": version, "bitrate": bitrate, "rate": rate, "spf": spf,
+            "size": size, "mono": mono}
+
+
+def _mp3_first_frame(b, start):
+    """First offset >= start where three consecutive valid frames chain."""
+    for pos in range(start, min(len(b) - 4, start + 64 * 1024)):
+        h = parse_mp3_frame_header(b, pos)
+        if not h:
+            continue
+        nxt = pos + h["size"]
+        h2 = parse_mp3_frame_header(b, nxt)
+        if h2 and parse_mp3_frame_header(b, nxt + h2["size"]):
+            return pos, h
+    raise RangeUnsupported("not FLAC or MP3 (only those are read by range)")
+
+
+def parse_mp3_info(b, pos, h):
+    """Xing/Info (+LAME) or VBRI at the first frame → (frames, delay, padding)
+    or None when the frame carries no such header."""
+    if h["version"] == 1:
+        side = 17 if h["mono"] else 32
+    else:
+        side = 9 if h["mono"] else 17
+    x = pos + 4 + side
+    tag = b[x:x + 4]
+    if tag in (b"Xing", b"Info"):
+        flags = int.from_bytes(b[x + 4:x + 8], "big")
+        off = x + 8
+        frames = None
+        if flags & 1:
+            frames = int.from_bytes(b[off:off + 4], "big")
+            off += 4
+        if flags & 2:
+            off += 4
+        if flags & 4:
+            off += 100
+        if flags & 8:
+            off += 4
+        delay = padding = None
+        lame = b[off:off + 36]
+        if len(lame) >= 24 and lame[:4] in (b"LAME", b"Lavf", b"Lavc", b"GOGO"):
+            dp = lame[21:24]
+            delay = (dp[0] << 4) | (dp[1] >> 4)
+            padding = ((dp[1] & 0x0F) << 8) | dp[2]
+        return (frames, delay, padding) if frames else None
+    v = pos + 4 + 32
+    if b[v:v + 4] == b"VBRI":
+        frames = int.from_bytes(b[v + 14:v + 18], "big")
+        return (frames, None, None) if frames else None
+    return None
+
+
+class RangedTailSource:
+    """Tail-only source over HTTP Range (see the block comment above). Serves
+    load() for windows inside the fetched tail, and tail() as a window proven
+    to end at the file's real end. Everything else raises, so it is only used
+    for requests whose facets read nothing but the tail."""
+
+    kind = "ranged"
+
+    def __init__(self, url):
+        self.url = url
+        self.duration_s = 0.0
+        self.complete = True  # the read reaches EOF by construction
+        self.decoded_tmp = None
+        self.size = 0
+        self.container = None
+        self.bytes_read = 0
+        self._wav = None          # native-rate WAV of the fetched tail
+        self._wav_start_s = 0.0   # absolute time of the WAV's first sample
+        self._wav_end_s = 0.0     # absolute time of its last real sample
+
+    # -- probing --------------------------------------------------------------
+    def open(self, librosa):
+        head, self.size = http_range(self.url, 0, RANGED_HEAD_BYTES - 1)
+        self.bytes_read += len(head)
+        skip = _id3v2_size(head)
+        if skip + 64 > len(head):
+            more, _ = http_range(self.url, skip, skip + RANGED_HEAD_BYTES - 1)
+            self.bytes_read += len(more)
+            head, skip = more, 0
+        body = head[skip:]
+        if body[:4] == b"fLaC":
+            self._open_flac(body)
+        else:
+            self._open_mp3(head, skip)
+        self._fetch_tail()
+        return self
+
+    def _open_flac(self, body):
+        si, rate, total, _ch = parse_flac_streaminfo(body)
+        self.container = "flac"
+        self._flac_header = b"fLaC" + bytes([0x80, 0, 0, 34]) + si
+        self.native_rate = rate
+        self.duration_s = total / rate
+        self._trim_end = 0
+
+    def _open_mp3(self, head, skip):
+        pos, h = _mp3_first_frame(head, skip)
+        info = parse_mp3_info(head, pos, h)
+        self.container = "mp3"
+        self.native_rate = h["rate"]
+        if info:
+            frames, delay, padding = info
+            samples = frames * h["spf"]
+            if delay is not None and padding is not None:
+                samples -= delay + padding
+                # ffmpeg's own gapless end trim (padding minus decoder delay).
+                self._trim_end = max(0, padding - 529)
+            else:
+                self._trim_end = 0
+            self.duration_s = samples / h["rate"]
+            return
+        # No Xing/VBRI: only a constant bitrate makes size → length exact
+        # enough. Sample the stream at three more points to check CBR.
+        audio_bytes = self.size - pos
+        for frac in (0.25, 0.5, 0.75):
+            at = pos + int(audio_bytes * frac)
+            chunk, _ = http_range(self.url, at, at + 16 * 1024)
+            self.bytes_read += len(chunk)
+            _p, h2 = _mp3_first_frame(chunk, 0)
+            if h2["bitrate"] != h["bitrate"] or h2["rate"] != h["rate"]:
+                raise RangeUnsupported("VBR MP3 without a Xing/VBRI header (length unknown)")
+        self.duration_s = audio_bytes * 8 / h["bitrate"]
+        self._trim_end = 0
+
+    # -- the tail -------------------------------------------------------------
+    def _fetch_tail(self):
+        if self.duration_s <= 0:
+            raise RangeUnsupported("unknown duration")
+        bps = self.size / self.duration_s
+        want = max(RANGED_TAIL_MIN_BYTES, int(bps * OUTRO_SECONDS * RANGED_TAIL_MARGIN))
+        for _attempt in range(3):
+            want = min(want, self.size)
+            data, _ = http_range(self.url, suffix=want)
+            self.bytes_read += len(data)
+            n = self._decode_tail(data)
+            have_s = n / self.native_rate
+            if have_s >= OUTRO_SECONDS + 0.5 or want >= self.size:
+                return
+            want *= 2
+        raise RangeUnsupported("tail window would not decode to OUTRO_SECONDS")
+
+    def _decode_tail(self, data):
+        """Decode the tail bytes standalone to a native-rate WAV; returns the
+        number of samples kept (after the MP3 end-padding trim)."""
+        import soundfile as sf
+
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            raise RangeUnsupported("ffmpeg not on PATH")
+        blob = (self._flac_header + data) if self.container == "flac" else data
+        fd, src = tempfile.mkstemp(prefix="swtail_", suffix=f".{self.container}")
+        with os.fdopen(fd, "wb") as out:
+            out.write(blob)
+        if self._wav:
+            try:
+                os.remove(self._wav)
+            except OSError:
+                pass
+        fd, wav = tempfile.mkstemp(prefix="swtail_", suffix=".wav")
+        os.close(fd)
+        try:
+            subprocess.run(
+                [ffmpeg, "-v", "error", "-y", "-f", self.container, "-i", src,
+                 "-c:a", "pcm_f32le", "-f", "wav", wav],
+                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=FFMPEG_DECODE_TIMEOUT_S,
+            )
+        finally:
+            try:
+                os.remove(src)
+            except OSError:
+                pass
+        try:
+            info = sf.info(wav)
+        except Exception as e:  # noqa: BLE001
+            raise RangeUnsupported(f"tail bytes did not decode: {e}")
+        if info.samplerate != self.native_rate:
+            raise RangeUnsupported("decoded tail sample rate differs from the header")
+        kept = max(0, info.frames - self._trim_end)
+        self._wav = wav
+        self._wav_end_s = self.duration_s
+        self._wav_start_s = self.duration_s - kept / self.native_rate
+        return kept
+
+    def load(self, librosa, sr, mono, offset=0.0, duration=None):
+        if self._wav is None:
+            raise RangeUnsupported("tail not fetched")
+        if offset < self._wav_start_s - 1e-6:
+            raise RangeUnsupported("window starts before the fetched tail")
+        rel = max(0.0, offset - self._wav_start_s)
+        dur = duration if duration is not None else self._wav_end_s - offset
+        dur = min(dur, self._wav_end_s - offset)
+        return load_audio(librosa, self._wav, sr=sr, mono=mono, offset=rel, duration=dur)
+
+    def tail(self, librosa):
+        import numpy as np
+
+        offset = self.duration_s - OUTRO_SECONDS
+        y_src, sr = self.load(librosa, sr=ANALYZE_SR, mono=False, offset=offset, duration=OUTRO_SECONDS)
+        if y_src is None or np.shape(y_src)[-1] < ANALYZE_SR * OUTRO_SECONDS * 0.6:
+            return "tail-not-reached"
+        return y_src, sr, offset
+
+    def clap_windows(self, librosa):
+        raise RangeUnsupported("the ranged source serves the tail only")
+
+    def describe(self):
+        return {
+            "kind": self.kind,
+            "container": self.container,
+            "duration_s": round(self.duration_s, 3),
+            "complete": True,
+            "size": self.size,
+            "bytes_read": self.bytes_read,
+        }
+
+    def close(self):
+        if self._wav:
+            try:
+                os.remove(self._wav)
+            except OSError:
+                pass
+
 def parse_facets(value):
     if not isinstance(value, list) or not value:
         raise FacetRequestError("facets must be a non-empty list")
@@ -2381,7 +2706,7 @@ def _failed(e):
     return {"status": "failed", "reason": str(e)[:500]}
 
 
-def analyze_facets(librosa, source, facets, stems_dir=None):
+def analyze_facets(librosa, source, facets, stems_dir=None, tail_vocals=False):
     """Compute exactly `facets` from an opened source. Each facet answers on
     its own: ok + data, unmeasurable + reason (this file can't give it at this
     version), unavailable + reason (this engine can't: no CLAP / no Demucs), or
@@ -2390,7 +2715,9 @@ def analyze_facets(librosa, source, facets, stems_dir=None):
 
     Asking for a facet means asking for its model: clap force-loads CLAP and
     vocal/stems force-load Demucs, whatever the env defaults say; facets not
-    asked for never load a model."""
+    asked for never load a model. `tail_vocals` asks the tail facet to carry
+    the outro's vocal ranges too (one Demucs pass over the tail window only),
+    as the flat response does when Demucs is loaded."""
     out = {}
     wanted = set(facets)
 
@@ -2454,6 +2781,13 @@ def analyze_facets(librosa, source, facets, stems_dir=None):
                 else:
                     out["stems"] = _ok({"stems_cached": stems_cached, "tail_stems": tail_vocals})
 
+    if "tail" in wanted and tail_vocals and outro is not None and "startMs" in outro \
+            and not (wanted & {"vocal", "stems"}):
+        detector = get_vocal_detector(force=True)
+        if detector is not None:
+            demucs_tail(detector, lambda **kw: source.load(librosa, **kw), librosa,
+                        source.duration_s, outro)
+
     if "tail" in wanted and "tail" not in out:
         if outro is None:
             out["tail"] = _unmeasurable(tail_reason or "tail-not-measured")
@@ -2498,16 +2832,49 @@ def analyze_facets(librosa, source, facets, stems_dir=None):
     return {name: out[name] for name in FACET_NAMES if name in out}
 
 
+def open_source(librosa, req, facets):
+    """Pick and open the source for a facet request. `ranged: true` with a url
+    and facets that read only the tail tries RangedTailSource; anything it
+    can't prove (no 206, unknown length, short track, …) falls back to the
+    capped download, and the reason rides back in source.fallback."""
+    fallback = None
+    if req.get("ranged") and req.get("url") and set(facets) <= {"tail"}:
+        ranged = RangedTailSource(req["url"])
+        try:
+            ranged.open(librosa)
+            if ranged.duration_s <= OUTRO_SECONDS + 1.0:
+                raise RangeUnsupported("short track (the capped download holds it whole)")
+            return ranged, None
+        except RangeUnsupported as e:
+            ranged.close()
+            fallback = str(e)
+            log(f"ranged tail unavailable, using the capped download: {e}")
+    elif req.get("ranged"):
+        fallback = "ranged reads serve tail-only url requests"
+    source = FileSource.from_request(url=req.get("url"), path=req.get("path"), complete=req.get("complete"))
+    try:
+        source.open(librosa)
+    except BaseException:
+        source.close()
+        raise
+    return source, fallback
+
+
 def analyze_facet_request(librosa, req):
     """The worker's facet entry point: parse, open the source, compute, close.
     Raises FacetRequestError for a malformed request; any other exception
     (fetch / decode failure) fails the whole request like analyze() does."""
     facets = parse_facets(req.get("facets"))
-    source = FileSource.from_request(url=req.get("url"), path=req.get("path"), complete=req.get("complete"))
+    source, fallback = open_source(librosa, req, facets)
     try:
-        source.open(librosa)
-        result = analyze_facets(librosa, source, facets, stems_dir=req.get("stems_dir"))
-        return {"facets": result, "source": source.describe()}
+        result = analyze_facets(
+            librosa, source, facets, stems_dir=req.get("stems_dir"),
+            tail_vocals=req.get("tail_vocals") is True,
+        )
+        described = source.describe()
+        if fallback:
+            described["fallback"] = fallback
+        return {"facets": result, "source": described}
     finally:
         source.close()
 
@@ -2569,6 +2936,8 @@ def main():
         "text_embedding_capable": text_capable,
         # Version signal: this worker understands {"facets": [...]} requests.
         "facets_capable": True,
+        # This worker reads tail-only facet requests by HTTP Range ("ranged").
+        "ranged_tail_capable": True,
     })
 
     for line in sys.stdin:
