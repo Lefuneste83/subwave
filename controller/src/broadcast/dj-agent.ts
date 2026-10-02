@@ -185,7 +185,9 @@ async function repickRequestFromSeen({ seen, badId, requester, text, persona }:
 // as the DJ rather than a convenient-but-different approximation.
 export async function livePickerScope(queue: any, { audioWaypoint = null, showAt = null }: { audioWaypoint?: number[] | null; showAt?: Date | null } = {}) {
   await library.load();
-  const stats = timePhase('pick.libraryStats', () => library.stats());
+  // Narrow, long-cached counts (#1723): the dashboard's stats() cost every
+  // pick ~4.6 s of blocked thread on a 76k-track library.
+  const stats = timePhase('pick.libraryStats', () => library.pickStats());
   // Sized off the MIRROR, not `stats.total` (TAGGED tracks only) — see the same
   // note in music/picker.ts. Both paths must agree on how big the library is.
   const librarySize = stats.mirrorTotal || stats.total;
@@ -246,8 +248,8 @@ export async function livePickerScope(queue: any, { audioWaypoint = null, showAt
   // library coverage (byMood / byEnergy vocab) — the same spirit as the genre
   // drop-out. With coverage, a specific thin value still filters hard; the pool
   // fallback (never-starve per dimension) is the dead-air backstop behind it.
-  const hasMoodCoverage = Object.keys(stats.byMood ?? {}).length > 0;
-  const hasEnergyCoverage = Object.keys(stats.byEnergy ?? {}).length > 0;
+  const hasMoodCoverage = stats.hasMoodCoverage;
+  const hasEnergyCoverage = stats.hasEnergyCoverage;
   const moodLock = strict && activeShow?.moods?.length && hasMoodCoverage ? activeShow.moods : null;
   const energyLock = strict && activeShow?.energies?.length && hasEnergyCoverage ? activeShow.energies : null;
   // Same coverage gate, one dimension further out: vocal ranges come from the

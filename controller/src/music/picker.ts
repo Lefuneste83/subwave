@@ -596,7 +596,7 @@ function slimAlbum(album: string | null | undefined, title: string | null | unde
 // cascade, set only by the agent path's back-to-back artist guard.
 export async function pickViaPool(queue, ctx, rankTarget: { bpm: number | null; key: string | null } | null = null, audioWaypoint: number[] | null = null, opts: { avoidArtist?: string | null } = {}) {
   await library.load();
-  const stats = library.stats();
+  const stats = library.pickStats(); // per pick: the narrow, cached counts (#1723)
   // Sized off the MIRROR, not `stats.total`, which counts only tagged tracks.
   const librarySize = stats.mirrorTotal || stats.total;
   const windows = recencyWindowsForLibrary(stats.distinctArtists, librarySize);
