@@ -101,9 +101,7 @@ export default function DashPanel() {
   // never calls a model; the refresh button's POST does.
   // Longest-connected first by default.
   const [sort, setSort] = useState<SortState>({ key: 'connectedSeconds', dir: 'desc' });
-  // Admin-only page: listener IPs show in full by default. "hide IPs" masks
-  // the last octet, e.g. before sharing a screenshot.
-  const [revealIps, setRevealIps] = useState(true);
+  const [revealIps, setRevealIps] = useState(false);
 
   const ready = hydrated && !needsAuth;
   const statusQuery = useAdminQuery<DashStatus>({
