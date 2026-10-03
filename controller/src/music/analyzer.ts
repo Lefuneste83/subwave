@@ -812,8 +812,10 @@ export interface RenderTransitionPayload {
 
 export interface RenderTransitionResult {
   path: string;
-  blendStartSec: number; // absolute in the OUTGOING track — its liq_cue_out
-  inCueSec: number;      // absolute in the INCOMING track — its liq_cue_in
+  blendStartSec: number; // absolute in the OUTGOING track — where the clip's first sample continues it
+  inCueSec: number;      // absolute in the INCOMING track — where the clip's last sample reaches it
+  // (the stamped liq_cue_out / liq_cue_in sit one seam overlap outside these:
+  // broadcast/stem-seam.ts)
   clipSec: number;
 }
 
