@@ -526,7 +526,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     for (const f of facets) {
       const a = res.facets[f as analyzer.FacetName];
       if (!a) continue;
-      if (a.status === 'failed') { failures.push(`${f}: ${a.reason ?? 'failed'}`); continue; }
+      if (a.status === 'failed') { failures.push(db.facetFailure(f, a.reason)); continue; }
       if (a.status === 'unavailable') continue;
       const r = a.result;
       if (f === 'head' && a.status === 'ok') {
