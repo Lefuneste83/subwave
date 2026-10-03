@@ -15,7 +15,11 @@
 #     analysis frame, and reads a small fraction of the file;
 #   * what can't be proven falls back to the capped download, with the reason:
 #     VBR MP3 without a header, WAV, a server that ignores Range;
-#   * a request whose facets read more than the tail never goes ranged.
+#   * a request whose facets read more than the tail never goes ranged;
+#   * a file smaller than the tail fetch is decoded whole, as it is: a sparse
+#     106 s FLAC with ~220 KB of cover art (shaped like a production file that
+#     failed) measures ranged, and a whole file decoding shorter than its
+#     header falls back instead of failing.
 
 import http.server
 import os
@@ -124,7 +128,39 @@ def make_fixtures(d):
     fx["mp3_cbr_noxing"] = enc("cbr.mp3", ["-c:a", "libmp3lame", "-b:a", "320k", "-write_xing", "0"])
     fx["mp3_vbr_noxing"] = enc("vbr_noxing.mp3", ["-c:a", "libmp3lame", "-q:a", "2", "-write_xing", "0"])
     fx["wav"] = enc("plain.wav", ["-c:a", "pcm_s16le"], x=np.vstack([ct._music(40, 3), ct._silence(3)]))
+    fx["flac_small_art"], fx["flac_short_decode"] = small_fixtures(d)
     return fx
+
+
+def small_fixtures(d):
+    """Two FLACs smaller than the ranged fetch, so the whole file comes back.
+
+    small_art: 106.48 s of a faint tone (~25 KB of audio) plus ~220 KB of
+    incompressible cover art. With the synthetic header prepended, ffmpeg
+    decoded it to 0 s. short_decode: the same audio without art, its
+    STREAMINFO sample count doubled, so the header claims 213 s."""
+    audio = os.path.join(d, "sparse.flac")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "sine=f=200:r=44100:d=106.48,volume=0.00005,aformat=channel_layouts=stereo",
+                    "-c:a", "flac", "-sample_fmt", "s16", "-compression_level", "8", audio], check=True)
+    art = os.path.join(d, "noise.png")
+    w = 270  # 270*270*3 = 219 KB of noise: PNG cannot shrink it
+    rgb = np.random.default_rng(7).integers(0, 256, size=(w, w, 3), dtype=np.uint8)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{w}",
+                    "-i", "-", "-frames:v", "1", art], input=rgb.tobytes(), check=True)
+    small_art = os.path.join(d, "sparse_art.flac")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", audio, "-i", art, "-map", "0:a", "-map", "1:v",
+                    "-c", "copy", "-disposition:v", "attached_pic", small_art], check=True)
+    with open(audio, "rb") as f:
+        b = bytearray(f.read())
+    total = ((b[21] & 0x0F) << 32) | int.from_bytes(b[22:26], "big")  # STREAMINFO at 8: samples at si[13:18]
+    total *= 2
+    b[21] = (b[21] & 0xF0) | ((total >> 32) & 0x0F)
+    b[22:26] = (total & 0xFFFFFFFF).to_bytes(4, "big")
+    short_decode = os.path.join(d, "short_decode.flac")
+    with open(short_decode, "wb") as f:
+        f.write(bytes(b))
+    return small_art, short_decode
 
 
 def flat_tail(path):
@@ -165,6 +201,31 @@ def main():
             check(f"{name}: fallback ({r['source'].get('fallback')})",
                   r["source"]["kind"] != "ranged" and "fallback" in r["source"]
                   and needle in r["source"]["fallback"], str(r["source"]))
+        print("a file smaller than the tail fetch is decoded whole:")
+        path = fx["flac_small_art"]
+        size = os.path.getsize(path)
+        check(f"flac_small_art fixture: {size} bytes, under the {aw.RANGED_TAIL_MIN_BYTES}-byte fetch",
+              size < aw.RANGED_TAIL_MIN_BYTES)
+        want_start, want_gap, want_end = flat_tail(path)
+        r = facet_request(f"{base}/{os.path.basename(path)}")
+        src, tail = r["source"], r["facets"]["tail"]
+        got = tail.get("data", {})
+        d_start = abs((got.get("tail_start_ms") or 0) - (want_start or 0))
+        # The tail is near-silent, so the flat analysis may find no tail start
+        # either: what matters is that both paths reach the same answer, and
+        # that the ranged one answers instead of failing.
+        same = (tail["status"] == "unmeasurable" and want_start is None) or (
+            tail["status"] == "ok" and d_start <= TOL_MS and got.get("outro", {}).get("ending") == want_end)
+        check(f"flac_small_art: ranged whole-file read, {tail['status']} "
+              f"({tail.get('reason') or f'tail start Δ{d_start} ms'}), same as the flat analysis",
+              src["kind"] == "ranged" and same, f"{src} {tail} want start={want_start} ending={want_end}")
+        r = facet_request(f"{base}/{os.path.basename(fx['flac_short_decode'])}")
+        # Only the fallback is pinned: this fixture's header lies to every
+        # reader, so the capped download may fail on it too (libsndfile seeks
+        # past the end). What must not happen is a ranged read of a window
+        # that starts before the decoded audio.
+        check(f"header longer than the decoded file: fallback ({r['source'].get('fallback')})",
+              r["source"]["kind"] != "ranged" and "decodes shorter" in r["source"].get("fallback", ""), str(r))
         r = facet_request(f"{nobase}/{os.path.basename(fx['flac'])}")
         check(f"server ignoring Range: fallback ({r['source'].get('fallback')})",
               r["source"]["kind"] != "ranged" and "200" in r["source"].get("fallback", ""), str(r["source"]))

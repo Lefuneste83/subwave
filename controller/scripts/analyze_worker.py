@@ -2589,22 +2589,39 @@ class RangedTailSource:
             want = min(want, self.size)
             data, _ = http_range(self.url, suffix=want)
             self.bytes_read += len(data)
-            n = self._decode_tail(data)
+            n = self._decode_tail(data, whole=len(data) >= self.size)
             have_s = n / self.native_rate
-            if have_s >= OUTRO_SECONDS + 0.5 or want >= self.size:
+            if want >= self.size:
+                # The whole file came back, so the decode must reach its
+                # header's length. Short of it the header or the file is off;
+                # the capped download measures the real file instead of a
+                # window that would start before the decoded audio.
+                if have_s < self.duration_s - 1.0:
+                    raise RangeUnsupported(
+                        f"whole file decodes shorter than its header ({have_s:.1f} s of {self.duration_s:.1f} s)"
+                    )
+                return
+            if have_s >= OUTRO_SECONDS + 0.5:
                 return
             want *= 2
         raise RangeUnsupported("tail window would not decode to OUTRO_SECONDS")
 
-    def _decode_tail(self, data):
+    def _decode_tail(self, data, whole=False):
         """Decode the tail bytes standalone to a native-rate WAV; returns the
-        number of samples kept (after the MP3 end-padding trim)."""
+        number of samples kept (after the MP3 end-padding trim).
+
+        `whole`: the bytes are the entire file (a file smaller than the fetch).
+        They are decoded as they are: the synthetic FLAC header is only for a
+        tail cut from mid-stream. In front of a whole file it puts the file's
+        own metadata, cover art included, where ffmpeg expects frames, and a
+        large picture made it decode nothing at all (a 106 s, 245 KB FLAC
+        decoded to 0 s)."""
         import soundfile as sf
 
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             raise RangeUnsupported("ffmpeg not on PATH")
-        blob = (self._flac_header + data) if self.container == "flac" else data
+        blob = (self._flac_header + data) if self.container == "flac" and not whole else data
         fd, src = tempfile.mkstemp(prefix="swtail_", suffix=f".{self.container}")
         with os.fdopen(fd, "wb") as out:
             out.write(blob)
