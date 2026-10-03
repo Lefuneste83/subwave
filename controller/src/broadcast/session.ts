@@ -459,6 +459,11 @@ export async function maybeRoll(ctx: SessionContext): Promise<Session> {
   const next = start(ctx, buildHandoff(prev));
   if (prev.key === nextKey) next.hostRevision = sameKeyRevision;
   if (boundaryProgramme) next.programme = boundaryProgramme;
+  // The 4h safety cap rolls the session with the show unchanged. It is the
+  // same episode on air: keep its plan and aired beats, or the programme
+  // re-plans "today's episode" and re-airs the show's intro mid-show (seen
+  // live at 03:00 into a show that began at 23:00).
+  else if (prev.key === nextKey && prev.programme) next.programme = prev.programme;
   stampRolledFrom(next, prev);
   if (handoffAlreadyCovered) next.handoffAired = true;
   if (pendingBoundaryHandoff) {
