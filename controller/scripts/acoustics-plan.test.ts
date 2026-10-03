@@ -13,7 +13,10 @@
 //     vocals gets them explicitly OFF;
 //   - with a plan, the pass analyses exactly the planned tracks with those
 //     flags (checked against a fake sidecar), and the facet table records the
-//     result.
+//     result;
+//   - a facet the worker reports failed is 'failed' in the table even where
+//     the columns alone read 'unmeasurable', so it is retried up to the
+//     attempt limit and no longer re-planned by `--where unmeasurable`.
 //
 // Real better-sqlite3 DB in a temp STATE_DIR; the analyzer and Navidrome are a
 // local HTTP stub. Run: `tsx scripts/acoustics-plan.test.ts` (npm test).
@@ -310,6 +313,47 @@ async function main() {
     facetAnswers = {};
     assert.equal(stats.failed, 1);
     assert.equal(stats.analyzed, 0);
+  });
+
+  await test('a tail that fails is recorded as failed, so an unmeasurable re-run stops planning it', async () => {
+    // Production, 3 Oct: a ranged tail failed ("window starts before the
+    // fetched tail") on an analysed track. The row stayed 'unmeasurable /
+    // tail-not-measured', so facets-cli showed no failure and every
+    // `--where unmeasurable:tail-not-measured` run planned it again.
+    db.upsertTrackMeta('t5', { title: 't5', artist: 'A', album: 'B', duration: 106 });
+    db.upsertTrackAnalysis('t5', { bpm: 90, musicalKey: 'F', loudnessLufs: -30 });
+    const where = { kind: 'unmeasurable' as const, reason: 'tail-not-measured' };
+    const tailPlan = () => P.planAcoustics({ ids: ['t5'], facets: ['tail'], where,
+      state: db.loadFacetState(['tail']), capabilities: { clap: true, demucs: false } });
+    assert.equal(facetRow('t5', 'tail')!.reason, 'tail-not-measured');
+    assert.equal(tailPlan().items.length, 1);
+    facetAnswers = { tail: { status: 'failed', reason: 'window starts before the fetched tail' } };
+    const stats = await runAnalysisPass({ plan: tailPlan() });
+    facetAnswers = {};
+    assert.equal(stats.failed, 1);
+    const row = facetRow('t5', 'tail')!;
+    assert.equal(row.status, 'failed');
+    assert.match(row.reason ?? '', /^tail: window starts before the fetched tail/);
+    assert.equal(facetRow('t5', 'head')!.status, 'ok', 'the head stays measured');
+    assert.equal(tailPlan().items.length, 0, 'unmeasurable:<reason> no longer matches a failed tail');
+    assert.ok(db.facetNeedsIds('tail').includes('t5'), 'needs retries it while under the attempt limit');
+    for (let i = 1; i < db.FACET_MAX_ATTEMPTS; i++) db.recordAnalysisFailure('t5', 'tail: window starts before the fetched tail');
+    assert.ok(!db.facetNeedsIds('tail').includes('t5'), 'and stops at the limit');
+    // The admin "clear failures" puts the track back where it was.
+    db.clearAnalysisFailures('t5');
+    assert.deepEqual(
+      { status: facetRow('t5', 'tail')!.status, reason: facetRow('t5', 'tail')!.reason },
+      { status: 'unmeasurable', reason: 'tail-not-measured' },
+    );
+    assert.equal(tailPlan().items.length, 1);
+  });
+
+  await test('a flat failure on an analysed track leaves its unmeasured tail unmeasurable', async () => {
+    db.upsertTrackMeta('t6', { title: 't6', artist: 'A', album: 'B', duration: 214 });
+    db.upsertTrackAnalysis('t6', { bpm: 90, musicalKey: 'F', loudnessLufs: -9, source: 'capped' });
+    db.recordAnalysisFailure('t6', 'read ECONNRESET');
+    assert.equal(facetRow('t6', 'tail')!.status, 'unmeasurable');
+    assert.equal(facetRow('t6', 'clap')!.status, 'failed');
   });
 
   await test('the facet table stays consistent with the columns through facet writes', async () => {

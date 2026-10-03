@@ -129,21 +129,47 @@ export function deriveFacetRows(
   if (row.has_stems) ok('stems');
 
   // A failed analysis counts against every facet it would have produced.
+  // A facet-protocol failure also names its facets ("tail: …"); a named facet
+  // is failed even where the columns alone read 'unmeasurable' (an analysed
+  // track without a tail). Otherwise a tail that keeps failing stays
+  // 'unmeasurable / tail-not-measured': invisible as a failure, and planned
+  // again by every `--where unmeasurable:tail-not-measured` run.
   const fails = row.analyze_fail_count ?? 0;
   if (fails > 0) {
+    const named = failedFacetsOf(row.analyze_error);
+    const failed = (facet: Facet): DerivedFacet => ({
+      facet,
+      status: 'failed',
+      version: FACET_VERSIONS[facet],
+      reason: (row.analyze_error || 'analysis failed').slice(0, 500),
+      attempts: fails,
+    });
+    for (let i = 0; i < out.length; i++) {
+      if (out[i].status === 'unmeasurable' && named.has(out[i].facet)) out[i] = failed(out[i].facet);
+    }
     const have = new Set(out.map(r => r.facet));
     for (const facet of FACETS) {
-      if (have.has(facet)) continue;
-      out.push({
-        facet,
-        status: 'failed',
-        version: FACET_VERSIONS[facet],
-        reason: (row.analyze_error || 'analysis failed').slice(0, 500),
-        attempts: fails,
-      });
+      if (!have.has(facet)) out.push(failed(facet));
     }
   }
   return out;
+}
+
+// How a facet-protocol pass words one facet's failure in analyze_error
+// ("tail: window starts …"; several are joined by '; '), and the reverse.
+// Both live here so the writer and deriveFacetRows can't drift apart.
+export function facetFailure(facet: string, reason: string | null | undefined): string {
+  return `${facet}: ${reason ?? 'failed'}`;
+}
+
+export function failedFacetsOf(error: string | null | undefined): Set<Facet> {
+  const named = new Set<Facet>();
+  if (!error) return named;
+  for (const part of error.split('; ')) {
+    const facet = part.slice(0, part.indexOf(': '));
+    if ((FACETS as readonly string[]).includes(facet)) named.add(facet as Facet);
+  }
+  return named;
 }
 
 interface StoredFacet {
@@ -316,11 +342,19 @@ export function clearFacetRows(opts: { keepVocal?: boolean; clearStems?: boolean
   }
 }
 
-// Mirror of clearAnalysisFailures(): a cleared history means "not attempted".
+// Mirror of clearAnalysisFailures(), called after it cleared the columns: a
+// cleared history means "not attempted". Re-derived rather than deleted, so a
+// facet the columns still explain (an analysed track's unmeasured tail or
+// loudness) goes back to that row instead of to no row at all.
 export function clearFacetFailures(id?: string): void {
   const d = requireDb();
-  if (id) d.prepare(`DELETE FROM track_facet_status WHERE status = 'failed' AND track_id = ?`).run(id);
-  else d.prepare(`DELETE FROM track_facet_status WHERE status = 'failed'`).run();
+  const ids = (id
+    ? d.prepare(`SELECT DISTINCT track_id FROM track_facet_status WHERE status = 'failed' AND track_id = ?`).all(id)
+    : d.prepare(`SELECT DISTINCT track_id FROM track_facet_status WHERE status = 'failed'`).all()
+  ) as Array<{ track_id: string }>;
+  d.transaction(() => {
+    for (const r of ids) syncTrackFacetsOn(d, r.track_id, {});
+  })();
 }
 
 // Tracks with work for `facet`: never attempted, measured by an older version,
