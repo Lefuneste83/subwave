@@ -512,19 +512,13 @@ function boundaryHandoffTrackOverdue(now: number): boolean {
   return handoffIsStale(h.boundaryAt, now, BOUNDARY_TRACK_CONFIRM_MAX_AGE_MS);
 }
 
-// Relax an overdue handoff onto the same no-identity path already used for
-// older persisted records (see boundaryHandoffReadyForTrack's comment): once
-// the specific recorded track can no longer be trusted to ever play, accept
-// whatever track starts next as confirmation instead of waiting on this one
-// forever. The outgoing DJ's sign-off/greeting still airs — just at the next
-// natural track boundary, against live context at that moment, the way a
-// human DJ would pick it up late rather than never — instead of the handoff
-// silently blocking every scheduled station-id/hourly/banter with no
-// resolution (and, since armBoundaryHandoff() refuses to arm a second record
-// on top of one already set, blocking any FUTURE boundary's handoff too).
-// Called from the read paths below so it self-heals on the next check after
-// going overdue, without its own timer.
-function relaxOverdueBoundaryHandoffTrack(now: number = Date.now()) {
+// Only confirmed playback may replace an overdue final-track identity. Keep
+// the replacement identity while rendering so generic pick/roll callers still
+// stand down and cannot bypass the confirmed runner's talk placement scope.
+function relaxOverdueBoundaryHandoffTrack(
+  track: { id?: string | null; title?: string | null; artist?: string | null },
+  now: number = Date.now(),
+) {
   if (!boundaryHandoffTrackOverdue(now)) return;
   const h = _session!.boundaryHandoff!;
   logEvent('handoff.finalTrackAbandoned', {
@@ -534,20 +528,14 @@ function relaxOverdueBoundaryHandoffTrack(now: number = Date.now()) {
     boundaryAt: h.boundaryAt,
     finalTrack: h.finalTrack,
   });
-  // runArmedBoundaryHandoff() fetches context as of contextAt once
-  // boundaryHandoffReadyForTrack() next returns true (immediately, for any
-  // track, now that finalTrack is cleared below). Refresh it to now so that
-  // greeting is generated from current conditions rather than whatever was
-  // true back when this record was originally armed.
   h.contextAt = new Date(now).toISOString();
-  h.finalTrack = null;
+  h.finalTrack = { id: track.id ?? null, title: track.title ?? null, artist: track.artist ?? null };
   schedulePersist();
 }
 
 // The pending on-air handoff for the live session (outgoing persona metadata),
 // or null when there's nothing to air (no persona change, or already aired).
 export function pendingHandoff(): RolledFrom | BoundaryHandoff | null {
-  relaxOverdueBoundaryHandoffTrack();
   if (_session?.boundaryHandoff && !_session.boundaryHandoff.aired
       && (!_session.boundaryHandoff.queued || _resumedQueuedHandoff)) {
     return _session.boundaryHandoff;
@@ -674,6 +662,16 @@ export function boundaryHandoffReadyForTrack(
   return expected.title === (track.title ?? null) && expected.artist === (track.artist ?? null);
 }
 
+// Called only by the confirmed-track runner, including a newly armed handoff
+// on the track already on air. Read/debug/pick paths must not relax its gate.
+export function confirmBoundaryHandoffTrack(
+  track: { id?: string | null; title?: string | null; artist?: string | null } | null,
+): boolean {
+  if (!track) return false;
+  relaxOverdueBoundaryHandoffTrack(track);
+  return boundaryHandoffReadyForTrack(track);
+}
+
 export function boundaryHandoffContextAt(): Date | null {
   const raw = _session?.boundaryHandoff?.contextAt;
   if (typeof raw !== 'string') return null;
@@ -685,7 +683,6 @@ export function boundaryHandoffContextAt(): Date | null {
 // now-playing transition confirms the recorded final track. Older persisted
 // records have no identity and retain their established fail-open behaviour.
 export function boundaryHandoffAwaitsTrack(): boolean {
-  relaxOverdueBoundaryHandoffTrack();
   const handoff = _session?.boundaryHandoff;
   return !!handoff && !handoff.queued && !handoff.aired && !!handoff.finalTrack;
 }
@@ -693,7 +690,6 @@ export function boundaryHandoffAwaitsTrack(): boolean {
 // Once a final-track handoff has claimed the outgoing show's air, no ordinary
 // speech from its stale roster may cross the boundary.
 export function handoffInProgress(): boolean {
-  relaxOverdueBoundaryHandoffTrack();
   if (airedOnLiveShow()) return false;
   return !!(_session?.boundaryHandoff?.queued || _session?.boundaryHandoff?.aired);
 }
@@ -708,7 +704,6 @@ export function handoffBoundaryAt(): number | null {
 // Compact operational state for /debug. The full session remains available
 // there too; this is deliberately the answer to "is a handoff waiting?".
 export function boundaryHandoffStatus() {
-  relaxOverdueBoundaryHandoffTrack();
   const h = _session?.boundaryHandoff;
   if (!h) return null;
   return {
