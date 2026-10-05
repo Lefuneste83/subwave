@@ -422,6 +422,7 @@ class Queue {
   _pendingVoice: PendingVoice | null = null; // one boundary-deferred segment awaiting the next track start — see announceAtNextTrack
   _handoffBoundaryTimer: NodeJS.Timeout | null = null;
   _introRenders = new IntroRenderTracker<QueueItem>(); // timed-out pre-renders stay reusable by airIntro
+  private _introPublications = new WeakMap<QueueItem, Promise<void>>();
   // Jingle handoffs made but not yet heard — see playJingle. ONE map for both
   // callers on purpose: the de-duplication question ("is this clip already
   // waiting?") has to be answered across the operator's presses and the
@@ -2823,7 +2824,26 @@ class Queue {
   // would hand the one failure case this feature exists to prevent a LIGHTER
   // duck than it had before #1465. Same rule as onSpoken's channel: passed by
   // whoever knows, never re-derived (#1382).
-  async airIntro(item: QueueItem, predecessor: Track | null = null, { overBed = false }: { overBed?: boolean } = {}) {
+  // Track the complete TTS-to-publication promise, not introAired, which is
+  // claimed before rendering. Both handoff release paths must wait for it.
+  airIntro(item: QueueItem, predecessor: Track | null = null, { overBed = false }: { overBed?: boolean } = {}): Promise<void> {
+    if (!item) return Promise.resolve();
+    const pending = this._introPublications.get(item);
+    if (pending) return pending;
+    const publication = this.publishIntro(item, predecessor, { overBed })
+      .catch(err => { this.log('error', `Final-track intro failed: ${(err as Error).message}`); });
+    this.trackIntroPublication(item, publication);
+    return publication;
+  }
+
+  private trackIntroPublication(item: QueueItem, publication: Promise<void>) {
+    this._introPublications.set(item, publication);
+    void publication.then(() => {
+      if (this._introPublications.get(item) === publication) this._introPublications.delete(item);
+    });
+  }
+
+  private async publishIntro(item: QueueItem, predecessor: Track | null, { overBed }: { overBed: boolean }) {
     // Station voice off (settings.tts.enabled). The generation sites already
     // skip writing intros, so this only catches an item queued BEFORE the
     // switch was flipped — it must not air its script now. Backstop, not the
@@ -3196,6 +3216,10 @@ class Queue {
       // item is a spread clone, so carry the lifecycle across that identity
       // hand-off before airIntro tries to reuse it.
       this._introRenders.transfer(item, this.current);
+      // A bed can start publishing the link before the song starts. Keep
+      // waiting for that same publication after cloning the queued item.
+      const introPublication = this._introPublications.get(item);
+      if (introPublication) this.trackIntroPublication(this.current, introPublication);
       this.log('playing', `${np.title} — ${np.artist}`, { requestedBy: item.requestedBy, source });
       // A tracked item matched → controller and Liquidsoap are in sync; clear any
       // dj_queue-empty desync streak accumulated from prior untracked plays.
@@ -3211,14 +3235,7 @@ class Queue {
       // writeHandoff can block for maxWaitMs and must not stall the watcher
       // tick. Uses the live `this.current` so introAired lands on the tracked
       // object, and passes the REAL predecessor for the stale-link drop.
-      const introQueued = this.airIntro(this.current, this.history[0]?.track || null);
-      // Pair-drain may have armed this handoff while the preceding track was on
-      // air. Confirmed playback of the recorded final track is the permission to
-      // speak; queue its own intro first, then let the handoff take the voice
-      // chain behind it.
-      void introQueued
-        .catch(err => this.log('error', `Final-track intro failed: ${(err as Error).message}`))
-        .then(() => this.runArmedBoundaryHandoff());
+      void this.airIntro(this.current, this.history[0]?.track || null);
     } else {
       // Not a tracked request → auto-playlist or jingle.
       // If we see untracked plays while there are sent items in `upcoming`,
@@ -3240,6 +3257,11 @@ class Queue {
       };
       this.log('playing', `${np.title} — ${np.artist}`, { source: 'auto' });
     }
+
+    // Every real music start can confirm an overdue handoff, including an
+    // untracked auto-playlist fallback. The runner waits for a tracked intro's
+    // complete publication before taking the voice chain behind it.
+    void this.runArmedBoundaryHandoff();
 
     // Record the play into the live session's chat history.
     session.appendTurn({
@@ -3359,13 +3381,19 @@ class Queue {
     preparePlan?: typeof programme.prepareBoundaryPlan;
     runHandoff?: (ctx: session.SessionContext) => Promise<void>;
   } = {}) {
-    const track = this.current?.track ?? null;
-    if (!session.boundaryHandoffReadyForTrack(track)) return;
-    const contextAt = session.boundaryHandoffContextAt();
-    if (!contextAt) return;
+    const item = this.current;
+    if (!item) return;
     try {
+      await this._introPublications.get(item);
+      // A slow intro may finish after another track starts. Its old runner
+      // must not claim that newer track's boundary or overtake its intro.
+      if (this.current !== item) return;
+      if (!session.confirmBoundaryHandoffTrack(item.track)) return;
+      const contextAt = session.boundaryHandoffContextAt();
+      if (!contextAt) return;
       const ctx = await getContext(contextAt);
       await preparePlan(ctx);
+      if (this.current !== item || !session.boundaryHandoffReadyForTrack(item.track)) return;
       if (talkOnlyBetweenTracks()) {
         await withTalkAir('next-track', () => runHandoff(ctx));
       } else {

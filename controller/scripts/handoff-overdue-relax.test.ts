@@ -79,10 +79,12 @@ test('past six minutes it accepts the next track that starts, with fresh context
   const late = boundaryAt + 6 * 60_000 + 1_000;
   t.mock.timers.setTime(late);
   assert.ok(session.pendingHandoff(), 'the mic-pass is still owed, not dropped');
-  assert.equal(session.boundaryHandoffReadyForTrack(OTHER), true, 'any next track releases it');
-  assert.equal(session.boundaryHandoffAwaitsTrack(), false);
+  assert.equal(session.boundaryHandoffReadyForTrack(OTHER), false, 'a read does not confirm playback');
+  assert.equal(session.boundaryHandoffAwaitsTrack(), true);
+  assert.equal(session.confirmBoundaryHandoffTrack(OTHER), true, 'confirmed playback replaces the missing track');
+  assert.equal(session.boundaryHandoffAwaitsTrack(), true, 'generic callers still wait while rendering');
   const record = session.getSession()!.boundaryHandoff!;
-  assert.equal(record.finalTrack, null);
+  assert.deepEqual(record.finalTrack, OTHER);
   assert.equal(record.contextAt, new Date(late).toISOString(), 'the greeting reads conditions as of now');
   assert.equal(session.boundaryHandoffStatus()?.state, 'armed', 'still owed: armed, not aired');
 });
