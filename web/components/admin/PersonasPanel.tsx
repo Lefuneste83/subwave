@@ -216,6 +216,7 @@ export default function PersonasPanel() {
       frequency: 'moderate', scriptLength: 'concise', djMode: false, linkStyle: 'natural',
       humour: DIAL_NEUTRAL, localColour: DIAL_NEUTRAL, warmth: DIAL_NEUTRAL, soul: '', musicLean: '',
       language: '',
+      voiceStyle: '',
       avatar: '',
       tts: { engine: 'piper', cloudProvider: 'openai', voice: 'bf_isabella', gainDb: 0, speed: 1 },
       skills: (data?.skills?.catalog || []).map(s => s.name),
@@ -460,6 +461,7 @@ export default function PersonasPanel() {
             soul: p.soul.trim(),
             musicLean: p.musicLean.trim(),
             language: p.language.trim(),
+            voiceStyle: p.voiceStyle?.trim() || '',
             avatar: p.avatar || '',
             tts: {
               engine: p.tts.engine,

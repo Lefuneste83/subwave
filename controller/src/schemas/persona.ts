@@ -25,6 +25,7 @@ export const PERSONA_LIMIT = 48;
 export const PERSONA_NAME_MAX = 40;
 export const PERSONA_TAGLINE_MAX = 80;
 export const PERSONA_LANGUAGE_MAX = 60;
+export const PERSONA_VOICE_STYLE_MAX = 300;
 // A soul rides in the system prompt on every call: a per-call token cost.
 export const PERSONA_SOUL_MAX = 2000;
 // Unlike Soul, musical leanings are a compact backstage selection cue. Keeping
@@ -415,6 +416,7 @@ export interface PersonaParsed {
   soul: string;
   musicLean: string;
   language: string;
+  voiceStyle: string;
   avatar: string;
   tts: TtsVoiceSlot;
   skills: string[] | null;
@@ -478,6 +480,12 @@ export const personaSchema = z
         .string({ error: 'language must be a string' })
         .trim()
         .max(PERSONA_LANGUAGE_MAX, `language must be 0-${PERSONA_LANGUAGE_MAX} chars`)
+        .default(''),
+    ),
+    voiceStyle: z.preprocess(
+      personaNullToUndefined,
+      z.string({ error: 'voiceStyle must be a string' }).trim()
+        .max(PERSONA_VOICE_STYLE_MAX, `voiceStyle must be 0-${PERSONA_VOICE_STYLE_MAX} chars`)
         .default(''),
     ),
     frequency: z.enum(PERSONA_FREQUENCIES, {
@@ -578,6 +586,7 @@ export const personaSchema = z
       soul: p.soul,
       musicLean: p.musicLean,
       language: p.language,
+      voiceStyle: p.voiceStyle,
       avatar: p.avatar,
       tts: p.tts,
       skills: p.skills,
@@ -618,6 +627,9 @@ export function repairPersonaForLoad(
       typeof raw.language === 'string'
         ? raw.language.trim().slice(0, PERSONA_LANGUAGE_MAX)
         : undefined,
+    voiceStyle: typeof raw.voiceStyle === 'string'
+      ? raw.voiceStyle.trim().slice(0, PERSONA_VOICE_STYLE_MAX)
+      : undefined,
     frequency: (PERSONA_FREQUENCIES as readonly string[]).includes(raw.frequency as string)
       ? raw.frequency
       : 'moderate',

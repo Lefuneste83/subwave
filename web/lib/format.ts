@@ -69,12 +69,18 @@ export function fmtStationDateTime(
 ): string {
   try {
     const date = new Date(t);
-    const datePart = new Intl.DateTimeFormat('en-GB', {
+    // Built from parts, not .format(): ICU versions disagree on the
+    // punctuation between the weekday and the date ("Thu 24 Sep" vs
+    // "Thu, 24 Sep"), and the header should read the same in every browser.
+    const parts = new Intl.DateTimeFormat('en-GB', {
       weekday: 'short',
       day: 'numeric',
       month: 'short',
       ...(tz ? { timeZone: tz } : {}),
-    }).format(date);
+    }).formatToParts(date);
+    const part = (type: Intl.DateTimeFormatPartTypes) =>
+      parts.find((p) => p.type === type)?.value ?? '';
+    const datePart = `${part('weekday')} ${part('day')} ${part('month')}`;
     return `${datePart} · ${fmtClock(date.getTime(), tz, locale)}`;
   } catch {
     return '';

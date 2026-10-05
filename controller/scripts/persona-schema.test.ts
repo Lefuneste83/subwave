@@ -582,6 +582,7 @@ test('anything the strict path accepts, the lenient path returns unchanged', () 
     soul: 'dry and specific',
     musicLean: 'favour warm electronic edges',
     language: 'Turkish',
+    voiceStyle: 'Warm and unhurried.',
     avatar: 'p_rich.webp',
     tts: { engine: 'kokoro', cloudProvider: 'openai', voice: 'bf_isabella', gainDb: 1.5, speed: 1.1 },
     skills: ['news', 'weather'],
