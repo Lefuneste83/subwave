@@ -2507,7 +2507,7 @@ def _mp3_first_frame(b, start, limit=64 * 1024):
         h2 = parse_mp3_frame_header(b, nxt)
         if h2 and parse_mp3_frame_header(b, nxt + h2["size"]):
             return pos, h
-    raise RangeUnsupported("not FLAC or MP3 (only those are read by range)")
+    raise RangeUnsupported("no MP3 frames found")
 
 
 def parse_mp3_info(b, pos, h):
@@ -2627,7 +2627,10 @@ class RangedTailSource:
             while pos is None:
                 scanned = base + len(head)
                 if scanned >= min(self.size, RANGED_MAX_LEAD_BYTES):
-                    raise
+                    raise RangeUnsupported(
+                        "no FLAC, WAV, AIFF or DSF header and no MP3 frames in the first "
+                        f"{RANGED_MAX_LEAD_BYTES // (1024 * 1024)} MB (only those formats are read by range)"
+                    )
                 # Re-read the last 4 KB so a frame straddling the step is seen.
                 start = max(base, scanned - 4096)
                 head = head[start - base:] + self._read_at(scanned, RANGED_HEAD_BYTES)
@@ -2658,7 +2661,10 @@ class RangedTailSource:
             at = first + int(audio_bytes * frac)
             chunk, _ = http_range(self.url, at, at + 16 * 1024)
             self.bytes_read += len(chunk)
-            _p, h2 = _mp3_first_frame(chunk, 0)
+            try:
+                _p, h2 = _mp3_first_frame(chunk, 0)
+            except RangeUnsupported:
+                raise RangeUnsupported(f"no MP3 frames at {frac:.0%} of the file (CBR length unknown)")
             if h2["bitrate"] != h["bitrate"] or h2["rate"] != h["rate"]:
                 raise RangeUnsupported("VBR MP3 without a Xing/VBRI header (length unknown)")
         self.duration_s = audio_bytes * 8 / h["bitrate"]
