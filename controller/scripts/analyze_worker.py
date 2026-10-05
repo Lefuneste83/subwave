@@ -2367,6 +2367,18 @@ class FileSource:
 # ---------------------------------------------------------------------------
 
 RANGED_HEAD_BYTES = 128 * 1024
+# Audio bytes wanted behind the leading tags before the first MP3 frame is
+# looked for: the scan window of _mp3_first_frame plus room for the frames it
+# chains. A tag holding cover art often ends just short of the head fetch,
+# leaving too little behind it (5 Oct 2026: 63 production MP3s with a ~127 KB
+# tag were refused as "not FLAC or MP3").
+RANGED_AFTER_TAGS_BYTES = 64 * 1024 + 4096
+# Leading ID3v2 tags skipped one after another (some files carry two).
+RANGED_MAX_ID3_TAGS = 4
+# How far into a file the first MP3 frame may be searched for when something
+# other than an ID3 tag sits in front of it (a damaged tag whose header is
+# gone: production files start with ~230 KB of UTF-16 text).
+RANGED_MAX_LEAD_BYTES = 1024 * 1024
 # Bytes per second are estimated from size / duration; fetch this much more
 # than OUTRO_SECONDS so a denser-than-average ending still fits.
 RANGED_TAIL_MARGIN = 1.35
@@ -2456,9 +2468,10 @@ def parse_mp3_frame_header(b, pos):
             "size": size, "mono": mono}
 
 
-def _mp3_first_frame(b, start):
-    """First offset >= start where three consecutive valid frames chain."""
-    for pos in range(start, min(len(b) - 4, start + 64 * 1024)):
+def _mp3_first_frame(b, start, limit=64 * 1024):
+    """First offset >= start (and < start + limit) where three consecutive
+    valid frames chain."""
+    for pos in range(start, min(len(b) - 4, start + limit)):
         h = parse_mp3_frame_header(b, pos)
         if not h:
             continue
@@ -2529,18 +2542,29 @@ class RangedTailSource:
     def open(self, librosa):
         head, self.size = http_range(self.url, 0, RANGED_HEAD_BYTES - 1)
         self.bytes_read += len(head)
-        skip = _id3v2_size(head)
-        if skip + 64 > len(head):
-            more, _ = http_range(self.url, skip, skip + RANGED_HEAD_BYTES - 1)
-            self.bytes_read += len(more)
-            head, skip = more, 0
-        body = head[skip:]
-        if body[:4] == b"fLaC":
-            self._open_flac(body)
+        # `head` always starts at file offset `base`, so every position found
+        # in it maps back to the file by adding `base` (the CBR length and the
+        # VBR sampling below need real offsets, not head-relative ones).
+        base = 0
+        for _ in range(RANGED_MAX_ID3_TAGS):
+            tag = _id3v2_size(head)
+            if not tag:
+                break
+            base += tag
+            head = head[tag:]
+            if len(head) < RANGED_AFTER_TAGS_BYTES and base + len(head) < self.size:
+                head = self._read_at(base, RANGED_HEAD_BYTES)
+        if head[:4] == b"fLaC":
+            self._open_flac(head)
         else:
-            self._open_mp3(head, skip)
+            self._open_mp3(head, base)
         self._fetch_tail()
         return self
+
+    def _read_at(self, start, length):
+        data, _ = http_range(self.url, start, min(self.size, start + length) - 1)
+        self.bytes_read += len(data)
+        return data
 
     def _open_flac(self, body):
         si, rate, total, _ch = parse_flac_streaminfo(body)
@@ -2550,8 +2574,28 @@ class RangedTailSource:
         self.duration_s = total / rate
         self._trim_end = 0
 
-    def _open_mp3(self, head, skip):
-        pos, h = _mp3_first_frame(head, skip)
+    def _open_mp3(self, head, base):
+        try:
+            pos, h = _mp3_first_frame(head, 0)
+        except RangeUnsupported:
+            # Not an ID3 tag in front of the audio but something else (a
+            # damaged tag with no header): keep looking, one head-sized step
+            # at a time, up to RANGED_MAX_LEAD_BYTES into the file. Three
+            # chained frame headers are still required, so text or art is
+            # not mistaken for audio.
+            pos = None
+            while pos is None:
+                scanned = base + len(head)
+                if scanned >= min(self.size, RANGED_MAX_LEAD_BYTES):
+                    raise
+                # Re-read the last 4 KB so a frame straddling the step is seen.
+                start = max(base, scanned - 4096)
+                head = head[start - base:] + self._read_at(scanned, RANGED_HEAD_BYTES)
+                base = start
+                try:
+                    pos, h = _mp3_first_frame(head, 0, limit=len(head))
+                except RangeUnsupported:
+                    pos = None
         info = parse_mp3_info(head, pos, h)
         self.container = "mp3"
         self.native_rate = h["rate"]
@@ -2568,9 +2612,10 @@ class RangedTailSource:
             return
         # No Xing/VBRI: only a constant bitrate makes size → length exact
         # enough. Sample the stream at three more points to check CBR.
-        audio_bytes = self.size - pos
+        first = base + pos  # file offset of the first frame
+        audio_bytes = self.size - first
         for frac in (0.25, 0.5, 0.75):
-            at = pos + int(audio_bytes * frac)
+            at = first + int(audio_bytes * frac)
             chunk, _ = http_range(self.url, at, at + 16 * 1024)
             self.bytes_read += len(chunk)
             _p, h2 = _mp3_first_frame(chunk, 0)

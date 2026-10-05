@@ -129,7 +129,50 @@ def make_fixtures(d):
     fx["mp3_vbr_noxing"] = enc("vbr_noxing.mp3", ["-c:a", "libmp3lame", "-q:a", "2", "-write_xing", "0"])
     fx["wav"] = enc("plain.wav", ["-c:a", "pcm_s16le"], x=np.vstack([ct._music(40, 3), ct._silence(3)]))
     fx["flac_small_art"], fx["flac_short_decode"] = small_fixtures(d)
+    fx.update(tag_fixtures(d, fx))
     return fx
+
+
+def _id3(payload_size):
+    """An ID3v2.3 tag of exactly 10 + payload_size bytes (zero padding)."""
+    s = payload_size
+    syncsafe = bytes([(s >> 21) & 0x7F, (s >> 14) & 0x7F, (s >> 7) & 0x7F, s & 0x7F])
+    return b"ID3\x03\x00\x00" + syncsafe + b"\0" * s
+
+
+def _strip_id3(data):
+    n = aw._id3v2_size(data)
+    return data[n:]
+
+
+def tag_fixtures(d, fx):
+    """MP3s shaped like production files the ranged reader refused (5 Oct
+    2026, 70 tracks reported as "not FLAC or MP3"):
+      * tag_127k: one ID3 tag ending just under the 128 KB head fetch
+        (130,147 bytes, like "Awka – Arya"), so under 1 KB of audio follows;
+      * two_tags: two ID3 tags in a row (104,621 + 28,721 bytes);
+      * big_tag: one 415 KB tag, past the head fetch, on a CBR MP3 without a
+        Xing header, so the length comes from the audio's byte offset;
+      * junk_head: ~230 KB of UTF-16 text and no ID3 header before the first
+        frame (a damaged tag)."""
+    out = {}
+    with open(fx["mp3_lame_vbr"], "rb") as f:
+        vbr = _strip_id3(f.read())
+    with open(fx["mp3_cbr_noxing"], "rb") as f:
+        cbr = _strip_id3(f.read())
+    junk = ("﻿" + "Summer of love, a long comment that was never closed. " * 2200).encode("utf-16-le")
+    junk = b"\xff\xfe" + junk[2:][: 230 * 1024]
+    for name, data in (
+        ("mp3_tag127k", _id3(130_147 - 10) + vbr),
+        ("mp3_two_tags", _id3(104_621 - 10) + _id3(28_721 - 10) + vbr),
+        ("mp3_big_tag_cbr", _id3(415_175 - 10) + cbr),
+        ("mp3_junk_head", junk + vbr),
+    ):
+        p = os.path.join(d, name + ".mp3")
+        with open(p, "wb") as f:
+            f.write(data)
+        out[name] = p
+    return out
 
 
 def small_fixtures(d):
@@ -179,9 +222,16 @@ def main():
         srv, base = serve(d, RangeHandler)
         nosrv, nobase = serve(d, IgnoringHandler)
         print("ranged tail vs whole-file analysis:")
-        for name in ("flac", "flac_art", "flac_id3", "mp3_lame_vbr", "mp3_cbr_noxing"):
+        # A tagged fixture is the same audio as its source with bytes in front,
+        # so its tail must equal the SOURCE's whole-file tail (the flat analysis
+        # of the tagged file itself can stumble on a 400 KB tag; that is not
+        # what is being pinned here).
+        reference = {"mp3_tag127k": "mp3_lame_vbr", "mp3_two_tags": "mp3_lame_vbr",
+                     "mp3_big_tag_cbr": "mp3_cbr_noxing", "mp3_junk_head": "mp3_lame_vbr"}
+        for name in ("flac", "flac_art", "flac_id3", "mp3_lame_vbr", "mp3_cbr_noxing",
+                     "mp3_tag127k", "mp3_two_tags", "mp3_big_tag_cbr", "mp3_junk_head"):
             path = fx[name]
-            want_start, want_gap, want_end = flat_tail(path)
+            want_start, want_gap, want_end = flat_tail(fx[reference.get(name, name)])
             r = facet_request(f"{base}/{os.path.basename(path)}")
             src, tail = r["source"], r["facets"]["tail"]
             ok = tail["status"] == "ok" and src["kind"] == "ranged"
