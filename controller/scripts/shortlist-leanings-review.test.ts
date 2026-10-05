@@ -8,7 +8,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const agentSource = readFileSync(resolve(here, '../src/broadcast/dj-agent.ts'), 'utf8');
 const debugSource = readFileSync(resolve(here, '../../web/components/admin/debug/LlmCalls.tsx'), 'utf8');
 const pickStart = agentSource.indexOf('async function pickViaAgent');
-const pickEnd = agentSource.indexOf('\n// The link\'s context', pickStart);
+const pickEnd = agentSource.indexOf('\nfunction speechClockContext', pickStart);
 const picker = agentSource.slice(pickStart, pickEnd);
 
 assert.ok(pickStart >= 0 && pickEnd > pickStart);
