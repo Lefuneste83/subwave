@@ -5,8 +5,9 @@
 // `outro.startMs` are relative to the track's own loud level, so a quiet piano
 // intro reads as silence; never wire one to a cue point.
 //
-// Three guards: the operator's min-gap dial, a margin at each edge, and
-// MAX_TRIM_SEC. Unmeasured input yields null both sides and the track plays whole.
+// Three guards: the operator's min-gap dial, a margin at each edge, and a
+// per-edge ceiling (MAX_LEAD_TRIM_SEC / MAX_TAIL_TRIM_SEC). Unmeasured input
+// yields null both sides and the track plays whole.
 
 import * as settings from '../settings.js';
 import * as library from './library.js';
@@ -16,7 +17,16 @@ import * as library from './library.js';
 const MARGIN_MS = 250;
 
 // Hard ceiling on what a single edge may lose, whatever the measurement says.
-const MAX_TRIM_SEC = 30;
+// The head keeps 30 s: music after a long lead-in is still to come, so a bad
+// measurement there costs the start of the song.
+const MAX_LEAD_TRIM_SEC = 30;
+// The tail is measured back from the proven end of the file to the last frame
+// above the absolute floor, so everything it cuts is the file's own trailing
+// silence: nothing plays after it. The analyzer searches up to 600 s for that
+// frame (ANALYZE_TAIL_SEARCH_SECONDS), and real files end in more than 30 s
+// of it (hidden-track gaps, DJ sets): 33 of 50 measured on one library ran
+// 30-456 s, all of it dead air under a 30 s ceiling.
+const MAX_TAIL_TRIM_SEC = 600;
 
 export interface SilenceTrimTrack {
   id?: string | null;
@@ -39,12 +49,12 @@ export interface SilenceTrimResult {
 const NONE: SilenceTrimResult = { cueInSec: null, cueOutSec: null };
 
 // Silence to skip at one edge after the margin, min-gap dial and ceiling apply.
-function usableTrimSec(gapMs: number | null | undefined, minGapMs: number): number | null {
+function usableTrimSec(gapMs: number | null | undefined, minGapMs: number, maxSec: number): number | null {
   if (typeof gapMs !== 'number' || !Number.isFinite(gapMs) || gapMs <= 0) return null;
   if (gapMs < minGapMs) return null;
   const kept = gapMs - MARGIN_MS;
   if (kept <= 0) return null;
-  return Math.min(MAX_TRIM_SEC, kept / 1000);
+  return Math.min(maxSec, kept / 1000);
 }
 
 // Resolved in one library read. Track object first, else the library record,
@@ -84,8 +94,8 @@ function endReferenceSec(m: Measured): number | null {
 // Cue-point arithmetic over a resolved measurement set; split out so
 // playableSpanSec reaches both halves from one measure() call.
 function trimFrom(m: Measured, minGapMs: number): SilenceTrimResult {
-  const leadSec = usableTrimSec(m.leadMs, minGapMs);
-  const tailSec = usableTrimSec(m.tailMs, minGapMs);
+  const leadSec = usableTrimSec(m.leadMs, minGapMs, MAX_LEAD_TRIM_SEC);
+  const tailSec = usableTrimSec(m.tailMs, minGapMs, MAX_TAIL_TRIM_SEC);
   const endRefSec = endReferenceSec(m);
 
   // A tail longer than the song yields no stamp: a cue_out at or before the
