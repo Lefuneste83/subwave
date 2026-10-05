@@ -16,7 +16,8 @@
 #   * WAV (16/24-bit, float, RF64, tag chunks before and after the audio),
 #     AIFF, AIFC float and DSF: the same, the tail cut on the frame grid;
 #   * what can't be proven falls back to the capped download, with the reason:
-#     VBR MP3 without a header, ADPCM WAV, a server that ignores Range;
+#     VBR MP3 without a header, ADPCM WAV, a file in none of the read
+#     formats, a server that ignores Range;
 #   * a request whose facets read more than the tail never goes ranged;
 #   * a file smaller than the tail fetch is decoded whole, as it is: a sparse
 #     106 s FLAC with ~220 KB of cover art (shaped like a production file that
@@ -131,6 +132,10 @@ def make_fixtures(d):
     fx["mp3_vbr_noxing"] = enc("vbr_noxing.mp3", ["-c:a", "libmp3lame", "-q:a", "2", "-write_xing", "0"])
     fx["wav_adpcm"] = enc("adpcm.wav", ["-c:a", "adpcm_ms"], x=np.vstack([ct._music(40, 3), ct._silence(3)]))
     fx.update(pcm_fixtures(d))
+    junk = os.path.join(d, "junk.mp3")  # named .mp3, holds no audio at all
+    with open(junk, "wb") as f:
+        f.write(np.random.default_rng(3).integers(0, 255, size=2 * 1024 * 1024, dtype=np.uint8).tobytes())
+    fx["junk"] = junk
     fx["flac_small_art"], fx["flac_short_decode"] = small_fixtures(d)
     fx.update(tag_fixtures(d, fx))
     return fx
@@ -339,7 +344,8 @@ def main():
                 f"{src} {tail} want start={want_start} gap={want_gap} ending={want_end}",
             )
         print("falls back to the capped download, with the reason:")
-        for name, needle in (("mp3_vbr_noxing", "VBR MP3"), ("wav_adpcm", "not PCM")):
+        for name, needle in (("mp3_vbr_noxing", "VBR MP3"), ("wav_adpcm", "not PCM"),
+                             ("junk", "no FLAC, WAV, AIFF or DSF header and no MP3 frames")):
             r = facet_request(f"{base}/{os.path.basename(fx[name])}")
             check(f"{name}: fallback ({r['source'].get('fallback')})",
                   r["source"]["kind"] != "ranged" and "fallback" in r["source"]
