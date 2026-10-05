@@ -25,13 +25,16 @@ rack from silently eating the disk:
 - **Fresh** — an empty station. Once it's live, it lands in `/onboarding`
   just like a brand-new install, waiting for Navidrome + LLM + TTS + DJ setup.
 - **Duplicate current** — copies the live station's settings, personas,
-  schedule, jingles, and library analysis (`library.db`) as a starting point.
-  History doesn't come along: session, logs, and the hourly archive all start
-  empty, so the new station doesn't inherit the old one's on-air past.
+  schedule and jingles as a starting point. Configure its own Navidrome
+  connection when it first goes live. Credentials, library analysis, playlist
+  recipes and show playlist selections are not copied because they belong to
+  the source music server. Sessions, logs and the hourly archive start empty.
 
 The first time you create a second station, the install **converts** to
 multi-station: your current state quietly becomes `stations/main` (the
-conversion is implicit — there's no separate "convert" step to run). If
+conversion is implicit — there's no separate "convert" step to run). The
+original station's effective Navidrome connection is saved into its profile,
+including values previously supplied through environment variables. If
 conversion fails partway through, SUB/WAVE moves everything back to the root
 automatically; the rare case where a move-back itself fails is called out by
 name in the error, with a pointer to recover the leftover files from
@@ -51,12 +54,18 @@ including things you might not expect, like `library.db` — is per-station.
 
 ## Caveats
 
-- **Env-provided credentials apply to every station.** `NAVIDROME_*` and any
-  cloud LLM/TTS keys set via `controller/.env` (or the container environment)
-  aren't station-scoped — they'd apply to whichever station is live. If you
-  want different Navidrome libraries or API keys per station, set them
-  through the setup wizard or admin settings instead of the environment, so
-  they persist inside each station's own `state/stations/<id>/`.
+- **Every station configures its own Navidrome connection.** Set its URL,
+  username and password through `/onboarding` or Admin → Settings → Music
+  source. In a multi-station install, `NAVIDROME_URL`, `NAVIDROME_USER` and
+  `NAVIDROME_PASS` neither supply nor override a station's connection. A new
+  or duplicated station needs setup even if those variables are present.
+  Single-station installs retain environment configuration until conversion.
+  Existing multi-station installs that relied on environment credentials must
+  save a connection for each affected profile after upgrading; existing saved
+  connections are retained. Two profiles may explicitly configure the same
+  server, but neither inherits the other's connection.
+- **Cloud API keys supplied through the environment remain shared.** This
+  change scopes only the Navidrome connection, not LLM/TTS credentials.
 - **`subwave setup` (the CLI wizard) targets a single-station root.** It
   writes straight into `state/`, not into whichever station happens to be
   active. On a multi-station install, configure a station through

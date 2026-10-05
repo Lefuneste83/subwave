@@ -253,6 +253,7 @@ export {
   effectiveFadeAtShowEnd,
   effectiveFrequency,
   effectiveMaxTrackSec,
+  effectiveTrackLengthLimits,
   effectiveMinTrackSec,
   effectsActive,
   getActivePersona,
@@ -455,6 +456,7 @@ export async function load() {
       voice: normalizeDuckDepth(stored.ducking?.voice, DEFAULTS.ducking.voice),
       intro: normalizeDuckDepth(stored.ducking?.intro, DEFAULTS.ducking.intro),
     },
+    maxTrackLengthMode: stored.maxTrackLengthMode === 'exclude' ? 'exclude' : 'cut',
     maxTrackSeconds: coerceMaxTrackSeconds(rawMaxTrackSec(stored), false) ?? DEFAULTS.maxTrackSeconds,
     // Station default for the show-boundary fade (#1574). Anything but an
     // explicit boolean reads as the shipped default (off), which is what makes
@@ -1340,7 +1342,8 @@ export async function load() {
 // Lenient normalizer — used by load(). Drops invalid entries silently rather
 // than failing the whole boot.
 
-export async function update(patch) {
+/** Validate and compose a patch without persisting it or publishing its effective settings. */
+export async function prepareUpdate(patch, { themeIds }: { themeIds?: ReadonlySet<string> } = {}) {
   const cur = await load();
   const next = JSON.parse(JSON.stringify(cur));
   let restart = false;
@@ -1388,6 +1391,9 @@ export async function update(patch) {
       next.ducking.intro = dk.intro;
       restart = true;
     }
+  }
+  if ('maxTrackLengthMode' in patch) {
+    next.maxTrackLengthMode = parseSettingsPatchKey('maxTrackLengthMode', patch.maxTrackLengthMode);
   }
   if ('maxTrackSeconds' in patch || 'maxTrackMinutes' in patch) {
     // The bound lives once, in the shared schema — this applies it to the
@@ -1565,7 +1571,8 @@ export async function update(patch) {
       // and the serve-time fallback in GET /themes, and the same precedent as the
       // activeDjPromptId reset. Throwing here aborted the whole restore for any
       // install whose active theme id had since been retired (issue #917).
-      next.theme.active = (await isValidThemeId(v)) ? v : DEFAULT_THEME_ID;
+      const valid = themeIds ? themeIds.has(v) : await isValidThemeId(v);
+      next.theme.active = valid ? v : DEFAULT_THEME_ID;
       if (next.theme.active !== v) {
         console.warn(`[theme] active theme "${v}" is not a known theme id — falling back to "${DEFAULT_THEME_ID}"`);
       }
@@ -1704,7 +1711,7 @@ export async function update(patch) {
     // Snapshot the theme registry once so the validator can stay sync.
     // listThemes() returns built-ins + cached user themes (30 s TTL) — same
     // source the picker reads.
-    const allowedThemeIds = new Set((await listThemes()).map(t => t.id));
+    const allowedThemeIds = themeIds ? new Set(themeIds) : new Set((await listThemes()).map(t => t.id));
     next.shows = validateShowsStrict(patch.shows, next.personas, allowedThemeIds, moodNames);
   }
   if ('schedule' in patch) {
@@ -2591,6 +2598,16 @@ export async function update(patch) {
     }
     if (!personaIds.includes(next.activePersonaId)) next.activePersonaId = personaIds[0];
 
+  }
+
+  return { saved: next, requiresRestart: restart };
+}
+
+export async function update(patch) {
+  const cur = await load();
+  const { saved: next, requiresRestart: restart } = await prepareUpdate(patch);
+  {
+    const personaIds = next.personas.map(p => p.id);
     // Garbage-collect avatar files for personas that no longer exist. Best
     // effort — a missing directory or a vanished file is fine, this just
     // keeps the on-disk state from accumulating dead images.

@@ -265,6 +265,7 @@ export async function livePickerScope(queue: any, { audioWaypoint = null, showAt
   // the pickerScope call below because the guard counts the rotation this floor
   // has already thinned; the scope reads the same value further down.
   const minTrackSec = settings.effectiveMinTrackSec(activeShow);
+  const maxTrackSec = settings.effectiveTrackLengthLimits(activeShow).selectionMaxSec;
 
   // Count-based HARD no-repeat guard: the last N distinct plays can't re-air,
   // and (unlike recentIds/recentKeys above) this survives the tool-level
@@ -280,6 +281,7 @@ export async function livePickerScope(queue: any, { audioWaypoint = null, showAt
       excludedIds,
       resolvedGenres: genreLock ?? [],
       minTrackSec,
+      maxTrackSec,
     },
   )).window;
   const { ids: hardRecentIds, keys: hardRecentKeys } = timePhase('pick.recentlyPlayedByCount', () => queue.recentlyPlayedByCount(effN));
@@ -316,6 +318,7 @@ export async function livePickerScope(queue: any, { audioWaypoint = null, showAt
     // resolves the identical figure from the identical show object, so the two
     // paths cannot disagree about how short is too short.
     minTrackSec,
+    maxTrackSec,
     playlistLock,
     playlistTracks,
     excludedIds,
@@ -973,7 +976,7 @@ async function pickViaAgent(queue, ctx, { wantLink, audioWaypoint = null, pickAn
   // can drop the link if a request jumps ahead of this pick before it airs.
   // Re-budget the original output: a second strip of `say` could eat a nested
   // leading name that the first pass deliberately kept as spoken text.
-  const queued = await enqueuePick(queue, song, object.reason, 'agent', link ? rawLink : null, pickAnchor, { sweep, washout, blend, dissolve, chop, loop }, { linkClockAt: linkClockStampFor(linkAirAt, clockAllowed), introPersona: linkPersona, hostSpeech: linkHostSpeech });
+  const queued = await enqueuePick(queue, song, object.reason, 'agent', link ? rawLink : null, pickAnchor, { sweep, washout, blend, dissolve, chop, loop }, { linkClockAt: linkClockStampFor(linkAirAt, clockAllowed), introPersona: linkPersona, hostSpeech: linkHostSpeech, showAt });
   // Pick was already queued/on-air and got deduped — don't record a session turn
   // for a track that never airs. Returning false lets runTrackEvent fall through
   // to the pool for a fresh pick.
@@ -1195,6 +1198,7 @@ async function pickViaPool(queue, ctx, { wantLink, pickAnchor, showAt = null }: 
     linkClockAt: linkClockStampFor(airAt, clockAllowed),
     introPersona: linkPersona,
     hostSpeech: linkHostSpeech,
+    showAt,
   });
   // Even the pool landed on an already-queued track (a tiny library whose pool
   // collapsed to recents). Skip the session turn and let auto.m3u backstop the
