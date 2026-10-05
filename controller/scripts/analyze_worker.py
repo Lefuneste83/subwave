@@ -120,6 +120,15 @@ OUTRO_SECONDS = float(os.environ.get("ANALYZE_OUTRO_SECONDS", "").strip() or "20
 # against a relative reference eats real music. Emitted as lead_silence_ms /
 # tail_silence_ms; the controller decides whether a gap is worth cutting.
 SILENCE_DBFS = float(os.environ.get("ANALYZE_SILENCE_DBFS", "").strip() or "-50")
+# When the last OUTRO_SECONDS read silent (below SILENCE_DBFS throughout), the
+# tail is searched again over these wider windows, in order, until one holds
+# audible sound: that is where the music stops, and the gap after it can be
+# measured instead of reported as "silent-tail-window" (56 production tracks,
+# 5 Oct 2026: hidden tracks, long fades, DJ sets). Seconds, comma-separated.
+TAIL_SEARCH_SECONDS = tuple(
+    float(x) for x in (os.environ.get("ANALYZE_TAIL_SEARCH_SECONDS", "").strip() or "60,180,600").split(",")
+    if x.strip()
+)
 
 # --- Vocal-activity ranges (optional, opt-in) ------------------------------
 # Off unless ANALYZE_VOCAL_ACTIVITY is truthy. Runs Demucs source separation to
@@ -1075,14 +1084,16 @@ def embed_windows(embedder, path, librosa, duration_s):
     )
 
 
-def decode_tail(path, librosa, duration_s, complete=None):
+def decode_tail(path, librosa, duration_s, complete=None, seconds=None):
     """Decode the tail window that facet_tail measures, or return None when the
     file cannot prove it reaches its end. Returns `(y_src, sr, offset_s)`:
     channel-preserving samples starting at ABSOLUTE `offset_s` and running to
     the end of the decodable file.
 
     A track too short for a distinct outro is decoded from zero, and only when
-    `complete` is True — see the gate below."""
+    `complete` is True — see the gate below. `seconds` widens the window
+    (search_music_end); it must stay short of the duration so the seek still
+    proves the file reaches its end."""
     import numpy as np
 
     if not duration_s:
@@ -1099,7 +1110,8 @@ def decode_tail(path, librosa, duration_s, complete=None):
     # otherwise pay for on every short track that previously returned here.
     if not distinct_outro and complete is not True:
         return None
-    offset = max(0.0, duration_s - OUTRO_SECONDS) if distinct_outro else 0.0
+    window_s = OUTRO_SECONDS if seconds is None else float(seconds)
+    offset = max(0.0, duration_s - window_s) if distinct_outro else 0.0
     # Channel-preserving decode for the loudness meter (the tail LUFS must be
     # comparable to the body's stereo loudness_lufs — issue #998); RMS shape
     # and the beat grid work off the mono downmix (facet_tail).
@@ -1107,7 +1119,7 @@ def decode_tail(path, librosa, duration_s, complete=None):
     # Validation backstop for an unknown completeness: a truncated file either
     # errors here or decodes well short of the requested tail — skip it. The
     # last axis is the sample axis for mono (n,) and multichannel (c, n) alike.
-    expected_s = min(OUTRO_SECONDS, duration_s)
+    expected_s = min(window_s, duration_s)
     if y_src is None or np.shape(y_src)[-1] < ANALYZE_SR * expected_s * 0.6:
         return None
     return y_src, sr, offset
@@ -1221,6 +1233,54 @@ def facet_tail(y_src, sr, offset, duration_s, librosa):
     return out
 
 
+def search_music_end(window_fn, duration_s, librosa):
+    """Where the music stops when the last OUTRO_SECONDS read silent.
+
+    `window_fn(seconds)` returns `(y_src, sr, offset)` for a window proven to
+    reach the end of the file, or None / a reason string. Each width in
+    TAIL_SEARCH_SECONDS is tried in turn; the first window holding audible
+    sound gives the gap's start (end of the last frame above SILENCE_DBFS)
+    and its length. The outro features are then measured on the
+    OUTRO_SECONDS of music before the gap, as if the track ended there,
+    which is where the silence trim makes it end.
+
+    Returns an outro dict with tail_silence_ms / tail_start_ms (absolute) and
+    `_searched: True` (internal: the tail vocal / tail stem pass reads the
+    file's last OUTRO_SECONDS, which here are silence, so it is skipped), or
+    None when no window up to the widest one holds sound."""
+    for width in TAIL_SEARCH_SECONDS:
+        width = min(float(width), duration_s - 1.0)
+        if width <= OUTRO_SECONDS:
+            return None
+        window = window_fn(width)
+        if window is None or isinstance(window, str):
+            return None
+        y_src, sr, offset = window
+        y = librosa.to_mono(y_src)
+        _lead, gap_ms, start_ms = silence_edges_ms(y, sr)
+        if start_ms is None:
+            if width >= duration_s - 1.0:
+                return None
+            continue
+        end_s = offset + start_ms / 1000.0
+        a = max(0, int(round((start_ms / 1000.0 - OUTRO_SECONDS) * sr)))
+        b = int(round(start_ms / 1000.0 * sr))
+        outro = facet_tail(y_src[..., a:b], sr, offset + a / sr, end_s, librosa) or {}
+        outro["tail_silence_ms"] = int(round(gap_ms))
+        outro["tail_start_ms"] = int(round(end_s * 1000.0))
+        outro["_searched"] = True
+        log(f"tail: music ends at {end_s:.1f} s, then {gap_ms / 1000.0:.1f} s of silence "
+            f"(found in the last {width:.0f} s)")
+        return outro
+    return None
+
+
+def _needs_search(outro):
+    """The last OUTRO_SECONDS held nothing above SILENCE_DBFS: facet_tail
+    found no tail (digital silence) or found no gap edge (all below floor)."""
+    return outro is None or "tail_silence_ms" not in outro
+
+
 def analyze_outro(path, librosa, duration_s, complete=None):
     """Tail features for the crossfade seam — the outgoing track's ending is
     what actually decides whether a transition lands. Path-based wrapper:
@@ -1231,7 +1291,14 @@ def analyze_outro(path, librosa, duration_s, complete=None):
     if window is None:
         return None
     y_src, sr, offset = window
-    return facet_tail(y_src, sr, offset, duration_s, librosa)
+    outro = facet_tail(y_src, sr, offset, duration_s, librosa)
+    if _needs_search(outro):
+        found = search_music_end(
+            lambda w: decode_tail(path, librosa, duration_s, complete, seconds=w), duration_s, librosa
+        )
+        if found is not None:
+            outro = found
+    return outro
 
 
 # Lazily loaded, at most once. None means "no embeddings this run" — either
@@ -2205,7 +2272,8 @@ def analyze(
         # ENDING is sung. Gated on the same detector AND a computed outro:
         # outro non-None already proves the file is complete and long enough
         # for a distinct tail (see demucs_tail).
-        if detector is not None and outro is not None and "startMs" in outro:
+        if detector is not None and outro is not None and "startMs" in outro \
+                and not outro.get("_searched"):
             demucs_tail(detector, load, librosa, duration_s, outro, stems_dir)
     finally:
         if decoded_tmp is not None:
@@ -2234,6 +2302,8 @@ def analyze(
     # (only ever fed a window proven to reach the end of the file) and lifted
     # out of the outro dict HERE so outro_json never carries it. Omitted when
     # not measured — absence means "no silence signal, behave as today".
+    if outro is not None:
+        outro.pop("_searched", None)
     if outro is not None and "tail_silence_ms" in outro:
         result["tail_silence_ms"] = outro.pop("tail_silence_ms")
         if "tail_start_ms" in outro:
@@ -2317,9 +2387,10 @@ class FileSource:
     def load(self, librosa, sr, mono, offset=0.0, duration=None):
         return _path_loader(librosa, self.path)(sr=sr, mono=mono, offset=offset, duration=duration)
 
-    def tail(self, librosa):
+    def tail(self, librosa, seconds=None):
         """(y_src, sr, offset) for a window PROVEN to reach the end of the
-        file, or a string reason why the end can't be proven."""
+        file, or a string reason why the end can't be proven. `seconds`
+        widens it past OUTRO_SECONDS (search_music_end)."""
         if self.complete is False:
             return "capped-download"
         # A pre-decoded WAV's length IS the decodable length, so the short-
@@ -2327,7 +2398,7 @@ class FileSource:
         # may be measured (analyze()'s rule).
         if self.decoded_tmp is not None and self.complete is not True:
             return "unknown-completeness"
-        window = decode_tail(self.path, librosa, self.duration_s, self.complete)
+        window = decode_tail(self.path, librosa, self.duration_s, self.complete, seconds=seconds)
         return window if window is not None else "tail-not-reached"
 
     def clap_windows(self, librosa):
@@ -2392,9 +2463,10 @@ RANGED_TAIL_MIN_BYTES = 256 * 1024
 # frame-grid rounding) out of the analysed window.
 RANGED_PCM_LEAD_S = 2.0
 # Chunks walked to find a WAV/AIFF/DSF data chunk (LIST, bext, id3, JUNK, …),
-# and the most a PCM/DSD tail may fetch (DSD512 stereo is ~124 MB for 22 s).
+# and the most one tail fetch may read (DSD512 stereo is ~124 MB for 22 s; a
+# widened silent-tail search stops at this instead of reading a whole file).
 RANGED_PCM_MAX_CHUNKS = 64
-RANGED_PCM_MAX_BYTES = 160 * 1024 * 1024
+RANGED_TAIL_MAX_BYTES = 160 * 1024 * 1024
 # WAVE format tags read by range: integer PCM and IEEE float (plain or behind
 # WAVE_FORMAT_EXTENSIBLE). ADPCM, mu-law, MP3-in-WAV… fall back.
 _WAV_PCM_TAGS = (1, 3)
@@ -2829,15 +2901,15 @@ class RangedTailSource:
             return bytes(hdr)
         raise RangeUnsupported(f"no header builder for {self.container}")
 
-    def _fetch_pcm_tail(self):
+    def _fetch_pcm_tail(self, seconds=OUTRO_SECONDS):
         p = self._pcm
-        want = int(math.ceil((OUTRO_SECONDS + RANGED_PCM_LEAD_S) * p["rate"]))
+        want = int(math.ceil((seconds + RANGED_PCM_LEAD_S) * p["rate"]))
         if self.container == "dsf":
-            want = int(math.ceil((OUTRO_SECONDS + RANGED_PCM_LEAD_S) * p["dsd_rate"] / (p["block"] * 8)))
+            want = int(math.ceil((seconds + RANGED_PCM_LEAD_S) * p["dsd_rate"] / (p["block"] * 8)))
         frames = min(p["frames"], want)
         start = p["data_off"] + (p["frames"] - frames) * p["align"]
         n_bytes = frames * p["align"]
-        if n_bytes > RANGED_PCM_MAX_BYTES:
+        if n_bytes > RANGED_TAIL_MAX_BYTES:
             raise RangeUnsupported(f"{self.container} tail would fetch {n_bytes} bytes")
         data, _ = http_range(self.url, start, start + n_bytes - 1)
         self.bytes_read += len(data)
@@ -2857,13 +2929,15 @@ class RangedTailSource:
             raise RangeUnsupported(f"{self.container} tail decoded {n} samples, expected {expect}")
 
     # -- the tail -------------------------------------------------------------
-    def _fetch_tail(self):
+    def _fetch_tail(self, seconds=OUTRO_SECONDS):
         if self.duration_s <= 0:
             raise RangeUnsupported("unknown duration")
         bps = self.size / self.duration_s
-        want = max(RANGED_TAIL_MIN_BYTES, int(bps * OUTRO_SECONDS * RANGED_TAIL_MARGIN))
+        want = max(RANGED_TAIL_MIN_BYTES, int(bps * seconds * RANGED_TAIL_MARGIN))
         for _attempt in range(3):
             want = min(want, self.size)
+            if want > RANGED_TAIL_MAX_BYTES:
+                raise RangeUnsupported(f"tail would fetch {want} bytes")
             data, _ = http_range(self.url, suffix=want)
             self.bytes_read += len(data)
             n = self._decode_tail(data, whole=len(data) >= self.size)
@@ -2878,7 +2952,7 @@ class RangedTailSource:
                         f"whole file decodes shorter than its header ({have_s:.1f} s of {self.duration_s:.1f} s)"
                     )
                 return
-            if have_s >= OUTRO_SECONDS + 0.5:
+            if have_s >= seconds + 0.5:
                 return
             want *= 2
         raise RangeUnsupported("tail window would not decode to OUTRO_SECONDS")
@@ -2948,12 +3022,25 @@ class RangedTailSource:
         dur = min(dur, self._wav_end_s - offset)
         return load_audio(librosa, self._wav, sr=sr, mono=mono, offset=rel, duration=dur)
 
-    def tail(self, librosa):
+    def tail(self, librosa, seconds=None):
         import numpy as np
 
-        offset = self.duration_s - OUTRO_SECONDS
-        y_src, sr = self.load(librosa, sr=ANALYZE_SR, mono=False, offset=offset, duration=OUTRO_SECONDS)
-        if y_src is None or np.shape(y_src)[-1] < ANALYZE_SR * OUTRO_SECONDS * 0.6:
+        seconds = OUTRO_SECONDS if seconds is None else float(seconds)
+        offset = self.duration_s - seconds
+        if offset < self._wav_start_s - 1e-6:
+            # A wider window than was fetched (search_music_end): fetch again.
+            try:
+                if self._pcm:
+                    self._fetch_pcm_tail(seconds)
+                else:
+                    self._fetch_tail(seconds)
+            except RangeUnsupported as e:
+                log(f"tail search stopped: {e}")
+                return "tail-search-unavailable"
+            if offset < self._wav_start_s - 1e-6:
+                return "tail-search-unavailable"
+        y_src, sr = self.load(librosa, sr=ANALYZE_SR, mono=False, offset=offset, duration=seconds)
+        if y_src is None or np.shape(y_src)[-1] < ANALYZE_SR * seconds * 0.6:
             return "tail-not-reached"
         return y_src, sr, offset
 
@@ -3040,6 +3127,12 @@ def analyze_facets(librosa, source, facets, stems_dir=None, tail_vocals=False):
             else:
                 t_src, t_sr, t_off = window
                 outro = facet_tail(t_src, t_sr, t_off, source.duration_s, librosa)
+                if _needs_search(outro):
+                    found = search_music_end(
+                        lambda w: source.tail(librosa, seconds=w), source.duration_s, librosa
+                    )
+                    if found is not None:
+                        outro = found
                 if outro is None:
                     # The end was reached and decoded, but the whole window
                     # reads silent: the gap outlasts OUTRO_SECONDS, so where
@@ -3062,7 +3155,7 @@ def analyze_facets(librosa, source, facets, stems_dir=None, tail_vocals=False):
             stem_target = stems_dir if "stems" in wanted else None
             vocal_ranges, stems_cached = demucs_head(detector, load, librosa, stem_target)
             tail_vocals = False
-            if outro is not None and "startMs" in outro:
+            if outro is not None and "startMs" in outro and not outro.get("_searched"):
                 tail_vocals = demucs_tail(detector, load, librosa, source.duration_s, outro, stem_target)
             if "vocal" in wanted:
                 if vocal_ranges is None:
@@ -3092,6 +3185,7 @@ def analyze_facets(librosa, source, facets, stems_dir=None, tail_vocals=False):
             out["tail"] = _unmeasurable(tail_reason or "tail-not-measured")
         else:
             data = dict(outro)
+            data.pop("_searched", None)
             lifted = {}
             if "tail_silence_ms" in data:
                 lifted["tail_silence_ms"] = data.pop("tail_silence_ms")

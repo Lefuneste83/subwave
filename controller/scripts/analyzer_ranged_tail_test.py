@@ -18,6 +18,9 @@
 #   * what can't be proven falls back to the capped download, with the reason:
 #     VBR MP3 without a header, ADPCM WAV, a file in none of the read
 #     formats, a server that ignores Range;
+#   * a silent ending longer than the 20 s window (45 s on a FLAC, 100 s on a
+#     WAV) is found by widening the ranged read: music end and gap within
+#     150 ms; a gap wider than the widest search stays "silent-tail-window";
 #   * a request whose facets read more than the tail never goes ranged;
 #   * a file smaller than the tail fetch is decoded whole, as it is: a sparse
 #     106 s FLAC with ~220 KB of cover art (shaped like a production file that
@@ -136,6 +139,12 @@ def make_fixtures(d):
     with open(junk, "wb") as f:
         f.write(np.random.default_rng(3).integers(0, 255, size=2 * 1024 * 1024, dtype=np.uint8).tobytes())
     fx["junk"] = junk
+    # Silent endings longer than the 20 s tail window (hidden tracks, long
+    # fades, DJ sets): the tail is searched wider, by range.
+    fx["flac_silent_end"] = enc("silent_end.flac", ["-c:a", "flac"],
+                                x=np.vstack([ct._noise_music(150, 21), ct._silence(45)]))
+    fx["wav_silent_end"] = enc("silent_end.wav", ["-c:a", "pcm_s16le"],
+                               x=np.vstack([ct._noise_music(150, 22), ct._silence(100)]))
     fx["flac_small_art"], fx["flac_short_decode"] = small_fixtures(d)
     fx.update(tag_fixtures(d, fx))
     return fx
@@ -343,6 +352,28 @@ def main():
                 and got.get("outro", {}).get("ending") == want_end and frac < 0.35,
                 f"{src} {tail} want start={want_start} gap={want_gap} ending={want_end}",
             )
+        print("a silent ending longer than the tail window is searched wider:")
+        for name, music_s, gap_s in (("flac_silent_end", 150, 45), ("wav_silent_end", 150, 100)):
+            r = facet_request(f"{base}/{os.path.basename(fx[name])}")
+            src, tail = r["source"], r["facets"]["tail"]
+            got = tail.get("data", {})
+            d_end = abs((got.get("tail_start_ms") or 0) - music_s * 1000)
+            d_gap = abs((got.get("tail_silence_ms") or 0) - gap_s * 1000)
+            frac = src.get("bytes_read", 0) / max(1, src.get("size", 1))
+            outro = got.get("outro", {})
+            check(f"{name}: ranged, music end Δ{d_end} ms, gap {got.get('tail_silence_ms')} ms "
+                  f"(Δ{d_gap}), outro {outro.get('ending')}, read {frac:.0%} of the file",
+                  tail["status"] == "ok" and src["kind"] == "ranged" and d_end <= 150 and d_gap <= 150
+                  and outro.get("startMs", 0) <= music_s * 1000 and "_searched" not in outro,
+                  f"{src} {tail}")
+        saved = aw.TAIL_SEARCH_SECONDS
+        aw.TAIL_SEARCH_SECONDS = (60.0,)  # narrower than the 100 s gap
+        try:
+            r = facet_request(f"{base}/{os.path.basename(fx['wav_silent_end'])}")
+            check(f"gap wider than the widest search: still {r['facets']['tail'].get('reason')}",
+                  r["facets"]["tail"].get("reason") == "silent-tail-window", str(r))
+        finally:
+            aw.TAIL_SEARCH_SECONDS = saved
         print("falls back to the capped download, with the reason:")
         for name, needle in (("mp3_vbr_noxing", "VBR MP3"), ("wav_adpcm", "not PCM"),
                              ("junk", "no FLAC, WAV, AIFF or DSF header and no MP3 frames")):

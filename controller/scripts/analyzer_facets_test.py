@@ -219,17 +219,22 @@ def t_embed_windows_is_decode_then_facet():
 class FakeSource:
     """Stands in for FileSource: records what was decoded."""
 
-    def __init__(self, tail=None, duration_s=200.0):
+    def __init__(self, tail=None, duration_s=200.0, wider=None):
         self.loads = []
         self._tail = tail
+        self._wider = wider or {}   # {seconds: window} for search_music_end
+        self.tails = []
         self.duration_s = duration_s
 
     def load(self, librosa, sr, mono, offset=0.0, duration=None):
         self.loads.append((sr, offset, duration))
         return tone(duration or 20.0, sr=SR), sr
 
-    def tail(self, librosa):
-        return self._tail
+    def tail(self, librosa, seconds=None):
+        self.tails.append(seconds)
+        if seconds is None:
+            return self._tail
+        return self._wider.get(seconds, self._tail)
 
     def clap_windows(self, librosa):
         self.loads.append(("clap",))
@@ -282,6 +287,23 @@ def t_tail_reports_why_it_is_unmeasurable():
     with Patched(log=lambda *_a: None):
         out = aw.analyze_facets(FakeLibrosa, FakeSource(tail=silent), ["tail"])
     assert out["tail"] == {"status": "unmeasurable", "reason": "silent-tail-window"}, out
+
+
+def t_silent_tail_is_searched_wider():
+    # The last 20 s are silent; the 60 s window holds 30 s of music then 30 s
+    # of silence. The gap is measured from the wider window, and the outro is
+    # measured on the music before it.
+    silent = (np.zeros(SR * 20, dtype=np.float32), SR, 180.0)
+    wide = (np.concatenate([tone(30.0), silence(30.0)]), SR, 140.0)
+    src = FakeSource(tail=silent, wider={60.0: wide})
+    with Patched(measure_loudness=fixed_loudness, log=lambda *_a: None):
+        out = aw.analyze_facets(FakeLibrosa, src, ["tail"])
+    data = out["tail"]["data"]
+    assert out["tail"]["status"] == "ok", out
+    assert abs(data["tail_start_ms"] - 170000) <= 100, data
+    assert abs(data["tail_silence_ms"] - 30000) <= 100, data
+    assert "_searched" not in data["outro"] and data["outro"]["startMs"] <= 170000, data
+    assert src.tails == [None, 60.0], src.tails
 
 
 def t_tail_ok_lifts_silence_fields_like_the_flat_response():
@@ -349,6 +371,7 @@ test("a clap-only request decodes only the CLAP windows", t_clap_only_decodes_no
 test("missing models answer 'unavailable' with the reason", t_missing_models_answer_unavailable_with_the_reason)
 test("head + loudness share one decode and load no model", t_head_only_never_loads_a_model)
 test("an unmeasurable tail says why", t_tail_reports_why_it_is_unmeasurable)
+test("a silent tail window is searched wider", t_silent_tail_is_searched_wider)
 test("a measured tail lifts the silence fields like the flat response", t_tail_ok_lifts_silence_fields_like_the_flat_response)
 test("FileSource refuses to prove the end of a capped or unprovable file", t_file_source_tail_gates)
 test("a failure in one facet does not fail the others", t_a_facet_failure_stays_in_its_facet)

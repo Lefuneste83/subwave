@@ -11,7 +11,10 @@
 #     and no outro: the reason ~half of a real library never gets a dead-air
 #     trim at the end.
 #   * long_tail_silence: a 25 s silent ending fills the whole 20 s tail
-#     window, so the gap is unmeasurable and omitted.
+#     window. Until 5 Oct 2026 the gap was unmeasurable and omitted; the tail
+#     is now searched over wider windows (search_music_end), so the row pins
+#     the music's end (60.1 s), the 24.9 s gap and an outro measured on the
+#     music before it.
 #   * quiet_intro / lead_silence_4s: loudness, peak, sections and pace are
 #     measured over the first ANALYZE_SECONDS (40 s) only, not the whole track.
 #
