@@ -40,6 +40,7 @@ import contextlib
 import ctypes
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -2361,9 +2362,12 @@ class FileSource:
 # on frame headers, so "header + last N bytes" decodes standalone, sample-exact
 # at the end. MP3: the Xing/Info (+LAME) header gives the exact length; the
 # last N bytes decode standalone; LAME end padding is trimmed. CBR MP3 without
-# a header: length from size / bitrate. Anything else (VBR without a header,
-# WAV, m4a, Opus, a server that ignores Range) falls back to the capped
-# download — never a guess.
+# a header: length from size / bitrate. Uncompressed PCM (WAV/RF64, AIFF/
+# AIFC) and DSD (DSF): the header gives the exact frame count and bytes per
+# frame, so the last N seconds are a byte range on the frame grid, decoded
+# behind a synthetic header of the same format. Anything else (VBR without a
+# header, m4a, Opus, compressed WAV, a server that ignores Range) falls back
+# to the capped download — never a guess.
 # ---------------------------------------------------------------------------
 
 RANGED_HEAD_BYTES = 128 * 1024
@@ -2383,6 +2387,18 @@ RANGED_MAX_LEAD_BYTES = 1024 * 1024
 # than OUTRO_SECONDS so a denser-than-average ending still fits.
 RANGED_TAIL_MARGIN = 1.35
 RANGED_TAIL_MIN_BYTES = 256 * 1024
+# PCM / DSD: seconds fetched in front of OUTRO_SECONDS. The byte position is
+# exact, so this only keeps a DSD decoder's start-up transient (and the
+# frame-grid rounding) out of the analysed window.
+RANGED_PCM_LEAD_S = 2.0
+# Chunks walked to find a WAV/AIFF/DSF data chunk (LIST, bext, id3, JUNK, …),
+# and the most a PCM/DSD tail may fetch (DSD512 stereo is ~124 MB for 22 s).
+RANGED_PCM_MAX_CHUNKS = 64
+RANGED_PCM_MAX_BYTES = 160 * 1024 * 1024
+# WAVE format tags read by range: integer PCM and IEEE float (plain or behind
+# WAVE_FORMAT_EXTENSIBLE). ADPCM, mu-law, MP3-in-WAV… fall back.
+_WAV_PCM_TAGS = (1, 3)
+_AIFC_PCM = (b"NONE", b"twos", b"sowt", b"fl32", b"FL32", b"fl64", b"FL64", b"in24", b"in32")
 
 
 class RangeUnsupported(Exception):
@@ -2418,6 +2434,18 @@ def _id3v2_size(head):
         size = (size << 7) | (b & 0x7F)
     footer = 10 if head[5] & 0x10 else 0
     return 10 + size + footer
+
+
+def _ieee_extended(b):
+    """80-bit IEEE 754 extended (AIFF COMM sample rate) → float."""
+    if len(b) < 10:
+        return 0.0
+    exp = ((b[0] & 0x7F) << 8) | b[1]
+    mant = int.from_bytes(b[2:10], "big")
+    if exp == 0 and mant == 0:
+        return 0.0
+    v = mant * 2.0 ** (exp - 16383 - 63)
+    return -v if b[0] & 0x80 else v
 
 
 def parse_flac_streaminfo(data):
@@ -2537,6 +2565,8 @@ class RangedTailSource:
         self._wav = None          # native-rate WAV of the fetched tail
         self._wav_start_s = 0.0   # absolute time of the WAV's first sample
         self._wav_end_s = 0.0     # absolute time of its last real sample
+        self._pcm = None          # WAV/AIFF/DSF layout (see _open_wav & co.)
+        self._decode_args = []    # extra ffmpeg output args (DSD → 44.1 kHz)
 
     # -- probing --------------------------------------------------------------
     def open(self, librosa):
@@ -2554,11 +2584,21 @@ class RangedTailSource:
             head = head[tag:]
             if len(head) < RANGED_AFTER_TAGS_BYTES and base + len(head) < self.size:
                 head = self._read_at(base, RANGED_HEAD_BYTES)
-        if head[:4] == b"fLaC":
+        magic = head[:4]
+        if magic == b"fLaC":
             self._open_flac(head)
+        elif magic in (b"RIFF", b"RF64", b"BW64") and head[8:12] == b"WAVE":
+            self._open_wav(head, base)
+        elif magic == b"FORM" and head[8:12] in (b"AIFF", b"AIFC"):
+            self._open_aiff(head, base)
+        elif magic == b"DSD ":
+            self._open_dsf(head, base)
         else:
             self._open_mp3(head, base)
-        self._fetch_tail()
+        if self._pcm:
+            self._fetch_pcm_tail()
+        else:
+            self._fetch_tail()
         return self
 
     def _read_at(self, start, length):
@@ -2624,6 +2664,192 @@ class RangedTailSource:
         self.duration_s = audio_bytes * 8 / h["bitrate"]
         self._trim_end = 0
 
+    # -- uncompressed PCM and DSD -------------------------------------------
+    def _chunks(self, head, base, start, big_endian, size_bytes=4, limit=None):
+        """Walk RIFF/IFF-style chunks from file offset `start`; yields
+        (id, body_offset, body_size, body_head). `body_head` holds up to the
+        first 64 bytes of the body (all that any parsed header needs), read
+        from `head` when it is there and by range otherwise."""
+        order = "big" if big_endian else "little"
+        at = start
+        end = self.size if limit is None else min(self.size, limit)
+        for _ in range(RANGED_PCM_MAX_CHUNKS):
+            if at + 4 + size_bytes > end:
+                return
+            hdr_len = 4 + size_bytes
+            rel = at - base
+            if 0 <= rel and rel + hdr_len + 64 <= len(head):
+                blob = head[rel:rel + hdr_len + 64]
+            else:
+                blob = self._read_at(at, hdr_len + 64)
+            if len(blob) < hdr_len:
+                return
+            cid = blob[:4]
+            size = int.from_bytes(blob[4:hdr_len], order)
+            yield cid, at + hdr_len, size, blob[hdr_len:]
+            at += hdr_len + size + (size & 1 if size_bytes == 4 else 0)
+        raise RangeUnsupported("no data chunk within the first chunks")
+
+    def _set_pcm(self, container, data_off, data_bytes, align, rate, frames, header, **extra):
+        if not rate or not align or frames <= 0:
+            raise RangeUnsupported(f"{container}: empty or unreadable format header")
+        avail = max(0, self.size - data_off)
+        if data_bytes > avail:  # a truncated file, or a streaming writer's size
+            data_bytes = avail
+        frames = min(frames, data_bytes // align)
+        if frames <= 0:
+            raise RangeUnsupported(f"{container}: no audio frames")
+        self.container = container
+        self.native_rate = rate
+        self.duration_s = frames / rate
+        self._trim_end = 0
+        self._pcm = dict(data_off=data_off, align=align, rate=rate, frames=frames, header=header, **extra)
+
+    def _open_wav(self, head, base):
+        """WAV / RF64 / BW64: 'fmt ' gives the frame size, 'data' the audio's
+        offset and length (RF64 keeps the real length in 'ds64')."""
+        ds64_data = None
+        fmt = None
+        for cid, off, size, body in self._chunks(head, base, base + 12, big_endian=False):
+            if cid == b"ds64" and len(body) >= 16:
+                ds64_data = int.from_bytes(body[8:16], "little")
+            elif cid == b"fmt ":
+                fmt = self._read_at(off, size) if size > len(body) else body[:size]
+            elif cid == b"data":
+                if fmt is None or len(fmt) < 16:
+                    raise RangeUnsupported("WAV data chunk before its fmt chunk")
+                tag = int.from_bytes(fmt[0:2], "little")
+                if tag == 0xFFFE and len(fmt) >= 26:
+                    tag = int.from_bytes(fmt[24:26], "little")  # SubFormat GUID's first two bytes
+                if tag not in _WAV_PCM_TAGS:
+                    raise RangeUnsupported(f"WAV format tag {tag:#x} is not PCM (read whole)")
+                channels = int.from_bytes(fmt[2:4], "little")
+                rate = int.from_bytes(fmt[4:8], "little")
+                align = int.from_bytes(fmt[12:14], "little")
+                if size == 0xFFFFFFFF and ds64_data is not None:
+                    size = ds64_data
+                elif size in (0, 0xFFFFFFFF):
+                    size = self.size - off  # streamed WAV: data runs to EOF
+                self._set_pcm("wav", off, size, align, rate, size // max(1, align), fmt,
+                              channels=channels)
+                return
+        raise RangeUnsupported("WAV without a data chunk")
+
+    def _open_aiff(self, head, base):
+        """AIFF / AIFC: 'COMM' gives the frame count and size, 'SSND' the
+        audio's offset."""
+        form = head[8:12]
+        comm = None
+        for cid, off, size, body in self._chunks(head, base, base + 12, big_endian=True):
+            if cid == b"COMM":
+                comm = self._read_at(off, size) if size > len(body) else body[:size]
+            elif cid == b"SSND":
+                if comm is None or len(comm) < 18:
+                    raise RangeUnsupported("AIFF SSND chunk before its COMM chunk")
+                channels = int.from_bytes(comm[0:2], "big")
+                frames = int.from_bytes(comm[2:6], "big")
+                bits = int.from_bytes(comm[6:8], "big")
+                rate = _ieee_extended(comm[8:18])
+                comp = comm[18:22] if form == b"AIFC" else b"NONE"
+                if comp not in _AIFC_PCM:
+                    raise RangeUnsupported(f"AIFC compression {comp!r} is not PCM (read whole)")
+                if comp in (b"fl64", b"FL64"):
+                    bits = 64
+                elif comp in (b"fl32", b"FL32"):
+                    bits = 32
+                align = channels * ((bits + 7) // 8)
+                body8 = body if len(body) >= 8 else self._read_at(off, 8)
+                data_off = off + 8 + int.from_bytes(body8[0:4], "big")
+                self._set_pcm("aiff", data_off, size - 8 - int.from_bytes(body8[0:4], "big"),
+                              align, int(round(rate)), frames, comm, form=form)
+                return
+        raise RangeUnsupported("AIFF without an SSND chunk")
+
+    def _open_dsf(self, head, base):
+        """DSF: fixed 'DSD ' + 'fmt ' + 'data' chunks (64-bit sizes). The audio
+        is block-interleaved, one block per channel in turn, so the frame
+        grid is a group of `channels` blocks."""
+        if len(head) < 92 or head[28:32] != b"fmt " or head[80:84] != b"data":
+            raise RangeUnsupported("DSF without the standard fmt/data layout")
+        f = head[40:80]
+        fmt_id = int.from_bytes(f[4:8], "little")
+        channels = int.from_bytes(f[12:16], "little")
+        dsd_rate = int.from_bytes(f[16:20], "little")
+        samples = int.from_bytes(f[24:32], "little")       # per channel, in bits
+        block = int.from_bytes(f[32:36], "little")
+        if fmt_id != 0 or not channels or not dsd_rate or not samples or not block:
+            raise RangeUnsupported("DSF fmt chunk is not raw DSD")
+        data_size = int.from_bytes(head[84:92], "little") - 12
+        group = channels * block
+        groups = data_size // group
+        bits_per_group = block * 8
+        if samples > groups * bits_per_group:
+            raise RangeUnsupported("DSF sample count beyond its data chunk")
+        # One "frame" = one block group; the rate is groups per second. The
+        # tail is cut on that grid and the padding past `samples` in the
+        # final block trimmed after the decode.
+        self._set_pcm("dsf", base + 92, groups * group, group, dsd_rate, groups, head[:92],
+                      channels=channels, block=block, dsd_rate=dsd_rate, samples=samples)
+        self.native_rate = 44100
+        self.duration_s = samples / dsd_rate
+        self._decode_args = ["-ar", str(self.native_rate)]
+
+    def _pcm_header(self, n_bytes, frames):
+        """A minimal file header for `frames` frames (n_bytes of audio) in the
+        source's own format, so ffmpeg decodes the cut tail exactly as it
+        would the file."""
+        p = self._pcm
+        h = p["header"]
+        if self.container == "wav":
+            fmt = h + (b"\0" if len(h) & 1 else b"")
+            riff = 4 + 8 + len(fmt) + 8 + n_bytes
+            return (b"RIFF" + riff.to_bytes(4, "little") + b"WAVE" + b"fmt " + len(h).to_bytes(4, "little")
+                    + fmt + b"data" + n_bytes.to_bytes(4, "little"))
+        if self.container == "aiff":
+            comm = bytearray(h)
+            comm[2:6] = frames.to_bytes(4, "big")
+            comm = bytes(comm) + (b"\0" if len(comm) & 1 else b"")
+            fver = b"FVER" + (4).to_bytes(4, "big") + (0xA2805140).to_bytes(4, "big") if p["form"] == b"AIFC" else b""
+            body = fver + b"COMM" + len(h).to_bytes(4, "big") + comm + b"SSND" + (8 + n_bytes).to_bytes(4, "big") + b"\0" * 8
+            return b"FORM" + (4 + len(body) + n_bytes).to_bytes(4, "big") + p["form"] + body
+        if self.container == "dsf":
+            hdr = bytearray(h)
+            bits = frames * p["block"] * 8
+            pad = p["frames"] * p["block"] * 8 - p["samples"]  # zero bits after the last sample
+            hdr[12:20] = (92 + n_bytes).to_bytes(8, "little")
+            hdr[20:28] = (0).to_bytes(8, "little")          # no metadata chunk
+            hdr[64:72] = (bits - pad).to_bytes(8, "little")
+            hdr[84:92] = (12 + n_bytes).to_bytes(8, "little")
+            return bytes(hdr)
+        raise RangeUnsupported(f"no header builder for {self.container}")
+
+    def _fetch_pcm_tail(self):
+        p = self._pcm
+        want = int(math.ceil((OUTRO_SECONDS + RANGED_PCM_LEAD_S) * p["rate"]))
+        if self.container == "dsf":
+            want = int(math.ceil((OUTRO_SECONDS + RANGED_PCM_LEAD_S) * p["dsd_rate"] / (p["block"] * 8)))
+        frames = min(p["frames"], want)
+        start = p["data_off"] + (p["frames"] - frames) * p["align"]
+        n_bytes = frames * p["align"]
+        if n_bytes > RANGED_PCM_MAX_BYTES:
+            raise RangeUnsupported(f"{self.container} tail would fetch {n_bytes} bytes")
+        data, _ = http_range(self.url, start, start + n_bytes - 1)
+        self.bytes_read += len(data)
+        if len(data) != n_bytes:
+            raise RangeUnsupported(f"{self.container} tail came back short ({len(data)} of {n_bytes} bytes)")
+        if self.container == "dsf":
+            # Decoded samples the cut holds, at the decode rate: everything
+            # past `samples` is block padding.
+            real_bits = frames * p["block"] * 8 - (p["frames"] * p["block"] * 8 - p["samples"])
+            expect = int(round(real_bits * self.native_rate / p["dsd_rate"]))
+        else:
+            expect = frames
+        self._pcm_hdr = self._pcm_header(n_bytes, frames)
+        n = self._decode_tail(data, expect=expect)
+        # A PCM decode is sample-exact; DSD resampling may differ by a few.
+        if abs(n - expect) > (64 if self.container == "dsf" else 0):
+            raise RangeUnsupported(f"{self.container} tail decoded {n} samples, expected {expect}")
+
     # -- the tail -------------------------------------------------------------
     def _fetch_tail(self):
         if self.duration_s <= 0:
@@ -2651,7 +2877,7 @@ class RangedTailSource:
             want *= 2
         raise RangeUnsupported("tail window would not decode to OUTRO_SECONDS")
 
-    def _decode_tail(self, data, whole=False):
+    def _decode_tail(self, data, whole=False, expect=None):
         """Decode the tail bytes standalone to a native-rate WAV; returns the
         number of samples kept (after the MP3 end-padding trim).
 
@@ -2666,7 +2892,10 @@ class RangedTailSource:
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             raise RangeUnsupported("ffmpeg not on PATH")
-        blob = (self._flac_header + data) if self.container == "flac" and not whole else data
+        if self._pcm:
+            blob = self._pcm_hdr + data  # the synthetic PCM/DSD header
+        else:
+            blob = (self._flac_header + data) if self.container == "flac" and not whole else data
         fd, src = tempfile.mkstemp(prefix="swtail_", suffix=f".{self.container}")
         with os.fdopen(fd, "wb") as out:
             out.write(blob)
@@ -2680,7 +2909,7 @@ class RangedTailSource:
         try:
             subprocess.run(
                 [ffmpeg, "-v", "error", "-y", "-f", self.container, "-i", src,
-                 "-c:a", "pcm_f32le", "-f", "wav", wav],
+                 *self._decode_args, "-c:a", "pcm_f32le", "-f", "wav", wav],
                 check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 timeout=FFMPEG_DECODE_TIMEOUT_S,
             )
@@ -2696,6 +2925,8 @@ class RangedTailSource:
         if info.samplerate != self.native_rate:
             raise RangeUnsupported("decoded tail sample rate differs from the header")
         kept = max(0, info.frames - self._trim_end)
+        if expect is not None:
+            kept = min(kept, expect)  # DSD block padding past the last sample
         self._wav = wav
         self._wav_end_s = self.duration_s
         self._wav_start_s = self.duration_s - kept / self.native_rate
