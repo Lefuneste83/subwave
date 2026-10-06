@@ -184,7 +184,9 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
   }
   if (facets.includes('tail')) {
     warnings.push(
-      'tail: without ranged reads (older analyzer, VBR MP3 without a header, WAV/m4a) the capped download is used and a large file can come back unmeasurable again',
+      'tail: FLAC, MP3, WAV, AIFF and DSF are read by HTTP range on an analyzer that supports it; m4a/Opus, ' +
+        'VBR MP3 without a length header, compressed WAV and older analyzers use the capped download, ' +
+        'where a large file can come back unmeasurable again',
     );
   }
   if (facets.includes('stems')) {
