@@ -83,6 +83,7 @@ async function main() {
       const st = await stemCache.stemsRootStatus({ prepare: true });
       assert.equal(st.online, true);
       assert.equal(st.action, 'adopt');
+      assert.match(st.message ?? '', /could not write/, 'the failure is reported, not silent');
       assert.ok(!existsSync(marker));
     } finally {
       chmodSync(root, 0o755);

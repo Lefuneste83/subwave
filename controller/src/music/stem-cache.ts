@@ -112,7 +112,8 @@ export interface StemsRootStatus {
   // true = stems may be written, backfilled and swept.
   online: boolean;
   action: StemsRootAction;
-  // Set when offline: what the operator sees in the logs and the doctor.
+  // Set when offline, or when an existing cache could not take the marker:
+  // what the operator sees in the logs and the doctor.
   message?: string;
 }
 
@@ -157,7 +158,13 @@ export async function stemsRootStatus(opts: { prepare?: boolean; readOnly?: bool
       // Stem dirs on disk prove the share is mounted: a root that refuses the
       // marker stays online, so the sweep still reports deletes it cannot do
       // (#1257) instead of going quiet. The adoption is retried next time.
-      if (action === 'adopt') return { online: true, action };
+      if (action === 'adopt') {
+        return {
+          online: true,
+          action,
+          message: `Stem cache: could not write the ${STEMS_MARKER} marker in ${root} (${(err as Error)?.message || err}); the cache stays in use, but an unmounted share can't be told from an empty one until the marker exists`,
+        };
+      }
       // A new cache whose root can't be written: stem writes would fail the
       // same way.
       return {
