@@ -154,7 +154,12 @@ export async function stemsRootStatus(opts: { prepare?: boolean; readOnly?: bool
     try {
       await writeMarker(root);
     } catch (err) {
-      // Can't write the root: the stem writes would fail the same way.
+      // Stem dirs on disk prove the share is mounted: a root that refuses the
+      // marker stays online, so the sweep still reports deletes it cannot do
+      // (#1257) instead of going quiet. The adoption is retried next time.
+      if (action === 'adopt') return { online: true, action };
+      // A new cache whose root can't be written: stem writes would fail the
+      // same way.
       return {
         online: false,
         action: 'offline',

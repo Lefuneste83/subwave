@@ -10,7 +10,7 @@
 // Run: `tsx scripts/stems-root-marker.test.ts` (auto-discovered by npm test).
 
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -70,6 +70,23 @@ async function main() {
     assert.equal(st.online, true);
     assert.equal(st.action, 'adopt');
     assert.ok(existsSync(marker));
+  });
+  await test('existing cache on a root that refuses the marker stays online', async () => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      console.log('    (skipped: running as root, the root cannot be made read-only)');
+      return;
+    }
+    reset();
+    mkdirSync(join(root, 'track-1'), { recursive: true });
+    chmodSync(root, 0o555);
+    try {
+      const st = await stemCache.stemsRootStatus({ prepare: true });
+      assert.equal(st.online, true);
+      assert.equal(st.action, 'adopt');
+      assert.ok(!existsSync(marker));
+    } finally {
+      chmodSync(root, 0o755);
+    }
   });
   await test('readOnly reports adopt without writing the marker', async () => {
     reset();
