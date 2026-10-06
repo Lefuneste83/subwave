@@ -302,6 +302,16 @@ async def test_path_contract():
     assert result["ok"] is True, result
     assert worker_calls == [{"id": "1", "path": audio.name}], worker_calls
 
+    # The stems marker flag reaches the worker with the stems dir it guards.
+    worker_calls.clear()
+    with tempfile.NamedTemporaryFile() as audio:
+        await server.analyze(server.AnalyzeRequest(
+            path=audio.name, stems_dir="/stems/t1", stems_require_marker=True,
+        ))
+    assert worker_calls == [{
+        "id": "1", "path": audio.name, "stems_dir": "/stems/t1", "stems_require_marker": True,
+    }], worker_calls
+
 
 async def test_facet_contract():
     """A facets request is forwarded verbatim and answered in the facet shape;

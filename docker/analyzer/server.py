@@ -679,6 +679,10 @@ class AnalyzeRequest(BaseModel):
     # persists the Demucs stems it already computes as FLAC into this dir —
     # implies the separation pass even when `vocal` wasn't requested.
     stems_dir: str | None = None
+    # Write stems only when the stems root (stems_dir's parent) carries the
+    # .subwave-stems marker, so an unmounted share on this machine is not
+    # written to as if it were the cache.
+    stems_require_marker: bool | None = None
     # CLAP backfill for a track whose baseline analysis is already current.
     # Skips every non-embedding feature in the worker.
     embedding_only: bool = False
@@ -724,6 +728,8 @@ async def analyze(req: AnalyzeRequest):
         payload["complete"] = req.complete
     if req.stems_dir is not None:
         payload["stems_dir"] = req.stems_dir
+    if req.stems_require_marker is not None:
+        payload["stems_require_marker"] = req.stems_require_marker
     if req.embedding_only:
         payload["embedding_only"] = True
     facets = getattr(req, "facets", None)
