@@ -313,7 +313,12 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   if (stemCache && !plan) {
     stemSlotsLeft = await stemCacheStore.headroomTracks();
     existingStemDirs = await stemCacheStore.cachedTrackIdSet();
+    // From here this pass may add stem dirs: the hourly sweep leaves the
+    // cache to it, and it settles the usage snapshot when it ends.
+    await stemCacheStore.markPassPending();
   }
+  // Net-new stem dirs this pass allocated (settled at the end of the pass).
+  const newStemIds: string[] = [];
   if (stemCache && !reAnalyzeScope && !plan) {
     // The loop spends stemSlotsLeft in ids order and the earlier widenings'
     // tracks run FIRST, draining slots before this slice is reached. Reserve
@@ -494,7 +499,10 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
       slotsLeft: stemSlotsLeft,
       hasExistingDir: existingStemDirs.has(id),
     });
-    if (trackStemDecision.consumesSlot) stemSlotsLeft -= 1;
+    if (trackStemDecision.consumesSlot) {
+      stemSlotsLeft -= 1;
+      newStemIds.push(id);
+    }
     if ((plan ? true : stemCache) && !trackStemDecision.want && !stemGateAnnounced) {
       stemGateAnnounced = true;
       console.log(
@@ -831,7 +839,13 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   // NOT oldest first, or this pass's best writes would be the first evicted;
   // the hourly cleanup cron sweeps too, this just settles the bill promptly).
   if (passStems) {
-    const swept = await stemCacheStore.sweep().catch(() => null);
+    // Count just the dirs this pass added; a full walk only when that leaves
+    // the cache over budget (eviction needs the per-dir list) or there is no
+    // trusted snapshot to add them to.
+    const settled = await stemCacheStore.settlePassWrites(newStemIds).catch(() => null);
+    const swept = settled?.withinBudget
+      ? null
+      : await stemCacheStore.sweep().catch(() => null);
     if (swept && swept.removed > 0) {
       console.log(`[analyze] stem cache sweep: evicted ${swept.removed} track dirs (${Math.round(swept.freedBytes / 1024 ** 2)} MB)`);
     }
