@@ -1013,7 +1013,9 @@ async function cleanup() {
   // Stem cache sweep — keep the per-track Demucs stem windows inside the
   // operator's byte budget (feature: stem-blend transitions), evicting by the
   // music/stem-priority.ts ranking rather than by age. The analysis pass
-  // sweeps after itself too; this catches lazily-added dirs.
+  // settles after itself too. Most hours this reads the usage snapshot and
+  // walks nothing (stem-cache.ts); a full walk runs at least once a day, which
+  // is what catches dirs added or removed by hand.
   try {
     const { removed, freedBytes, failedDirs, overBudgetBytes } = await stemCacheStore.sweep();
     if (removed) {
