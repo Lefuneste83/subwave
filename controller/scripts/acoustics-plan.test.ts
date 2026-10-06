@@ -14,6 +14,8 @@
 //   - with a plan, the pass analyses exactly the planned tracks with those
 //     flags (checked against a fake sidecar), and the facet table records the
 //     result;
+//   - a plan that asks for no stems never walks the stem cache, even with the
+//     stem cache on (a full walk took 12 min on a NAS); a plain pass still does;
 //   - a facet the worker reports failed is 'failed' in the table even where
 //     the columns alone read 'unmeasurable', so it is retried up to the
 //     attempt limit and no longer re-planned by `--where unmeasurable`.
@@ -39,6 +41,7 @@ function test(name: string, fn: () => void | Promise<void>) {
 // ---- fake analyzer sidecar + Navidrome stream ------------------------------
 const requests: Array<Record<string, unknown>> = [];
 let clapCapable = true;
+let vocalCapable = false;
 // Facet protocol on the stub (off = an analyzer that predates it).
 let facetsCapable = false;
 // Per-facet answers the stub gives for a facet request (default: ok).
@@ -49,7 +52,7 @@ function handler(req: IncomingMessage, res: ServerResponse) {
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({
       ok: true, engines: ['analyze'],
-      analyze_audio_capable: clapCapable, analyze_vocal_capable: false,
+      analyze_audio_capable: clapCapable, analyze_vocal_capable: vocalCapable,
       ...(facetsCapable ? { analyze_facets_capable: true, analyze_ranged_tail_capable: true } : {}),
     }));
     return;
@@ -354,6 +357,34 @@ async function main() {
     db.recordAnalysisFailure('t6', 'read ECONNRESET');
     assert.equal(facetRow('t6', 'tail')!.status, 'unmeasurable');
     assert.equal(facetRow('t6', 'clap')!.status, 'failed');
+  });
+
+  await test('a plan that asks for no stems never walks the stem cache, even with the cache on', async () => {
+    const settings = await import('../src/settings.js');
+    const stemCacheStore = await import('../src/music/stem-cache.js');
+    vocalCapable = true;
+    analyzer._resetBackendCacheForTests();
+    await settings.update({ audio: { stemCache: true } });
+    try {
+      db.upsertTrackMeta('t7', { title: 't7', artist: 'A', album: 'B', duration: 214 });
+      db.upsertTrackAnalysis('t7', { bpm: 128, musicalKey: 'G', loudnessLufs: -8, source: 'capped' });
+      const p = P.planAcoustics({ ids: ['t7'], facets: ['tail'], where: { kind: 'unmeasurable' },
+        state: db.loadFacetState(['tail']), capabilities: { clap: true, demucs: true } });
+      assert.equal(p.items.length, 1);
+      assert.ok(!p.items[0].request.stems, 'a tail plan asks for no stems');
+      const before = stemCacheStore._cacheWalksForTests();
+      const stats = await runAnalysisPass({ plan: p });
+      assert.equal(stats.analyzed, 1);
+      assert.equal(stemCacheStore._cacheWalksForTests(), before, 'the plan walked the stem cache');
+      // The control: a plain pass with the cache on still sizes the budget.
+      db.upsertTrackMeta('t8', { title: 't8', artist: 'A', album: 'B', duration: 214 });
+      await runAnalysisPass({ limit: 1 });
+      assert.ok(stemCacheStore._cacheWalksForTests() > before, 'a plain pass no longer walks the cache');
+    } finally {
+      await settings.update({ audio: { stemCache: false } });
+      vocalCapable = false;
+      analyzer._resetBackendCacheForTests();
+    }
   });
 
   await test('the facet table stays consistent with the columns through facet writes', async () => {
