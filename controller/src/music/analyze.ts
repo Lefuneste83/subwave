@@ -291,7 +291,11 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   // EVERY stem write in the loop below (#1257), decremented per NET-NEW dir.
   let stemSlotsLeft = 0;
   let existingStemDirs: Set<string> = new Set();
-  if (stemCache) {
+  // Sizing the budget walks every file in the stem cache. A facet plan decides
+  // stems per track and sizes the budget itself below, only when it asks for
+  // stems: walked here, a tail-only plan waited 12 min on a 45k-dir NFS cache
+  // before its first request (5 Oct 2026) for figures it never reads.
+  if (stemCache && !plan) {
     stemSlotsLeft = await stemCacheStore.headroomTracks();
     existingStemDirs = await stemCacheStore.cachedTrackIdSet();
   }
@@ -361,9 +365,9 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
         `${plan.where.reason ? ':' + plan.where.reason : ''} — ${ids.length} tracks`,
     );
     const wantsStems = plan.items.some(i => i.request.stems);
-    if (wantsStems && stemSlotsLeft === 0 && existingStemDirs.size === 0) {
-      // The widening above only sized the budget when the settings toggle is
-      // on; an explicit stems plan needs it either way.
+    if (wantsStems) {
+      // The only place a plan sizes the budget (the widening above skips plans),
+      // whether or not the settings toggle is on: an explicit stems plan needs it.
       stemSlotsLeft = await stemCacheStore.headroomTracks();
       existingStemDirs = await stemCacheStore.cachedTrackIdSet();
     }
