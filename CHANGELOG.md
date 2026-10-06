@@ -1,5 +1,49 @@
 # Changelog
 
+## Unreleased
+
+### Bug fixes
+
+* **upgrade:** Preserve existing multi-station Navidrome connections with a
+  one-time startup migration before environment credentials become inactive
+  ([#1785](https://github.com/perminder-klair/subwave/issues/1785)). The migration
+  covers inactive profiles, preserves per-field environment overrides, and
+  resumes after interrupted writes. New and duplicated profiles remain
+  independent. Operators who already reconfigured profiles under #1777 must
+  mark those profiles before upgrading. See [upgrade and recovery steps](docs/multi-station.md#upgrading-existing-profiles).
+
+## [1.17.0](https://github.com/perminder-klair/subwave/compare/v1.16.0...v1.17.0) (2026-10-04)
+
+
+### Features
+
+* **admin:** add a live station date/time clock to the admin top bar ([#1722](https://github.com/perminder-klair/subwave/issues/1722)) ([342f8b0](https://github.com/perminder-klair/subwave/commit/342f8b06bf90b28c7cc523f4dc1b099d87afa413))
+* **llm:** Gemini safety thresholds that actually reach the wire ([#1721](https://github.com/perminder-klair/subwave/issues/1721)) ([bbad2da](https://github.com/perminder-klair/subwave/commit/bbad2da5c91591d742ceb442448d726e62488dc1))
+* **tts:** native Gemini engine + per-persona voiceStyle ([#1718](https://github.com/perminder-klair/subwave/issues/1718)) ([8e34818](https://github.com/perminder-klair/subwave/commit/8e34818745a771cf296ecb82f901856a6e320fc1))
+
+
+### Bug Fixes
+
+* **auth:** keep web sign-in out of native prompt ([#1750](https://github.com/perminder-klair/subwave/issues/1750)) ([c543f09](https://github.com/perminder-klair/subwave/commit/c543f09419f2ac39d1f53aa81f5b8c9ebf5c2f2f))
+* **controller:** recover from Navidrome ID rotation ([#1703](https://github.com/perminder-klair/subwave/issues/1703)) ([bce9fda](https://github.com/perminder-klair/subwave/commit/bce9fdae3a73f000acff2e20909b427ee1a0be11))
+* **debug:** aggregate Icecast listeners and clarify mount peaks ([#1709](https://github.com/perminder-klair/subwave/issues/1709)) ([1001451](https://github.com/perminder-klair/subwave/commit/1001451960ace1e372253dcba0089ae5933f0798))
+* **debug:** remove stray now-playing.json label from Now playing card ([#1724](https://github.com/perminder-klair/subwave/issues/1724)) ([b6ce672](https://github.com/perminder-klair/subwave/commit/b6ce67236e3c5d55d09db8da7cc5ef81ec629c2d))
+* defer automatic playlist refresh while programme is idle ([#1730](https://github.com/perminder-klair/subwave/issues/1730)) ([ab0e2aa](https://github.com/perminder-klair/subwave/commit/ab0e2aa0feb8a5644d81598e2e56a8ac058ba1ca))
+* **dj:** use scheduled boundary clocks in handoff prompts ([#1717](https://github.com/perminder-klair/subwave/issues/1717)) ([abb07c9](https://github.com/perminder-klair/subwave/commit/abb07c9bc521634e87dadb69f91b14e699baeb9b))
+* **library:** exclude empty moods from tagged views ([#1732](https://github.com/perminder-klair/subwave/issues/1732)) ([7db51da](https://github.com/perminder-klair/subwave/commit/7db51da23940c349148b2d4b5045d2b6c833c5e7))
+* **library:** index mood and energy pools and avoid full analysis hydration ([#1727](https://github.com/perminder-klair/subwave/issues/1727)) ([3ef7e5d](https://github.com/perminder-klair/subwave/commit/3ef7e5dcc07b987f79c02703d3177b8f992f688b))
+* **llm:** bound provider generations and expose observed request health ([#1728](https://github.com/perminder-klair/subwave/issues/1728)) ([ddc8cdf](https://github.com/perminder-klair/subwave/commit/ddc8cdfe1538536316efbd35b2305b1bd316e87e))
+* **llm:** fail over on permanent model failures ([#1737](https://github.com/perminder-klair/subwave/issues/1737)) ([6996843](https://github.com/perminder-klair/subwave/commit/6996843b693f79355422f2b986103f8336944fa0))
+* **scheduler:** stagger routine maintenance off hourly boundaries ([#1726](https://github.com/perminder-klair/subwave/issues/1726)) ([643f466](https://github.com/perminder-klair/subwave/commit/643f466cfad9ba51928e4e732483d8e401217b76))
+* **settings:** include fadeAtShowEnd in Danger zone's dirty-check keys ([#1712](https://github.com/perminder-klair/subwave/issues/1712)) ([3db8332](https://github.com/perminder-klair/subwave/commit/3db8332453ddab4d187fc926395d5eb3017008d4))
+* **show-filter:** flatten OpenSubsonic genre objects in trackGenres ([#1744](https://github.com/perminder-klair/subwave/issues/1744)) ([16e931a](https://github.com/perminder-klair/subwave/commit/16e931ac5d3b0557b443f4904a1d7afcb1672cfe))
+* **speech:** strip a speaker label before it reaches TTS ([#1715](https://github.com/perminder-klair/subwave/issues/1715)) ([3ece213](https://github.com/perminder-klair/subwave/commit/3ece213da0cb77bc6ec991dc76c70d769650b0dc))
+* **tts:** allow 500 speech corrections and reuse compiled patterns ([#1733](https://github.com/perminder-klair/subwave/issues/1733)) ([0bf0f51](https://github.com/perminder-klair/subwave/commit/0bf0f517f134b8fec841cde02bba303e501c0b73)), closes [#1669](https://github.com/perminder-klair/subwave/issues/1669)
+* **tts:** resolve Gemini release blockers ([#1768](https://github.com/perminder-klair/subwave/issues/1768)) ([8590c75](https://github.com/perminder-klair/subwave/commit/8590c75e0f1b8e826c571ec8a7e6b4bbac1a8ed3))
+* **tts:** speak years and decades as words ([#1734](https://github.com/perminder-klair/subwave/issues/1734)) ([186137f](https://github.com/perminder-klair/subwave/commit/186137fc98a66ad2964f489a7a347ef5c4fa4db8))
+* **web:** box the dashboard's show/hide IPs toggle like other admin buttons ([#1751](https://github.com/perminder-klair/subwave/issues/1751)) ([f219549](https://github.com/perminder-klair/subwave/commit/f219549237ce62b4ab9700631828fc1f0fb8eac0))
+* **web:** tighten admin clock and dashboard controls ([#1748](https://github.com/perminder-klair/subwave/issues/1748)) ([e140ad2](https://github.com/perminder-klair/subwave/commit/e140ad24ee26bfde2fa7260a914894421b5ee6a8))
+
 ## [1.16.0](https://github.com/perminder-klair/subwave/compare/v1.15.0...v1.16.0) (2026-09-14)
 
 
