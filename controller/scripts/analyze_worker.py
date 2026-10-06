@@ -1416,6 +1416,35 @@ def get_vocal_detector(force=False):
     return _vocal_detector
 
 
+# Marker file at the stem cache root (controller music/stem-cache.ts). A stems
+# share that is not mounted on this machine still leaves its mount point, and
+# writing there fills the local disk with stems the controller never sees.
+STEMS_MARKER = ".subwave-stems"
+_stems_unmarked_logged = False
+
+
+def stems_root_marked(stems_dir):
+    """True when the stem cache root (the parent of the per-track stems_dir)
+    carries the marker."""
+    root = os.path.dirname(os.path.normpath(stems_dir))
+    return os.path.isfile(os.path.join(root, STEMS_MARKER))
+
+
+def stems_dir_to_write(stems_dir, require_marker):
+    """The stems_dir this request may write to, or None. With require_marker,
+    a cache root without the marker gets no writes (logged once per process),
+    and since stems_cached then stays unset, the controller does not stamp the
+    track as attempted."""
+    global _stems_unmarked_logged
+    if not stems_dir or not require_marker or stems_root_marked(stems_dir):
+        return stems_dir
+    if not _stems_unmarked_logged:
+        _stems_unmarked_logged = True
+        log(f"stem cache root {os.path.dirname(os.path.normpath(stems_dir))} has no {STEMS_MARKER} marker "
+            "(stems share not mounted here?): stems are not written until it is")
+    return None
+
+
 def write_stems(stems, window, dest_dir):
     """Persist a separate() result as 16-bit FLAC at DEMUCS_SR into dest_dir
     as <window>-<stem>.flac (feature: stem-blend transitions — the cache that
@@ -1869,9 +1898,14 @@ def measure_loudness(y, sr):
 
 def analyze(
     librosa, url=None, path=None, embed=None, vocal=None, complete=None,
-    stems_dir=None, embedding_only=False,
+    stems_dir=None, embedding_only=False, stems_require_marker=False,
 ):
     import numpy as np
+
+    # Asked to check the cache root and it has no marker: no stem writes, and
+    # no stems_cached field, so the controller does not stamp the track as
+    # attempted. The separation itself is then only run if vocal asked for it.
+    stems_dir = stems_dir_to_write(stems_dir, stems_require_marker)
 
     # A controller-provided path is pre-fetched onto the shared volume and
     # owned by the caller; only files fetch_audio downloads here are ours to
@@ -2274,6 +2308,7 @@ def main():
                     embed=req.get("embed"), vocal=req.get("vocal"),
                     complete=req.get("complete"), stems_dir=req.get("stems_dir"),
                     embedding_only=req.get("embedding_only") is True,
+                    stems_require_marker=req.get("stems_require_marker") is True,
                 )
                 # If a getter stamped the clock, this request DID use a model —
                 # re-stamp so the countdown starts from the end of the work, not
