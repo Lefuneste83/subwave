@@ -201,6 +201,13 @@ async function main() {
     assert.ok(lines.some((l) => l.includes('also recomputes head, loudness')), lines.join('\n'));
   });
 
+  await test('the tail note names what is read by range and what falls back', () => {
+    const note = P.formatPlan(plan('tail', 'unmeasurable')).find((l) => l.includes('tail:')) ?? '';
+    assert.match(note, /FLAC, MP3, WAV, AIFF and DSF are read by HTTP range/, note);
+    assert.match(note, /m4a\/Opus, VBR MP3 without a length header, compressed WAV and older analyzers use the capped download/, note);
+    assert.ok(!/WAV\/m4a/.test(note), 'WAV is no longer listed with the capped-download formats');
+  });
+
   console.log('runAnalysisPass with a plan:');
 
   await test('analyses exactly the planned tracks, with per-track flags', async () => {
