@@ -227,6 +227,8 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     if (!root.online) {
       stemCache = false;
       logEvent('warning', root.message ?? 'Stem cache offline: stems skipped this pass');
+    } else if (root.message) {
+      logEvent('warning', root.message);
     } else if (root.action === 'create' || root.action === 'adopt') {
       console.log(`[analyze] stem cache: ${root.action === 'create' ? 'created' : 'marked existing cache at'} ${stemCacheStore.stemsRoot()} (${stemCacheStore.STEMS_MARKER})`);
     }
