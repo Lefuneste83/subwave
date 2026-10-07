@@ -11,7 +11,7 @@ process.env.STATE_DIR = mkdtempSync(join(tmpdir(), 'subwave-musical-leanings-'))
 
 const settings = await import('../src/settings.js');
 await settings.load();
-const { PICK_SCHEMA, agenticDiscoverySchema, agenticLeaningsReviewPrompt, agenticLeaningsReviewSchema, NO_AGENTIC_LEANINGS_INFLUENCE, pickSystem, pickerMusicLeanings, resolveEditorialLeanings } = await import('../src/broadcast/dj-agent/schemas.js');
+const { PICK_SCHEMA, agenticDiscoverySchema, agenticLeaningsReviewPrompt, agenticLeaningsReviewSchema, NO_AGENTIC_LEANINGS_INFLUENCE, pickSystem, resolveEditorialLeanings } = await import('../src/broadcast/dj-agent/schemas.js');
 const { agenticLeaningsPhrases } = await import('../src/broadcast/dj-agent/leanings-review.js');
 
 const persona = { ...settings.get().personas[0], musicLean: 'Favour patient dub, deep electronic cuts, and melodic post-punk.' };

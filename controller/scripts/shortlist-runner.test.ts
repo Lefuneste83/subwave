@@ -26,7 +26,7 @@ test('makes a redacted, replayable trace with source arguments and candidate ids
   }]);
   assert.deepEqual(trace.scope.recentIds, ['recent-a', 'recent-b']);
   assert.deepEqual(trace.scope.playlistTrackIds, ['playlist-track']);
-  assert.equal(trace.currentTrack.title, 'Current Song');
+  assert.equal(trace.currentTrack?.title, 'Current Song');
   assert.equal('title' in trace.sourceCalls[0], false);
 });
 
@@ -269,8 +269,10 @@ test('repeated mood passes reuse one library pool but still surface new candidat
   const tools = {
     tracksByMood: {
       inputSchema: { safeParse: (value: unknown) => ({ success: true, data: value }) },
-      execute: async ({ mood, energy }: { mood: string; energy: string | null }) =>
-        ctx.collect(moodPool(mood).filter((track) => !energy || track.energy === energy), 2),
+      execute: async (args: unknown) => {
+        const { mood, energy } = args as { mood: string; energy: string | null };
+        return ctx.collect(moodPool(mood).filter((track) => !energy || track.energy === energy), 2);
+      },
     },
   };
 

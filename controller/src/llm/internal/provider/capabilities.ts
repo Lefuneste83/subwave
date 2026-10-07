@@ -66,6 +66,22 @@ const NATIVE_DISCOVERY_STEPS = 3;
 
 const NONE = (): ReasoningLevel | undefined => undefined;
 
+// Claude generations whose thinking cannot be switched off: Sonnet 5.5, Opus
+// 5.5 and the Fable/Mythos 5 line 400 on `thinking:{type:"disabled"}`, and
+// 5.5/5.1 additionally 400 on forced tool use (`tool_choice` any/tool —
+// "tool_choice: type "tool" and "any" are not supported for this model"). Fable
+// 5.0 still accepts tool_choice, but forced tools need thinking off, which it
+// cannot do — so one predicate covers both consequences: never send 'none',
+// never force a tool. Matched on the model id rather than the provider, because
+// these ids reach us through the native provider, OpenRouter/gateway
+// (`anthropic/claude-sonnet-5.5`) and OpenAI-compatible proxies alike.
+// Separators may be `-` or `.` (gateways spell versions with dots).
+const THINKING_MANDATORY_CLAUDE_RE = /claude-(?:(?:opus|sonnet)-5[-.]5|(?:fable|mythos)-5)\b/i;
+
+export function thinkingMandatoryModel(modelId: string): boolean {
+  return THINKING_MANDATORY_CLAUDE_RE.test(String(modelId || ''));
+}
+
 const CAPS: Record<string, ProviderCapabilities> = {
   ollama: {
     objectStrategy: 'tool',
@@ -114,8 +130,13 @@ const CAPS: Record<string, ProviderCapabilities> = {
     repeatPenaltyApplies: false,
     // Extended thinking is off by default; 'medium' opts in. 'none' is required
     // on forced-tool legs because Claude rejects toolChoice while thinking.
-    reasoningLevel: ({ reasoning, forceNoThink }) =>
-      (reasoning && !forceNoThink ? 'medium' : 'none'),
+    // Thinking-mandatory generations 400 on 'none' and never get a forced tool
+    // (forcedToolChoice), so their floor is 'minimal' — adaptive thinking at
+    // effort low, the cheapest setting they accept.
+    reasoningLevel: ({ modelId, reasoning, forceNoThink }) => {
+      if (thinkingMandatoryModel(modelId)) return reasoning ? 'medium' : 'minimal';
+      return reasoning && !forceNoThink ? 'medium' : 'none';
+    },
     discoverySteps: NATIVE_DISCOVERY_STEPS,
   },
   google: {
@@ -163,12 +184,15 @@ const CAPS: Record<string, ProviderCapabilities> = {
   },
   // The gateway serializes the top-level level to whatever vendor the
   // `provider/model` id resolves to. Gemma downstreams are the exception, same
-  // 400 as the google entry (#1044), so omit the param for them.
+  // 400 as the google entry (#1044), so omit the param for them. A
+  // thinking-mandatory Claude downstream gets 'minimal' instead of 'none'.
   gateway: {
     objectStrategy: 'native',
     repeatPenaltyApplies: false,
-    reasoningLevel: ({ modelId, reasoning, forceNoThink }) =>
-      ((reasoning && !forceNoThink) || /(^|\/)gemma-/i.test(modelId) ? undefined : 'none'),
+    reasoningLevel: ({ modelId, reasoning, forceNoThink }) => {
+      if ((reasoning && !forceNoThink) || /(^|\/)gemma-/i.test(modelId)) return undefined;
+      return thinkingMandatoryModel(modelId) ? 'minimal' : 'none';
+    },
     discoverySteps: NATIVE_DISCOVERY_STEPS,
   },
 };
@@ -185,9 +209,19 @@ export function capabilitiesFor(provider: string | undefined): ProviderCapabilit
   return (provider && CAPS[provider]) || DEFAULT_CAPS;
 }
 
+// Hosted OpenAI-compatible APIs can provide native structured output and do not
+// understand llama.cpp's chat_template_kwargs / repeat_penalty extensions.
+// The historical local mode remains the default for existing stations.
+function capabilitiesForCfg(cfg: any): ProviderCapabilities {
+  if (cfg?.provider === 'openai-compatible' && cfg?.compatibleMode === 'hosted') {
+    return DEFAULT_CAPS;
+  }
+  return capabilitiesFor(cfg?.provider);
+}
+
 // True when the active provider needs the tool-call structured-output path.
 export function needsToolCallObject(cfg: any): boolean {
-  return capabilitiesFor(cfg?.provider).objectStrategy === 'tool';
+  return capabilitiesForCfg(cfg).objectStrategy === 'tool';
 }
 
 // Free discovery steps this leg gets before `done` is forced.
@@ -206,7 +240,8 @@ export function discoveryStepsFor(cfg: any): number {
   if (Number.isFinite(override as number) && (override as number) > 0) {
     return clampDiscoverySteps(override as number);
   }
-  const declared = capabilitiesFor(cfg?.provider).discoverySteps;
+  const declared = cfg?.provider === 'openai-compatible' && cfg?.compatibleMode === 'hosted'
+    ? NATIVE_DISCOVERY_STEPS : capabilitiesForCfg(cfg).discoverySteps;
   if (!Number.isFinite(declared as number)) return DISCOVERY_STEPS_MIN;
   return clampDiscoverySteps(declared as number);
 }
@@ -235,8 +270,14 @@ export function runDiscoverySteps(cfg: any, followProvider: boolean): number {
 // in the guided-decoding backend 'required' engages (#570). On 'auto' the
 // done-tool harness keeps its activeTools pinning, and misses fall through to
 // the stateless pool picker. Any value other than 'auto' means 'required'.
+//
+// A thinking-mandatory Claude model is 'auto' whatever the setting says: it
+// 400s on a forced tool, and on an OpenAI-compatible proxy 'required' arrives
+// as tool_choice:any. With one tool visible and EMIT_ANSWER_INSTRUCTION the
+// model still answers through it.
 export function forcedToolChoice(cfg: any): 'required' | 'auto' {
-  return cfg?.toolChoice === 'auto' ? 'auto' : 'required';
+  if (cfg?.toolChoice === 'auto' || thinkingMandatoryModel(cfg?.model)) return 'auto';
+  return 'required';
 }
 
 // Per-call safety thresholds for the native `google` provider, as ai-sdk
@@ -267,7 +308,7 @@ export function googleSafetyOptions(cfg: any): Record<string, unknown> {
 // when the provider dropped it. Currently false everywhere; kept as the
 // chokepoint for when the Ollama per-call channel is restored.
 export function repeatPenaltyApplies(cfg: any): boolean {
-  return capabilitiesFor(cfg?.provider).repeatPenaltyApplies;
+  return capabilitiesForCfg(cfg).repeatPenaltyApplies;
 }
 
 // The repeat_penalty a body-injection provider will send this leg, or null.
@@ -275,7 +316,7 @@ export function repeatPenaltyApplies(cfg: any): boolean {
 // dropped and the tool-loop agent can run away repeating a token block until the
 // output cap, never emitting `done`. 1.0 or below is a no-op and is skipped.
 export function appliedRepeatPenalty(cfg: any): number | null {
-  if (!capabilitiesFor(cfg?.provider).samplingViaBody) return null;
+  if (!capabilitiesForCfg(cfg).samplingViaBody) return null;
   const rp = Number(cfg?.repeatPenalty);
   return Number.isFinite(rp) && rp > 1.0 ? rp : null;
 }
@@ -317,7 +358,7 @@ export function reasoningFor(
   cfg: any,
   { forceNoThink = false }: { forceNoThink?: boolean } = {},
 ): ReasoningLevel | undefined {
-  return capabilitiesFor(cfg?.provider).reasoningLevel({
+  return capabilitiesForCfg(cfg).reasoningLevel({
     modelId: cfg?.model || '',
     reasoning: cfg?.reasoning === true,
     forceNoThink,

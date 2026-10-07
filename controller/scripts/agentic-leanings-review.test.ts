@@ -301,7 +301,7 @@ const pickSource = agentSource.slice(pickStart, pickEnd);
 const agenticReviewBlockAt = pickSource.indexOf('if (!useShortlist && agentPickResolution)');
 const preliminaryAt = pickSource.indexOf('const preliminaryId =', agenticReviewBlockAt);
 const reviewAt = pickSource.indexOf('schema: agenticLeaningsReviewSchema', agenticReviewBlockAt);
-const guardsAt = pickSource.indexOf('const guarded = await runArtistGuard');
+const guardsAt = pickSource.indexOf('await runArtistGuard');
 const enqueueAt = pickSource.indexOf('const queued = await enqueuePick');
 const resolutionAt = pickSource.indexOf('agentPickResolution.usedMusicalLeanings = resolveAgenticLeaningsUsage');
 assert.ok(preliminaryAt >= 0 && preliminaryAt < reviewAt,

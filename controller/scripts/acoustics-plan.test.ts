@@ -40,7 +40,7 @@ function test(name: string, fn: () => void | Promise<void>) {
 
 // ---- fake analyzer sidecar + Navidrome stream ------------------------------
 const requests: Array<Record<string, unknown>> = [];
-let clapCapable = true;
+const clapCapable = true;
 let vocalCapable = false;
 // Facet protocol on the stub (off = an analyzer that predates it).
 let facetsCapable = false;

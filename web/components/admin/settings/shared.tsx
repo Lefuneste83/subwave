@@ -65,21 +65,6 @@ export interface CloudTtsCfg {
   compatParams: { key: string; value: string }[];
 }
 
-// The single client-side copy, read by both form hydration and the dirty-check.
-// Must mirror DEFAULTS.tts.cloud in controller/src/settings.ts.
-export const ELEVENLABS_VS_DEFAULTS = {
-  voiceStability: 0.5,
-  voiceStyle: 0,
-  voiceSimilarityBoost: 0.75,
-  voiceUseSpeakerBoost: true,
-} as const;
-
-export const FISH_TTS_DEFAULTS = {
-  temperature: 0.7,
-  topP: 0.7,
-  latency: 'normal' as const,
-};
-
 export interface TtsFallbackForm {
   enabled: boolean;
   engine: string;
@@ -130,15 +115,6 @@ export interface LlmHeaderRow {
 }
 
 /**
- * Wire map -> editor rows. Order is the stored order, so the list renders the
- * way the operator left it.
- */
-export function headerRows(raw: Record<string, string> | undefined): LlmHeaderRow[] {
-  if (!raw || typeof raw !== 'object') return [];
-  return Object.keys(raw).map((name) => ({ name, value: raw[name] ?? '' }));
-}
-
-/**
  * Editor rows -> the map the controller stores. A row with no name is a row
  * still being typed and is dropped rather than sent; a LATER row wins a name
  * collision, matching what the operator sees last in the list.
@@ -162,6 +138,7 @@ export interface LlmFallbackForm {
   repeatPenalty: number;
   providerBaseUrls: Record<string, string>;
   headers: LlmHeaderRow[];
+  compatibleMode: 'local' | 'hosted';
   reasoning: boolean;
   discoverySteps: number;
   geminiSafety: GeminiSafety;
@@ -175,6 +152,7 @@ export interface LlmForm {
   repeatPenalty: number;
   providerBaseUrls: Record<string, string>;
   headers: LlmHeaderRow[];
+  compatibleMode: 'local' | 'hosted';
   reasoning: boolean;
   toolChoice: string;
   pickerAgent: boolean;
@@ -217,6 +195,7 @@ export interface EmbeddingForm {
   provider: string;          // empty → follow llm.provider
   model: string;             // empty → sensible default per provider
   providerBaseUrls: Record<string, string>; // per-provider embedding server URLs; empty → inherit llm
+  headers: LlmHeaderRow[];
   ollamaUrl: string;         // dedicated embedding server URL (ollama); empty → inherit llm
   seedCount: string;         // '0' = auto
   knnNeighbours: string;
@@ -354,6 +333,7 @@ export interface DuckingForm {
 
 export interface DjBehaviourForm {
   showWelcome: boolean;
+  previewNextShow: boolean;
   sameHostAcknowledgement: boolean;
   extendedSleeveNotes: boolean;
   releaseYearMentions: 'regular' | 'occasional' | 'rare';
@@ -366,6 +346,7 @@ export interface DjBehaviourForm {
  *  strings so a temporarily blank number input survives until Save. */
 export interface DjBehaviourValues {
   showWelcome?: boolean;
+  previewNextShow?: boolean;
   sameHostAcknowledgement?: boolean;
   extendedSleeveNotes?: boolean;
   releaseYearMentions?: 'regular' | 'occasional' | 'rare';
@@ -516,6 +497,7 @@ export interface SettingsData {
       enabled?: boolean;
       provider?: string;
       model?: string;
+      headers?: Record<string, string>;
       baseUrl?: string;
       ollamaUrl?: string;
       seedCount?: number;

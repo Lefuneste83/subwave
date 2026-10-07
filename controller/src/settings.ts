@@ -53,6 +53,7 @@ import {
   WEATHER_CONDITIONS,
   WEATHER_MOOD_DEFAULTS,
   applyInlineKey,
+  applyCustomHeadersPatch,
   applyLlmLegPatch,
   canonicalKokoroLang,
   clamp01,
@@ -233,16 +234,8 @@ export {
 export {
   assertNoOrphanMoods,
   validateDjPromptsStrict,
-  // The mood family delegates to schemas/settings.ts now (#1348); update() calls
-  // the registry directly, so these are re-exported straight from the source
-  // module for the callers that still take the validator API — backup import,
-  // onboarding, and scripts/moods.test.ts.
-  validateFestivalsStrict,
-  validateMoodScheduleStrict,
-  validateMoodsStrict,
   validatePersonasStrict,
   validateShowsStrict,
-  validateWeatherMoodsStrict,
 } from './settings/validate.js';
 export {
   agentLanguageReminder,
@@ -509,6 +502,8 @@ export async function load() {
         typeof stored.stream?.bitrate === 'number' && MP3_BITRATE_SET.has(stored.stream.bitrate)
           ? stored.stream.bitrate
           : DEFAULTS.stream.bitrate,
+      // Legacy wire/storage key: it now controls only Opus. Preserve every
+      // stored boolean; FLAC's native metadata policy lives in radio.liq.
       oggIcyMetadata:
         typeof stored.stream?.oggIcyMetadata === 'boolean'
           ? stored.stream.oggIcyMetadata
@@ -630,6 +625,9 @@ export async function load() {
       showWelcome: typeof stored.djBehaviour?.showWelcome === 'boolean'
         ? stored.djBehaviour.showWelcome
         : DEFAULTS.djBehaviour.showWelcome,
+      previewNextShow: typeof stored.djBehaviour?.previewNextShow === 'boolean'
+        ? stored.djBehaviour.previewNextShow
+        : DEFAULTS.djBehaviour.previewNextShow,
       sameHostAcknowledgement: typeof stored.djBehaviour?.sameHostAcknowledgement === 'boolean'
         ? stored.djBehaviour.sameHostAcknowledgement
         : DEFAULTS.djBehaviour.sameHostAcknowledgement,
@@ -974,6 +972,7 @@ export async function load() {
       // settings.json written before the field existed loads as {}, which sends
       // no extra headers at all.
       headers: normalizeLlmHeaders(stored.llm?.headers),
+      compatibleMode: stored.llm?.compatibleMode === 'hosted' ? 'hosted' : DEFAULTS.llm.compatibleMode,
       reasoning:
         typeof stored.llm?.reasoning === 'boolean' ? stored.llm.reasoning : DEFAULTS.llm.reasoning,
       // Only 'auto' downgrades the forced tool_choice; anything else (incl. a
@@ -1081,6 +1080,7 @@ export async function load() {
           baseUrl: fbBaseUrls[fbProvider]
             ?? (typeof fb.baseUrl === 'string' ? fb.baseUrl.trim() : DEFAULTS.llm.fallback.baseUrl),
           headers: normalizeLlmHeaders(fb.headers),
+          compatibleMode: fb.compatibleMode === 'hosted' ? 'hosted' : DEFAULTS.llm.fallback.compatibleMode,
           reasoning:
             typeof fb.reasoning === 'boolean' ? fb.reasoning : DEFAULTS.llm.fallback.reasoning,
           toolChoice: fb.toolChoice === 'auto' ? 'auto' : DEFAULTS.llm.fallback.toolChoice,
@@ -1128,6 +1128,7 @@ export async function load() {
         typeof stored.embedding?.apiKey === 'string'
           ? stored.embedding.apiKey.trim()
           : DEFAULTS.embedding.apiKey,
+      headers: normalizeLlmHeaders(stored.embedding?.headers),
       seedCount:
         Number.isFinite(stored.embedding?.seedCount) && stored.embedding.seedCount >= 0
           ? Math.floor(stored.embedding.seedCount)
@@ -1673,6 +1674,7 @@ export async function prepareUpdate(patch, { themeIds }: { themeIds?: ReadonlySe
   if ('djBehaviour' in patch) {
     const behaviour = parseSettingsPatchKey<{
       showWelcome?: boolean;
+      previewNextShow?: boolean;
       sameHostAcknowledgement?: boolean;
       extendedSleeveNotes?: boolean;
       releaseYearMentions?: string;
@@ -1682,7 +1684,7 @@ export async function prepareUpdate(patch, { themeIds }: { themeIds?: ReadonlySe
     }>(
       'djBehaviour', patch.djBehaviour,
     );
-    for (const key of ['showWelcome', 'sameHostAcknowledgement', 'extendedSleeveNotes'] as const) {
+    for (const key of ['showWelcome', 'previewNextShow', 'sameHostAcknowledgement', 'extendedSleeveNotes'] as const) {
       if (behaviour[key] !== undefined) next.djBehaviour[key] = behaviour[key];
     }
     if (behaviour.releaseYearMentions !== undefined) {
@@ -2258,6 +2260,9 @@ export async function prepareUpdate(patch, { themeIds }: { themeIds?: ReadonlySe
       const v = String(e.apiKey).trim();
       if (v.length > 200) throw new Error('embedding.apiKey must be 0-200 chars');
       next.embedding.apiKey = v;
+    }
+    if (e.headers !== undefined) {
+      next.embedding.headers = applyCustomHeadersPatch(next.embedding.headers, e.headers, 'embedding');
     }
     if (e.seedCount !== undefined) {
       const v = parseInt(e.seedCount, 10);

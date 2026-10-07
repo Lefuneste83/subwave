@@ -14,7 +14,7 @@ const picker = agentSource.slice(pickStart, pickEnd);
 assert.ok(pickStart >= 0 && pickEnd > pickStart);
 const baselineAt = picker.indexOf('shortlistPickResolution.preliminary =');
 const reviewAt = picker.indexOf("kind: 'djShortlistLeaningsReview'");
-const guardsAt = picker.indexOf('const guarded = await runArtistGuard');
+const guardsAt = picker.indexOf('await runArtistGuard');
 const enqueueAt = picker.indexOf('const queued = await enqueuePick');
 const settleAt = picker.indexOf('shortlistPickResolution.usedMusicalLeanings = resolveAgenticLeaningsUsage');
 assert.ok(baselineAt >= 0 && baselineAt < reviewAt, 'Shortlist establishes a Leanings-blind baseline before review');
