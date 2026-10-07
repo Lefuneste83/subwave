@@ -1046,7 +1046,8 @@ async function cleanup() {
   // music/stem-priority.ts ranking rather than by age. The analysis pass
   // sweeps after itself too; this catches lazily-added dirs.
   try {
-    const { removed, freedBytes, failedDirs, overBudgetBytes } = await stemCacheStore.sweep();
+    const { removed, freedBytes, failedDirs, overBudgetBytes, offline } = await stemCacheStore.sweep();
+    if (offline) queue.log('error', offline);
     if (removed) {
       queue.log('scheduler',
         `Stem cache: evicted ${removed} track dir(s) (${Math.round(freedBytes / 1_000_000)} MB freed)`);

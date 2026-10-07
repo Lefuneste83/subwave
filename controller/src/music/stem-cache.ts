@@ -8,7 +8,7 @@
 // ranking the backfill scans by); the analyzer owns the WRITES
 // (analyze_worker.py write_stems — the same shared volume).
 
-import { readdir, stat, rm } from 'node:fs/promises';
+import { readdir, stat, rm, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
 import * as settings from '../settings.js';
@@ -74,6 +74,117 @@ export async function hasWindow(trackId: string, window: StemWindow): Promise<bo
   } catch {
     return false;
   }
+}
+
+// Stems share marker. A relocated cache usually lives on a network mount
+// (STEMS_DIR), and an unmounted share looks exactly like an empty cache: the
+// mount point is still there, with nothing in it. Read as "empty", that sends
+// the backfill off to re-separate the whole budget onto the local disk, and
+// stamps those tracks as attempted. So the cache carries a marker file at its
+// root, and nothing writes, backfills or sweeps without it.
+export const STEMS_MARKER = '.subwave-stems';
+
+export type StemsRootAction = 'ok' | 'adopt' | 'create' | 'offline' | 'none';
+
+// Pure decision seam (scripts/stems-root-marker.test.ts).
+// - marker present: the cache is mounted.
+// - no marker, but track dirs on disk: a cache from before the marker existed;
+//   adopt it (write the marker).
+// - no marker, no dirs, but the catalogue has stamped stems: the cache the
+//   catalogue remembers is not here, which is what an unmounted share looks
+//   like. Offline until the operator mounts it, or creates the marker by hand
+//   to start an empty cache on purpose.
+// - nothing anywhere: a new cache. Created only when the caller is about to
+//   write stems (`prepare`); a sweep or a status read leaves the disk alone.
+export function stemsRootDecision(opts: {
+  markerPresent: boolean;
+  stemDirs: number;
+  stampedTracks: number;
+  prepare: boolean;
+}): StemsRootAction {
+  if (opts.markerPresent) return 'ok';
+  if (opts.stemDirs > 0) return 'adopt';
+  if (opts.stampedTracks > 0) return 'offline';
+  return opts.prepare ? 'create' : 'none';
+}
+
+export interface StemsRootStatus {
+  // true = stems may be written, backfilled and swept.
+  online: boolean;
+  action: StemsRootAction;
+  // Set when offline, or when an existing cache could not take the marker:
+  // what the operator sees in the logs and the doctor.
+  message?: string;
+}
+
+function stampedStemCount(): number {
+  try {
+    return db.isOpen() ? db.stemsCachedCount() : 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function writeMarker(root: string): Promise<void> {
+  await mkdir(root, { recursive: true });
+  await writeFile(
+    path.join(root, STEMS_MARKER),
+    JSON.stringify({ createdAt: new Date().toISOString(), note: 'SUB/WAVE stem cache root; stems are only written, backfilled and swept while this file is present' }) + '\n',
+  );
+}
+
+// Checks (and when allowed, establishes) the marker. One stat when the marker
+// is there; one readdir of the root only when it is missing.
+// `readOnly` (the doctor) reports the decision without writing the marker.
+export async function stemsRootStatus(opts: { prepare?: boolean; readOnly?: boolean } = {}): Promise<StemsRootStatus> {
+  const root = stemsRoot();
+  const markerPresent = await stat(path.join(root, STEMS_MARKER)).then(() => true, () => false);
+  let stemDirs = 0;
+  if (!markerPresent) {
+    try {
+      stemDirs = (await readdir(root)).filter(n => !n.startsWith('.')).length;
+    } catch { /* no root yet */ }
+  }
+  const action = stemsRootDecision({
+    markerPresent,
+    stemDirs,
+    stampedTracks: markerPresent || stemDirs > 0 ? 0 : stampedStemCount(),
+    prepare: opts.prepare === true,
+  });
+  if ((action === 'adopt' || action === 'create') && !opts.readOnly) {
+    try {
+      await writeMarker(root);
+    } catch (err) {
+      // Stem dirs on disk prove the share is mounted: a root that refuses the
+      // marker stays online, so the sweep still reports deletes it cannot do
+      // (#1257) instead of going quiet. The adoption is retried next time.
+      if (action === 'adopt') {
+        return {
+          online: true,
+          action,
+          message: `Stem cache: could not write the ${STEMS_MARKER} marker in ${root} (${(err as Error)?.message || err}); the cache stays in use, but an unmounted share can't be told from an empty one until the marker exists`,
+        };
+      }
+      // A new cache whose root can't be written: stem writes would fail the
+      // same way.
+      return {
+        online: false,
+        action: 'offline',
+        message: `Stem cache: cannot write the ${STEMS_MARKER} marker in ${root} (${(err as Error)?.message || err}); stems are off until it can be written`,
+      };
+    }
+  }
+  if (action === 'offline') {
+    return {
+      online: false,
+      action,
+      message:
+        `Stem cache: ${root} is empty and has no ${STEMS_MARKER} marker, but the library has stems recorded for some tracks. ` +
+        'If the stems share is not mounted, mount it; stems are not written, backfilled or swept until the marker is back. ' +
+        `To start an empty cache on purpose, create the file ${path.join(root, STEMS_MARKER)}.`,
+    };
+  }
+  return { online: action !== 'none', action };
 }
 
 // The operator's byte budget (settings.audio.stemCacheGb), floored at 1 GB so
@@ -171,7 +282,7 @@ export async function cachedTrackCount(): Promise<number> {
 // pass snapshots this to tell a rewrite from net-new growth (stemWriteDecision).
 export async function cachedTrackIdSet(): Promise<Set<string>> {
   try {
-    return new Set(await readdir(stemsRoot()));
+    return new Set((await readdir(stemsRoot())).filter(n => n !== STEMS_MARKER));
   } catch {
     return new Set(); // no cache dir yet
   }
@@ -254,7 +365,14 @@ export async function sweep(budget = budgetBytes()): Promise<{
   freedBytes: number;
   failedDirs: number;
   overBudgetBytes: number;
+  // Set when the sweep did nothing because the cache root has no marker (an
+  // unmounted share): the message says why.
+  offline?: string;
 }> {
+  const root = await stemsRootStatus();
+  if (!root.online) {
+    return { removed: 0, freedBytes: 0, failedDirs: 0, overBudgetBytes: 0, offline: root.message };
+  }
   const dirs = await scanDirs();
   let total = dirs.reduce((n, d) => n + d.bytes, 0);
   if (total <= budget) return { removed: 0, freedBytes: 0, failedDirs: 0, overBudgetBytes: 0 };
