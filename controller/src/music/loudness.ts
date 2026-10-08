@@ -43,6 +43,13 @@ export async function resolveGainDb(
     if (rg) {
       lufs = rg.lufs;
       peakDb = rg.peakDb;
+      // A tag with a gain but no trackPeak: borrow the measured peak for the
+      // headroom check rather than hold the boost at 0 (a boost needs a known
+      // peak). It covers only the analysis window, so it can under-read the
+      // file's real peak; the bus limiter stays the backstop for that, as it
+      // already is for a measured track. A source pinned to 'replaygain' keeps
+      // away from measurements entirely.
+      if (peakDb == null && source !== 'replaygain') peakDb = measuredPeak(track);
     }
   }
   if (lufs == null && source !== 'replaygain') {
@@ -74,6 +81,13 @@ export async function resolveGainDb(
     }
   }
   return gain;
+}
+
+function measuredPeak(track: LoudnessTrack): number | null {
+  if (typeof track.peakDb === 'number' && Number.isFinite(track.peakDb)) return track.peakDb;
+  if (!track.id) return null;
+  const rec = library.get(track.id);
+  return typeof rec?.peakDb === 'number' && Number.isFinite(rec.peakDb) ? rec.peakDb : null;
 }
 
 // Once per track per process: the drain and a stem render resolve the same
