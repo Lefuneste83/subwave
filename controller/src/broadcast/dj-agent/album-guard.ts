@@ -1,7 +1,7 @@
 // Apply album cooldown after the artist guard. A failed re-pick retains the original; this
 // preference never triggers pool rescue or loses a slot. #1485 FR 3, #618.
 
-import { artistRootKey, type CandidateLike } from '../../music/recency.js';
+import { artistRootIn, artistRootKey, type CandidateLike } from '../../music/recency.js';
 
 // How a candidate's album key is resolved. Caller-supplied so every lookup
 // stays at the call site; in production `music/album-facts.albumKeyFor`.
@@ -36,7 +36,7 @@ export function alternativeAlbumCandidates<T extends CandidateLike>(
 
   const fresh = base.filter(([, s]) => {
     const root = artistRootKey(s);
-    return !root || !avoidArtistRoots.has(root);
+    return !root || !artistRootIn(root, avoidArtistRoots);
   });
   if (!fresh.length) return { alt: new Map(base), dropped: 0, starved: true };
 
