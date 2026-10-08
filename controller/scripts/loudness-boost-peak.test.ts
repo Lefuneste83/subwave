@@ -6,7 +6,9 @@
 // maxBoostDb (up to 12 dB) into the bus limiter. Both a ReplayGain tag without
 // trackPeak and a measurement without peak_db reach that path. Now an unknown
 // peak holds the boost at 0 dB, cuts still apply, and the drain says once per
-// track why a quiet track was left where it was.
+// track why a quiet track was left where it was. A ReplayGain tag with a gain
+// but no trackPeak borrows the measured peak instead, unless the station pins
+// its loudness source to 'replaygain'.
 //
 // Offline: every track object carries its own replayGain key, and the library
 // is never loaded, so nothing reaches Subsonic or library.db.
@@ -80,4 +82,31 @@ test('nothing is reported when nothing was held', async () => {
   await loudness.resolveGainDb({ id: 'n5', replayGain: null, loudnessLufs: -24, peakDb: null }, onWarn); // cut-only station
   // With maxBoostDb 0 (n5) there was no boost to hold back either.
   assert.deepEqual(warnings, []);
+});
+
+// A ReplayGain tag with a gain but no trackPeak borrows the measured peak for
+// the headroom check, so the tag's whole-file loudness still levels the track.
+test('a ReplayGain tag without trackPeak borrows the measured peak', async () => {
+  // trackGain +6 → -24 LUFS wants +10; the measured peak -7 leaves 6 dB.
+  const gain = await loudness.resolveGainDb({ id: 'b1', replayGain: { trackGain: 6 }, loudnessLufs: -20, peakDb: -7 });
+  assert.equal(gain, 6, "the tag's loudness, the measured peak's headroom");
+});
+
+test("the tag's own trackPeak wins over the measured one", async () => {
+  // trackPeak 0.5 = -6.02 dBFS → 5 dB of headroom, not the measured -20's 10.
+  const gain = await loudness.resolveGainDb({
+    id: 'b2', replayGain: { trackGain: 6, trackPeak: 0.5 }, loudnessLufs: -20, peakDb: -20,
+  });
+  assert.equal(gain, 5);
+});
+
+test("source 'replaygain' does not borrow a measured peak", async () => {
+  await settings.update({ loudness: { source: 'replaygain' } });
+  const gain = await loudness.resolveGainDb({ id: 'b3', replayGain: { trackGain: 6 }, loudnessLufs: -20, peakDb: -7 });
+  assert.equal(gain, 0, 'no peak from the tag, measurements are off: no boost');
+});
+
+test('a borrowed peak never changes a cut', async () => {
+  const gain = await loudness.resolveGainDb({ id: 'b4', replayGain: { trackGain: -6 }, loudnessLufs: -30, peakDb: -0.1 });
+  assert.equal(gain, -2, "-18 - (-6) = -12 LUFS → -2 dB, from the tag");
 });
