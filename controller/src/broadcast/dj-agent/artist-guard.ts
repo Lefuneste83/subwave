@@ -3,7 +3,7 @@
 // this module owns which candidates a re-pick may choose from and whether the
 // guard fires at all, so both are testable without a model call.
 
-import { artistRootKey, type CandidateLike } from '../../music/recency.js';
+import { artistCreditsOverlap, artistRootIn, artistRootKey, type CandidateLike } from '../../music/recency.js';
 
 // Re-exported so the guard's tests read its comparison key from here rather
 // than reaching past into music/recency.
@@ -33,8 +33,8 @@ export function artistGuardCause(
   recentRoots: Set<string> = new Set(),
 ): ArtistGuardCause {
   if (!pickRoot) return null;
-  if (anchorRoot && pickRoot === anchorRoot) return 'onair';
-  return recentRoots.has(pickRoot) ? 'recent' : null;
+  if (anchorRoot && artistCreditsOverlap(pickRoot, anchorRoot)) return 'onair';
+  return artistRootIn(pickRoot, recentRoots) ? 'recent' : null;
 }
 
 export interface AlternativePool<T> {
@@ -58,13 +58,13 @@ export function alternativeCandidates<T extends CandidateLike>(
 ): AlternativePool<T> {
   const base = [...seen].filter(([, s]) => {
     const root = artistRootKey(s);
-    return !root || root !== avoidRoot;
+    return !root || !artistCreditsOverlap(root, avoidRoot);
   });
   if (!base.length || !recentRoots.size) return { alt: new Map(base), dropped: 0, starved: false };
 
   const fresh = base.filter(([, s]) => {
     const root = artistRootKey(s);
-    return !root || !recentRoots.has(root);
+    return !root || !artistRootIn(root, recentRoots);
   });
   // Every alternative is recently heard. Hand back the unnarrowed set: a repeat
   // one slot later is worse than a repeat five slots later.
