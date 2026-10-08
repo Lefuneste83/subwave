@@ -12,6 +12,43 @@
   independent. Operators who already reconfigured profiles under #1777 must
   mark those profiles before upgrading. See [upgrade and recovery steps](docs/multi-station.md#upgrading-existing-profiles).
 
+## [1.20.0](https://github.com/perminder-klair/subwave/compare/v1.19.0...v1.20.0) (2026-10-08)
+
+
+### Features
+
+* **booth:** carry recent booth turns across a show boundary ([#1690](https://github.com/perminder-klair/subwave/issues/1690)) ([#1808](https://github.com/perminder-klair/subwave/issues/1808)) ([9f7f675](https://github.com/perminder-klair/subwave/commit/9f7f6753a531312fbac35918462701b44f91ca03))
+* **controller:** let community catalog skills carry a feed ([#1828](https://github.com/perminder-klair/subwave/issues/1828)) ([d73eee2](https://github.com/perminder-klair/subwave/commit/d73eee262cdec1b5229a2eb45ff95a8d2f438bf4))
+* **transitions:** durable seam record in play history, Stats and History ([#1833](https://github.com/perminder-klair/subwave/issues/1833)) ([782936d](https://github.com/perminder-klair/subwave/commit/782936d2aab57aa3f49b55238b6489abc2d05910))
+
+
+### Bug Fixes
+
+* **controller:** update dependencies and preserve Express 5 compatibility ([#1824](https://github.com/perminder-klair/subwave/issues/1824)) ([9163616](https://github.com/perminder-klair/subwave/commit/9163616bee7b90bc58a95820dda59fd67117b597))
+* **debug:** move Failed track fetches card under DJ log ([#1834](https://github.com/perminder-klair/subwave/issues/1834)) ([4f4b47e](https://github.com/perminder-klair/subwave/commit/4f4b47ed4c1be0f5c8f20343425d06e9ba55482b))
+* **library:** never prune a library walk's unseen tracks blindly ([#1812](https://github.com/perminder-klair/subwave/issues/1812)) ([b16879e](https://github.com/perminder-klair/subwave/commit/b16879eeec868ea2b83e15887d999e6073c3bde7))
+* **liquidsoap:** air SFX stingers at unity gain ([#1689](https://github.com/perminder-klair/subwave/issues/1689)) ([#1807](https://github.com/perminder-klair/subwave/issues/1807)) ([4993932](https://github.com/perminder-klair/subwave/commit/49939323efcea588bdb386340d3512f4984ea89f))
+* **skills:** stand a feed skill down when nothing fresh is left ([#1835](https://github.com/perminder-klair/subwave/issues/1835)) ([e21f877](https://github.com/perminder-klair/subwave/commit/e21f8778bd05646568f51b5965fa6078c78bbfee)), closes [#1830](https://github.com/perminder-klair/subwave/issues/1830)
+* **stems:** don't treat an unmounted stems share as an empty cache ([#1813](https://github.com/perminder-klair/subwave/issues/1813)) ([bde10fa](https://github.com/perminder-klair/subwave/commit/bde10fa7e0d87941726025c4d1b59ac07017df52))
+* **transitions:** jingle seams, loop dropouts, chop level hole and effect-ledger bugs ([#1831](https://github.com/perminder-klair/subwave/issues/1831)) ([398fbd1](https://github.com/perminder-klair/subwave/commit/398fbd102fc02e7f8ade593670f05f57f3c45eb8))
+
+
+### Performance
+
+* **controller:** remove dead helpers and redundant discovery work ([#1826](https://github.com/perminder-klair/subwave/issues/1826)) ([fbfb3d1](https://github.com/perminder-klair/subwave/commit/fbfb3d1511c47329772edbe8c088b984a346cc8a))
+* **stems:** don't re-walk an unchanged stem cache every hour ([#1814](https://github.com/perminder-klair/subwave/issues/1814)) ([ae23984](https://github.com/perminder-klair/subwave/commit/ae23984978d86e6daada8e68b3604beb9e909943))
+* **stems:** measure stem dirs in parallel during a cache walk ([#1815](https://github.com/perminder-klair/subwave/issues/1815)) ([224ef59](https://github.com/perminder-klair/subwave/commit/224ef59cf626b5b483b92d28772bbe8ad1f5caa3))
+
+
+### Documentation
+
+* **liquidsoap:** record v1.18.0 validation results ([#1821](https://github.com/perminder-klair/subwave/issues/1821)) ([182c31b](https://github.com/perminder-klair/subwave/commit/182c31b5d081bb1789ed58ba3afd802b44af3117))
+
+
+### Refactors
+
+* **analyzer:** pure facet functions behind an unchanged analyze(), proven by a snapshot test ([#1799](https://github.com/perminder-klair/subwave/issues/1799)) ([5e92574](https://github.com/perminder-klair/subwave/commit/5e92574e4474474447d75f6e2a6fe4ed636113c5))
+
 ## [1.19.0](https://github.com/perminder-klair/subwave/compare/v1.18.0...v1.19.0) (2026-10-07)
 
 
