@@ -153,9 +153,14 @@ Relevant deployed commits:
 ### Frozen diagnostic harness
 
 `controller/scripts/leanings-eval.ts --experiment leanings` invokes the
-production Agentic schema, system prompt, reminder, and bounded tool loop with
+earlier single-pass diagnostic schema, system prompt, reminder, and bounded tool loop with
 isolated in-memory discovery fixtures. Candidate-specific expected traits stay
 outside the model’s input.
+
+These historical measurements predate the corrected `pickSystem` argument order.
+The treatment prompt then omitted the actual host preferences, so they do not
+measure the intended control versus Musical Leanings comparison. The current
+production counterfactual review is evaluated with `leanings:review-replay`.
 
 The local 48-call confirmation produced 8/16 close-call declarations, 0/8
 no-tie false positives, and 6/8 fixture-specific evidence matches. This is

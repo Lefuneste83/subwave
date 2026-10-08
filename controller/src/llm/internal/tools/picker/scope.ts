@@ -1,12 +1,5 @@
-// The picker's per-pick scope + the context every discovery tool runs against.
-//
-// Scope is ONE value on purpose: every constraint a pick runs under travels from
-// pickViaAgent (broadcast/dj-agent.ts) to the tools as a single `PickerScope`
-// that is never destructured into per-field lists along the way. A lock named in
-// one list and forgotten in another is neither a type error nor a crash — it
-// falls through to a null default and stops being enforced on the agent path
-// while the pool picker still honours it (#1300 FR 13, vocalLock). Adding a lock
-// means adding a field here; do not reintroduce a per-field hand-off.
+// Pass one PickerScope from pickViaSelectionRoute to every tool. Field-by-field handoffs
+// previously dropped vocalLock silently (#1300 FR 13); add constraints to this shape.
 
 import * as library from '../../../../music/library.js';
 import * as embeddings from '../../../../music/embeddings.js';
@@ -60,6 +53,12 @@ export interface PickerScope {
   // Ids from the show's excluded playlists, dropped from every tool's results so
   // the agent never sees a blocklisted track. null = no exclusions.
   excludedIds: Set<string> | null;
+  // Tracks listeners liked recently (likes.djFavourites — the likes.influenceDj
+  // opt-in, windowed and capped by likes.windowDays/maxTracks); registers the
+  // listenerFavourites tool. A preference source, never a lock: the tracks still
+  // pass every lock and recency guard in collect(). null on the request path,
+  // where the listener's own ask is the only steer.
+  listenerFavourites: Array<{ track: any; count: number }> | null;
   // The active sonic journey's waypoint vector. When present the
   // tracksTowardJourney tool is registered closing over it, so the agent sees
   // only the tracks near it.
@@ -87,6 +86,7 @@ const NO_SCOPE: PickerScope = {
   playlistLock: null,
   playlistTracks: null,
   excludedIds: null,
+  listenerFavourites: null,
   audioWaypoint: null,
   resolveReferences: false,
 };
@@ -152,7 +152,7 @@ export function buildPickerContext(scope: PickerScope): PickerContext {
     // with no match contributes nothing and emptyResult steers the model
     // elsewhere. Dead-air is guarded at wider scopes: a run with zero candidates
     // falls to the pool picker, and behind that the auto.m3u coast. The locks are
-    // pre-resolved and coverage-gated in pickViaAgent, so an un-analysed library
+    // pre-resolved and coverage-gated in pickViaSelectionRoute, so an un-analysed library
     // can't starve every tool for the whole show.
     //
     // Ordering is a freshness-biased shuffle (music/airing.ts): a KNN tool's
@@ -209,7 +209,7 @@ export function buildPickerContext(scope: PickerScope): PickerContext {
     rule: `Never invent a song id — only ids returned by a tool are valid picks. ${SEED_NOT_A_PICK_CLAUSE}`,
   });
 
-  // Index counts snapshotted once at tool-build time; pickViaAgent awaits
+  // Index counts snapshotted once at tool-build time; pickViaSelectionRoute awaits
   // library.load() first, so stats() never returns its empty-sentinel zeros
   // here. Tools whose backing index is empty are conditionally registered —
   // offering a dead tool spends the discovery call on a guaranteed-empty result.

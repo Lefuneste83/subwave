@@ -368,7 +368,7 @@ export default function Concepts() {
           you&rsquo;ve left that on. The DJ never hears about it.
         </p>
         <p>
-          Influence is opt-in, under Settings &rarr; Likes. Turned on, the most-liked
+          Influence is opt-in, under Settings &rarr; Listeners. Turned on, the most-liked
           tracks become one more signal available to Track Shortlist, capped like every
           other source &mdash; a weighted preference, never a lock, so the crowd can steer
           the pool without taking it over. Out of the box that means the ten most-liked

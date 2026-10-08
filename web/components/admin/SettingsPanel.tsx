@@ -2,7 +2,7 @@
 
 import type { ChangeEvent } from 'react';
 import { settingsForm } from './settings/form-state';
-import { atPath, samePath, sameForm, countLeafDiffs, dirtyPaths, ownsErrorPath, mergePatchErrors } from './settings/form-diff';
+import { atPath, samePath, sameForm, countLeafDiffs, dirtyPaths, restorePaths, ownsErrorPath, mergePatchErrors } from './settings/form-diff';
 import { archivesSavePayload, dangerSavePayload } from './settings/save-payload';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -43,16 +43,15 @@ import { Advanced, SectionChromeProvider } from './settings/section-chrome';
 import { SettingsSearch, type SettingsJump } from './settings/SettingsSearch';
 import { TtsSection } from './settings/TtsSection';
 import { DjBehaviourSection } from './settings/DjBehaviourSection';
-import { MusicSelectionSection } from './settings/MusicSelectionSection';
 import { LlmSection } from './settings/LlmSection';
 import { BrainSection } from './settings/BrainSection';
 import { SearchSection } from './settings/SearchSection';
 import { LibrarySection } from './settings/LibrarySection';
 import { StationSection } from './settings/StationSection';
 import { ThemeSection } from './settings/ThemeSection';
-import { ScrobbleSection } from './settings/ScrobbleSection';
-import { LikesSection } from './settings/LikesSection';
+import { ListenersSection } from './settings/ListenersSection';
 import { NavidromeSection } from './settings/NavidromeSection';
+import { MusicSelectionSection } from './settings/MusicSelectionSection';
 import {
   useSettingsMutation,
   useSettingsQuery,
@@ -114,20 +113,6 @@ const AAC_BITRATES = SETTINGS_AAC_BITRATES;
  */
 const JUMP_MAX_FRAMES = 60;
 
-// formKeys can be dotted paths (llm.trackSelection): discarding a section
-// restores each path, not its whole top-level branch.
-function setPath(target: Record<string, unknown>, path: string, value: unknown): void {
-  const keys = path.split('.');
-  let node = target;
-  for (const key of keys.slice(0, -1)) {
-    const current = node[key];
-    node = current && typeof current === 'object' && !Array.isArray(current)
-      ? current as Record<string, unknown>
-      : (node[key] = {} as Record<string, unknown>);
-  }
-  node[keys[keys.length - 1]!] = value;
-}
-
 export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabled?: boolean }) {
   const sections = useMemo(
     () => SECTIONS.filter(s => s.id !== 'brain' || djBrainEnabled),
@@ -180,11 +165,14 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
   // only the query changes.
   const searchParams = useSearchParams();
   useEffect(() => {
-    const s = searchParams.get('section');
-    if (s === 'jingles' || s === 'sfx' || s === 'beds') {
-      router.replace(`/admin/imaging?tab=${s}`);
+    const requested = searchParams.get('section');
+    if (requested === 'jingles' || requested === 'sfx' || requested === 'beds') {
+      router.replace(`/admin/imaging?tab=${requested}`);
       return;
     }
+    // Retired tab ids, so an old bookmark or doc link still lands somewhere.
+    const RENAMED: Record<string, SectionId> = { danger: 'broadcast', likes: 'listeners', scrobble: 'listeners' };
+    const s = requested && RENAMED[requested] ? RENAMED[requested] : requested;
     if (s === 'brain' && !djBrainEnabled) {
       setActiveSection('station');
       return;
@@ -317,7 +305,7 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
   };
 
   /**
-   * Archives and the danger zone used to carry a Save button per card — one for
+   * Archives and Broadcast & mixer used to carry a Save button per card — one for
    * the bitrate, one for the retention window, one for each stream mount. Each
    * now folds into the section's one save.
    *
@@ -331,7 +319,7 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
     if (form) saveBlock(archivesSavePayload(form));
   };
 
-  const saveDanger = () => {
+  const saveBroadcast = () => {
     if (form) saveBlock(dangerSavePayload(form));
   };
 
@@ -361,11 +349,7 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
   /** Roll this section's fields back to the last saved baseline, nothing else. */
   const discardSection = () => {
     if (!form || !baseline || !activeSpec) return;
-    const next = JSON.parse(JSON.stringify(form)) as Record<string, unknown>;
-    for (const key of activeSpec.formKeys) {
-      setPath(next, key, JSON.parse(JSON.stringify(atPath(baseline, key) ?? null)));
-    }
-    setForm(next as unknown as FormState);
+    setForm(restorePaths(form, baseline, activeSpec.formKeys));
     // The errors belonged to values that no longer exist — same ownership rule
     // the save path uses, so an unrelated section's message survives.
     setFieldErrors(prev => {
@@ -483,15 +467,6 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
         )}
         {!data && !err && <SkeletonForm fields={5} />}
 
-        {/* One save bar per section, sticky, and only while something is
-            unsaved. Each section's own SaveBar portals its note + button into
-            the slot below, so the wording, the patch and the error scoping
-            still belong to the section that knows them.
-
-            top-[3.25rem] clears AdminShell's own sticky header (top-0, ~49px
-            tall) rather than tucking under it like the section rail does — this
-            is the one strip that has to stay readable while the operator
-            scrolls a long section looking for what they changed. */}
         {sectionDirty && (
           <div className="sticky top-[3.25rem] z-30 grid gap-2.5 border border-vermilion bg-bg p-3 shadow-drawer">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -518,6 +493,12 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
             setForm(prev => (prev ? updater(prev) : prev));
           return (
           <>
+            {activeSection === 'selection' && (
+              <MusicSelectionSection
+                data={data} form={form} setForm={updateForm} busy={busy}
+                saveSettings={saveSettings} fieldErrors={fieldErrors}
+              />
+            )}
             {activeSection === 'tts' && data.tts && (
               <TtsSection
                 data={data} form={form} setForm={updateForm} busy={busy}
@@ -526,12 +507,6 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
             )}
             {activeSection === 'behaviour' && (
               <DjBehaviourSection
-                data={data} form={form} setForm={updateForm} busy={busy}
-                saveSettings={saveSettings} fieldErrors={fieldErrors}
-              />
-            )}
-            {activeSection === 'selection' && (
-              <MusicSelectionSection
                 data={data} form={form} setForm={updateForm} busy={busy}
                 saveSettings={saveSettings} fieldErrors={fieldErrors}
               />
@@ -575,23 +550,15 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
                 adminFetch={adminFetch}
               />
             )}
-            {activeSection === 'scrobble' && (
-              <ScrobbleSection
+            {activeSection === 'listeners' && (
+              <ListenersSection
                 data={data} form={form} setForm={updateForm} busy={busy}
                 saveSettings={saveSettings} fieldErrors={fieldErrors} adminFetch={adminFetch} refresh={refresh}
-              />
-            )}
-            {activeSection === 'likes' && (
-              <LikesSection
-                data={data} form={form} setForm={updateForm} busy={busy}
-                saveSettings={saveSettings} fieldErrors={fieldErrors}
               />
             )}
           </>
           );
         })()}
-        {/* Self-contained panels — each re-calls useAdminAuth and owns its
-            own data fetch, so they render outside the data && form guard. */}
         {activeSection === 'archives' && (
           <>
             <ArchivesPanel />
@@ -700,12 +667,12 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
           </>
         )}
         {activeSection === 'backup' && <BackupPanel />}
-        {activeSection === 'danger' && (
+        {activeSection === 'broadcast' && (
           <>
             <SectionHeader
-              eyebrow="danger zone"
-              title="Crossfade, stream control, and mixer restart."
-              sub="Crossfade is grouped here because it needs a mixer restart to apply. Stream stop and mixer restart both affect every current listener."
+              eyebrow="broadcast & mixer"
+              title="How the station sounds on every stream."
+              sub="Crossfade, ducking, transitions, levelling and the stream mounts. Most are read by the mixer at startup, so the save bar warns before a change that needs a restart. Stopping the stream and restarting the mixer affect every current listener and ask before they run."
               metrics={[
                 {
                   n: data?.streamOnAir == null ? '—' : data.streamOnAir ? 'on air' : 'off air',
@@ -737,8 +704,6 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
               <Card title="Idle pause" sub="silence the programme when nobody is listening">
                 <div className="field">
                   <Label>Pause when the room is empty</Label>
-                  {/* Seg + "after" + minutes + "min" + Save is wider than a
-                      phone card, so the row wraps below 640px. */}
                   <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
                     <Seg
                       options={[
@@ -949,8 +914,7 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
                       />
                       <span className="text-sm opacity-70">
                         GB &middot; holds ~
-                        {/* /25 mirrors the controller's stem-cache APPROX_TRACK_BYTES
-                            ceiling, /13 the field-measured average (#1257). */}
+                        {/* Track counts use the controller's 25 MB ceiling and the measured 13 MB average. */}
                         {Math.floor(
                           ((Number(form.transitions.stemCacheGb) || 15) * 1024) / 25,
                         ).toLocaleString('en-GB')}
@@ -1705,8 +1669,8 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
             <SaveBar
               note="Crossfade, the encoder settings and the listener buffer only reach the stream after a mixer restart. Idle pause, loudness, dead-air trim and the track-length cap apply live."
               busy={busy}
-              onSave={saveDanger}
-              saveLabel="Save danger zone"
+              onSave={saveBroadcast}
+              saveLabel="Save broadcast & mixer"
               errors={fieldErrors}
               ownedKeys={['crossfadeDuration', 'ducking', 'maxTrackSeconds', 'maxTrackLengthMode', 'fadeAtShowEnd', 'silenceTrim', 'transitions', 'audio', 'loudness', 'stream']}
             />

@@ -1,56 +1,11 @@
-// AI SDK tool library — wraps each on-offer skill's data tool (its tool.mjs)
-// for the segment-director agent (skills/_agent.js) to call before deciding
-// whether to air a between-track segment. The counterpart of the picker/ tool set
-// (music discovery): that set lets the DJ agent explore the library, these let
-// it look at the world.
-//
-// Built-in and custom skills run on identical footing: every cap that ships a
-// `toolFn` (loaded from its directory's tool.mjs by skills/loader.js) gets one
-// tool here, invoked as `toolFn(ctx, state, services, config, input)`:
-//   ctx      — the moment ({ time, weather, festival, dominantMood, clock })
-//   state    — dedup memory carried across ticks (seen headlines, last artist…)
-//   services — the curated station facade (search, library, play log, feeds…)
-//   config   — the skill's own frontmatter (e.g. news' feed / feedMaxItems)
-//   input    — the agent's arguments for the skill's declared `inputs` params
-//              (nullable strings; {} for the historical zero-arg tools)
-//
-// Every skill tool now lives in state/skills (built-ins seeded there on first
-// boot), so all of them run behind a hard timeout + try/catch — a slow or
-// throwing skill degrades to "no data" rather than hanging the tick. The
-// network-heavy built-ins (web-search, news RSS, on-this-day) must finish within
-// the timeout or that tick simply yields no segment.
+// Wrap each loaded skill tool as toolFn(ctx, state, services, config, input).
+// All skills run with a hard timeout and error recovery; failed tools return no data.
+// Built-ins and custom skills use the same state/skills loader path.
 
 import { tool } from 'ai';
 import { z } from 'zod';
 import { buildStationServices } from './station-services.js';
-
-// Stations seeded before a built-in tool changes retain their original tool.mjs.
-// Repair known no-evidence shapes here, so an upgrade never has to replace an
-// operator-owned skill file just to recover the Direct runtime's stand-down
-// contract.
-export function normalizeSegmentToolResult(cap: { kind?: unknown } | null | undefined, data: any): any {
-  if (String(cap?.kind || '') === 'news'
-      && data?.available === undefined
-      && Array.isArray(data?.headlines)
-      && data.headlines.length === 0) {
-    return { ...data, available: false };
-  }
-  // Older now-playing-dig and web-search tools accepted any search snippets as
-  // usable even when none named the current artist. At 09:55 BST this produced
-  // an empty answer plus unrelated results for “Missed the Boat”, then invited
-  // the Direct model to air “I'm not aware of any facts”. A title alone is not
-  // a safe relevance test — generic titles match unrelated pages — but the
-  // exact artist must appear in at least one retained snippet.
-  if ((String(cap?.kind || '') === 'now-playing-dig' || String(cap?.kind || '') === 'web-search')
-      && data?.available === undefined
-      && !String(data?.answer || '').trim()
-      && typeof data?.artist === 'string'
-      && Array.isArray(data?.sources)
-      && !data.sources.some((source: unknown) => String(source).toLocaleLowerCase().includes(data.artist.toLocaleLowerCase()))) {
-    return { ...data, available: false };
-  }
-  return data;
-}
+import { repairLegacySkillData } from '../../../skills/abstain-policy.js';
 
 // `onResult(kind, data)` reports what each tool handed back, including the
 // `{ error }` degradation. The forced segment path needs it because the AGENT
@@ -94,7 +49,7 @@ export function buildSegmentTools(
         // degraded shape too — a tool that threw is exactly the case the
         // grounding check exists for. A throwing observer must not turn a
         // usable tool result into a tool error.
-        data = normalizeSegmentToolResult(cap, data);
+        data = repairLegacySkillData(cap, data, input || {});
         try { onResult?.(cap.kind, data); } catch { /* observation is never fatal */ }
         return data;
       },
@@ -116,7 +71,7 @@ export async function fetchSegmentData(cap: any, ctx: any, state: any): Promise<
   const services = buildStationServices();
   try {
     const p = Promise.resolve(cap.toolFn(ctx, state, services, cap.config, {}));
-    return normalizeSegmentToolResult(cap, await withTimeout(p, 8000));
+    return repairLegacySkillData(cap, await withTimeout(p, 8000));
   } catch (err: any) {
     return { error: err?.message || String(err) };
   }

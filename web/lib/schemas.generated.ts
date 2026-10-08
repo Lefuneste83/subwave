@@ -1610,6 +1610,37 @@ export type PlaybackFailureHistory = z.output<typeof playbackFailureHistorySchem
 // with no ids, a patch that changes nothing, a generate with nothing to
 // generate from.
 
+export const playlistGenerationResultSchema = z.object({
+  tracks: z.array(z.object({
+    id: z.string(),
+    title: z.string(),
+    artist: z.string(),
+    album: z.string(),
+    durationSec: z.number(),
+    year: z.number().nullable(),
+    genre: z.string().nullable(),
+    energy: z.string().nullable(),
+    moods: z.array(z.string()),
+    instrumental: z.boolean().nullable(),
+  })),
+  name: z.string().optional(),
+  description: z.string().optional(),
+  degraded: z.boolean(),
+  reasons: z.array(z.string()),
+  poolSize: z.number(),
+  usedFallback: z.boolean(),
+});
+
+export const playlistGenerationStartSchema = z.object({ jobId: z.string().min(1) });
+
+export const playlistGenerationPollSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('running') }),
+  z.object({ status: z.literal('error'), error: z.string().optional() }),
+  z.object({ status: z.literal('done'), result: playlistGenerationResultSchema }),
+]);
+
+export type PlaylistGenerationResult = z.infer<typeof playlistGenerationResultSchema>;
+
 // The one cap a playlist name gets. It exists so an API caller can't store a
 // name the library list then has to render; the save modal's input runs the
 // same rule as an inline error rather than a silent maxLength truncation.
@@ -2723,6 +2754,29 @@ export const PICKER_ALBUM_HOURS_BOUNDS: SettingsNumericBound = { min: 0, max: 72
 // the per-show override — a mirrored module may import only zod, so the two are
 // separate declarations of one number and must move together.
 export const PICKER_MIN_TRACK_LENGTH_BOUNDS: SettingsNumericBound = { min: 0, max: 3600 };
+
+// Track Shortlist discovery passes (#1687): how many controller-run source
+// calls build one shortlist. Unlike the agent's discoverySteps, 0 has no
+// meaning here, because one pass is the smallest real shortlist.
+export const SHORTLIST_PASSES_BOUNDS: SettingsNumericBound = { min: 1, max: 5 };
+export const SHORTLIST_PASSES_DEFAULT = 3;
+
+// Which of the three model routes run an agent tool loop (#1687): track
+// selection, listener-request matching and segment delivery each choose
+// independently. The agent deadline, the context-window floor and the
+// output-cap warning apply to whichever of them are agentic, so every reader
+// (DJ Doc, the Music selection form) asks here instead of re-deriving it.
+// Absent values read as the shipped default, which is agentic for all three.
+export function settingsAgentRoutes(llm: {
+  trackSelection?: unknown;
+  requestMatching?: unknown;
+  segmentRuntime?: unknown;
+} | null | undefined) {
+  const picks = llm?.trackSelection !== 'shortlist';
+  const requests = llm?.requestMatching !== 'direct';
+  const segments = llm?.segmentRuntime !== 'direct';
+  return { picks, requests, segments, any: picks || requests || segments };
+}
 
 export const SETTINGS_STATION_DEFAULT_NAME = 'SUB/WAVE';
 export const SETTINGS_STATION_NAME_MAX = 80;

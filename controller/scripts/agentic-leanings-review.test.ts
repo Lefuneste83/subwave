@@ -15,14 +15,19 @@ const {
   NO_AGENTIC_LEANINGS_INFLUENCE,
 } = await import('../src/broadcast/dj-agent/schemas.js');
 const {
+  agenticDiscoverySelectionReason,
+  agenticSelectionReason,
   agenticLeaningsPhrases,
+  agenticLeaningsSources,
   agenticLeaningsSelectionReason,
   compactAgenticReviewCandidate,
+  eligibleAgenticLeanings,
   resolveAgenticLeaningsUsage,
   selectAgenticReviewCandidates,
   validateAgenticLeaningsReplacement,
+  verifiedAgenticReason,
 } = await import('../src/broadcast/dj-agent/leanings-review.js');
-const { agenticDiscoverySelectionReason, agenticSelectionReason, shortlistReasonForLeanings } = await import('../src/music/dj-pick.js');
+const { shortlistReasonForLeanings } = await import('../src/broadcast/dj-agent/shortlist-pick.js');
 
 const leaningsOptions = ['warm voices', 'strong melodies'];
 const schema = agenticLeaningsReviewSchema(['alternative', 'preliminary'], leaningsOptions, 'preliminary');
@@ -86,6 +91,16 @@ assert.deepEqual(agenticLeaningsPhrases({
   guest: null,
 }), ['electronic music', 'synth-pop', 'electro', 'house', 'techno', 'trip-hop', 'big beat', 'IDM', 'leftfield electronica', 'distinctive production', 'unusual textures', 'deeper catalogue discoveries']);
 assert.deepEqual(agenticLeaningsPhrases({ host: 'Warm voices, patient dub and deeper cuts.', guest: null }), ['Warm voices', 'patient dub', 'deeper cuts']);
+const sourcedLeanings = agenticLeaningsSources({
+  host: 'Favour electronic music and patient dub.',
+  guest: { guest: { name: 'Carrie Marshall' }, musicalLeanings: 'Favour angular guitar and post-punk.' },
+}, 'Mara Vex');
+assert.deepEqual(sourcedLeanings, [
+  { phrase: 'electronic music', source: 'host', ownerName: 'Mara Vex' },
+  { phrase: 'patient dub', source: 'host', ownerName: 'Mara Vex' },
+  { phrase: 'angular guitar', source: 'guest', ownerName: 'Carrie Marshall' },
+  { phrase: 'post-punk', source: 'guest', ownerName: 'Carrie Marshall' },
+]);
 
 const baselineCandidate = { id: 'baseline', energy: 'medium', moods: ['reflective'], genre: 'Electronic', bpm: 120, key: '8A', instrumental: false };
 const candidatePool = [
@@ -106,6 +121,16 @@ const profileMatchPool = [
 assert.ok(
   selectAgenticReviewCandidates(baselineCandidate, profileMatchPool, ['synth-pop'], 5).some((candidate) => candidate.id === 'profile-match'),
   'the compact review reserves room for an exact metadata-grounded profile match',
+);
+assert.deepEqual(
+  eligibleAgenticLeanings(baselineCandidate, candidatePool, sourcedLeanings).map(({ source }) => source),
+  ['host', 'host'],
+  'a viable host-supported choice excludes secondary guest preferences from the review',
+);
+assert.deepEqual(
+  eligibleAgenticLeanings({ ...baselineCandidate, genre: 'Metal' }, [{ ...baselineCandidate, id: 'guest-match', genre: 'Post-Punk' }], sourcedLeanings).map(({ source }) => source),
+  ['host', 'host', 'guest', 'guest'],
+  'guest preferences remain available when the host has no supported near-flow option',
 );
 assert.deepEqual(compactAgenticReviewCandidate({ ...baselineCandidate, album: 'omitted', duration_sec: 300 }), baselineCandidate,
   'the review payload drops irrelevant token-heavy metadata');
@@ -263,14 +288,29 @@ assert.equal(
 );
 const djTasteReason = 'Magazine — Burst: its wiry post-punk guitars sharpen the transition while matching Mara Vex’s taste for angular, melodic records.';
 assert.equal(
+  verifiedAgenticReason(djTasteReason, true, { artist: 'Magazine', title: 'Burst' }),
+  djTasteReason,
+  'a verified Agentic replacement preserves the natural DJ reference',
+);
+assert.equal(
   shortlistReasonForLeanings(djTasteReason, true, { artist: 'Magazine', title: 'Burst' }),
   djTasteReason,
-  'a verified replacement preserves the natural DJ reference',
+  'a verified Shortlist replacement preserves the natural DJ reference',
+);
+const attributedReason = agenticLeaningsSelectionReason({ replacement: { artist: 'Magazine', title: 'Burst' }, djName: 'Mara Vex', leaningsOwnerName: 'Carrie Marshall', basis: 'post-punk', musicalReason: 'its wiry guitars add a taut but melodic turn to the sequence' });
+assert.match(attributedReason, /Mara Vex chose/);
+assert.match(attributedReason, /Carrie Marshall’s taste for post-punk/);
+assert.doesNotMatch(verifiedAgenticReason(attributedReason, false, { artist: 'Magazine', title: 'Burst' }), /Carrie Marshall|taste/i,
+  'unverified or guard-overridden reasons cannot retain host or guest preference attribution');
+assert.doesNotMatch(
+  verifiedAgenticReason(djTasteReason, false, { artist: 'Magazine', title: 'Burst' }),
+  /Mara Vex|taste/i,
+  'a kept or guard-overridden Agentic choice strips the DJ preference reference',
 );
 assert.doesNotMatch(
   shortlistReasonForLeanings(djTasteReason, false, { artist: 'Magazine', title: 'Burst' }),
   /Mara Vex|taste/i,
-  'a kept or guard-overridden choice strips the DJ preference reference',
+  'a kept or guard-overridden Shortlist choice strips the DJ preference reference',
 );
 
 const changedAndQueued = {
@@ -295,13 +335,14 @@ const basisSchemaSource = schemaSource.slice(basisSchemaStart, basisSchemaEnd);
 assert.match(basisSchemaSource, /copy exactly one supplied leaningsOptions phrase/i);
 assert.doesNotMatch(basisSchemaSource, /warm voices|records that reveal themselves gradually/i,
   'profile phrases are supplied dynamically rather than seeded examples');
-const pickStart = agentSource.indexOf('async function pickViaAgent');
-const pickEnd = agentSource.indexOf('\nasync function ', pickStart + 1);
+const passSource = readFileSync(new URL('../src/broadcast/dj-agent/leanings-pass.ts', import.meta.url), 'utf8');
+const pickStart = agentSource.indexOf('async function pickViaSelectionRoute');
+const pickEnd = agentSource.indexOf('\nfunction speechClockContext', pickStart);
+assert.ok(pickStart >= 0 && pickEnd > pickStart, 'the selection route must be sliced to its own end');
 const pickSource = agentSource.slice(pickStart, pickEnd);
-const agenticReviewBlockAt = pickSource.indexOf('if (!useShortlist && agentPickResolution)');
-const preliminaryAt = pickSource.indexOf('const preliminaryId =', agenticReviewBlockAt);
-const reviewAt = pickSource.indexOf('schema: agenticLeaningsReviewSchema', agenticReviewBlockAt);
-const guardsAt = pickSource.indexOf('await runArtistGuard');
+const preliminaryAt = pickSource.indexOf('agentPreliminaryId = String(song.id)');
+const reviewAt = pickSource.indexOf('await runLeaningsReview(');
+const guardsAt = pickSource.indexOf('await runArtistGuard<any>');
 const enqueueAt = pickSource.indexOf('const queued = await enqueuePick');
 const resolutionAt = pickSource.indexOf('agentPickResolution.usedMusicalLeanings = resolveAgenticLeaningsUsage');
 assert.ok(preliminaryAt >= 0 && preliminaryAt < reviewAt,
@@ -312,14 +353,18 @@ assert.ok(enqueueAt < resolutionAt,
   'the controller must not report Leanings influence until enqueue has resolved');
 assert.match(pickSource, /kind: 'djAgentLeaningsReview'/,
   'the separate review has a purpose-specific telemetry name');
-assert.match(pickSource, /selectAgenticReviewCandidates\(song, \[\.\.\.extras\.seen\.values\(\)\], leaningsOptions\)/,
+assert.match(pickSource, /verifiedAgenticReason\(agenticSelectionReason\(replacement, leaningsReason\), true, replacement\)/,
+  'an Agentic replacement is worded by the Agentic verifier');
+// The shared pass (pinned on behaviour in leanings-pass.test.ts) is where the
+// compact review set, the review-only system prompt and source ownership live.
+assert.match(passSource, /selectAgenticReviewCandidates\(song, candidates, leaningsOptions\)/,
   'the review receives a small deterministic set around the real Leanings-blind baseline');
-assert.match(pickSource.slice(reviewAt - 900, reviewAt + 300), /system: agenticLeaningsReviewSystem\(\)/,
+assert.match(passSource, /system: agenticLeaningsReviewSystem\(\)/,
   'the review avoids the full on-air persona system prompt');
-assert.match(pickSource, /temperature: 0/,
-  'the private counterfactual review uses deterministic sampling where the provider supports it');
-assert.match(pickSource, /agenticLeaningsSelectionReason/,
+assert.match(passSource, /agenticLeaningsSelectionReason/,
   'the controller builds the displayed reason from verified identity and exact evidence');
+assert.match(passSource, /eligibleAgenticLeanings/,
+  'host preferences take priority over guest preferences when their evidence is viable');
 
 const finalReasonAt = pickSource.indexOf('// The Shortlist model\'s note');
 const agentReasonAt = pickSource.indexOf('} else if (agentPickResolution)', finalReasonAt);
@@ -329,7 +374,7 @@ const agentReasonBlock = pickSource.slice(agentReasonAt, finalReasonEnd);
 assert.match(shortlistReasonBlock, /shortlistClauseSelectionReason\(song, object\.musicalReason\)/,
   'Shortlist final reasons are rebuilt from a model-written musical clause and verified identity');
 assert.doesNotMatch(shortlistReasonBlock, /agenticSelectionReason/);
-assert.match(agentReasonBlock, /agenticSelectionReason\(song, object\.reason\)/,
+assert.match(agentReasonBlock, /verifiedAgenticReason\(agenticSelectionReason\(song, object\.reason\)/,
   'Agentic final reasons use the Agentic verifier and fallback wording');
 assert.doesNotMatch(agentReasonBlock, /shortlistSelectionReason/);
 

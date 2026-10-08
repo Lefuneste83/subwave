@@ -1,5 +1,7 @@
 'use client';
 
+import { LLM_PROVIDER_FORM_KEYS } from './registry';
+
 import type { ChangeEvent } from 'react';
 import { useEffect, useState } from 'react';
 import { notify, errorMessage } from '../../../lib/notify';
@@ -18,13 +20,10 @@ import { ModelCombobox } from '../llm/ModelCombobox';
 import { LLM_ENV_VARS, llmProviderLabel } from '../llm/providerMeta';
 import { Advanced } from './section-chrome';
 import {
-  SectionHeader, SaveBar, KeyStatus, KeyTestResult, KEY_HINTS,
+  SectionHeader, SaveBar, KeyStatus, KeyTestResult, KEY_HINTS, NowBanner,
   headerMap,
   type SectionProps, type LlmHeaderRow,
 } from './shared';
-// The floor's ceiling and the custom-header grammar, from the same schema
-// module the server bounds-checks against — a hardcoded copy here is a client
-// hint that can disagree with the save it is meant to pre-empt.
 import {
   LLM_HEADER_NAME_RE,
   LLM_HEADER_VALUE_RE,
@@ -357,21 +356,11 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
         compatibleMode: form.llm.compatibleMode,
         reasoning: form.llm.reasoning,
         toolChoice: form.llm.toolChoice,
-        pickerAgent: form.llm.pickerAgent,
-        trackSelection: form.llm.trackSelection,
-        shortlistPasses: form.llm.shortlistPasses,
-        requestMatching: form.llm.requestMatching,
-        segmentRuntime: form.llm.segmentRuntime,
-        noRepeatWindow: Math.max(0, parseInt(form.llm.noRepeatWindow, 10) || 0),
-        artistVarietyWindow: Math.max(0, parseInt(form.llm.artistVarietyWindow, 10) || 0),
-        requestWebResolve: form.llm.requestWebResolve,
-        agentTimeoutMs: form.llm.agentTimeoutMs,
         pauseWhenEmpty: form.llm.pauseWhenEmpty,
         dailyTokenCap: form.llm.dailyTokenCap,
         budgetSoftPct: form.llm.budgetSoftPct,
         exemptRequests: form.llm.exemptRequests,
         maxOutputTokens: form.llm.maxOutputTokens,
-        discoverySteps: form.llm.discoverySteps,
         geminiSafety: { ...form.llm.geminiSafety },
         ...(INLINE_KEY_PROVIDERS.includes(activeProvider) && (compatKeyInput.trim() || resetCompatKey)
           ? { apiKey: compatKeyInput.trim() }
@@ -393,13 +382,6 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
             ? { apiKey: compatFallbackKeyInput.trim() }
             : {}),
         },
-      },
-      // Its own top-level key, not part of `llm`: the album cooldown is read by
-      // the stateless pool picker too, so it is picking config rather than LLM
-      // config. It rides in the same PATCH because it is edited on this card.
-      picker: {
-        albumHours: Math.max(0, parseFloat(form.picker.albumHours) || 0),
-        minTrackLengthSeconds: Math.max(0, parseInt(form.picker.minTrackLengthSeconds, 10) || 0),
       },
     });
     // Save API keys if typed — these go to secrets.env, not settings.json
@@ -442,19 +424,11 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
 
       <Card title="Provider" sub="active routing">
         <div className="grid gap-[18px]">
-          <div className="flex items-start gap-2.5 border border-[var(--accent)] bg-[var(--ink-softer)] p-3">
-            <span className="mt-1 size-1.5 flex-none rounded-full bg-vermilion" />
-            <div className="grid min-w-0 gap-0.5">
-              <span className="text-[11px] font-bold tracking-[0.12em] text-vermilion uppercase">
-                Routing now · {llmProviderLabel(activeProvider)}
-              </span>
-              <span className="text-[14px] leading-[1.5] text-muted">
-                {activeModel
-                  ? <>Model <code>{activeModel}</code>, every LLM call goes here. {llmDirty ? 'Your edits below aren’t live until you Save.' : 'This is the saved, running config.'}</>
-                  : <>No model is set for this provider yet.</>}
-              </span>
-            </div>
-          </div>
+          <NowBanner label={<>Routing now · {llmProviderLabel(activeProvider)}</>}>
+            {activeModel
+              ? <>Model <code>{activeModel}</code>, every LLM call goes here. {llmDirty ? 'Your edits below aren’t live until you Save.' : 'This is the saved, running config.'}</>
+              : <>No model is set for this provider yet.</>}
+          </NowBanner>
 
           <div className="field">
             <div className="flex items-center gap-2">
@@ -528,6 +502,9 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
                 <Btn onClick={() => { setCompatKeyInput(''); setResetCompatKey(true); setForm(f => ({ ...f, llm: { ...f.llm, compatibleMode: 'hosted', headers: [], providerBaseUrls: { ...f.llm.providerBaseUrls, 'openai-compatible': '' } } })); }}>
                   Use Azure OpenAI v1
                 </Btn>
+                <Btn onClick={() => { setCompatKeyInput(''); setResetCompatKey(true); setForm(f => ({ ...f, llm: { ...f.llm, compatibleMode: 'hosted', headers: [], providerBaseUrls: { ...f.llm.providerBaseUrls, 'openai-compatible': 'https://api.mistral.ai/v1' } } })); }}>
+                  Use Mistral
+                </Btn>
               </div>
               <Input
                 value={form.llm.providerBaseUrls['openai-compatible'] ?? ''}
@@ -542,7 +519,9 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
                 <code> https://YOUR-RESOURCE.openai.azure.com/openai/v1</code>,
                 then add an <code>api-key</code> custom header below and enter the
                 deployment name as the model. The Atlas preset fills its URL;
-                enter your key in the Bearer token field. The URL must be
+                enter your key in the Bearer token field. The Mistral preset
+                fills <code>https://api.mistral.ai/v1</code>; enter your Mistral
+                API key in the Bearer token field. The URL must be
                 reachable from the controller container. A preset clears the
                 previous custom headers and saved compatible-provider Bearer
                 token on Save; primary and backup share that token.
@@ -805,7 +784,7 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
         </div>
       </Card>
 
-      <Advanced note="tuning, the fallback chain, the picker and the daily budget">
+      <Advanced note="tuning, the fallback chain and the daily budget">
       <Card title="Fallback" sub="backup when the primary is offline">
         <div className="grid gap-[18px]">
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto] sm:items-center sm:gap-4">
@@ -1342,7 +1321,7 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
         onSave={save}
         saveLabel="Save LLM provider"
         errors={fieldErrors}
-        ownedKeys={['llm']}
+        ownedKeys={LLM_PROVIDER_FORM_KEYS}
         // All four key boxes are component-local — the panel diffs FormState
         // and cannot see them, so a pasted key alone would leave the section
         // "clean" and unmount the very button that saves it. The managed pair
@@ -1353,8 +1332,6 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
         )}
       />
 
-      {/* The SAFE outcome (keep the embedding pin) is the default; only the explicit
-          confirm re-embeds on the new provider. */}
       <V3AlertDialog
         open={embedPinNotice != null}
         onOpenChange={(o) => { if (!o) setEmbedPinNotice(null); }}

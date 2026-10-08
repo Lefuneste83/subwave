@@ -1,27 +1,40 @@
 // Offline replay for the compact Agentic Leanings review.
 //
 // The fixture contains no queue/session state and this script performs no
-// writes. Each iteration rotates discovery insertion order before building the
+// station-state writes. Telemetry is isolated in disposable state. Each
+// iteration rotates discovery insertion order before building the
 // deterministic compact set, making candidate-order bias visible alongside the
 // model's selected id and exact evidence phrase.
 
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
-import * as settings from '../src/settings.js';
-import { djObject } from '../src/llm/sdk.js';
-import {
+import { copyFileSync, existsSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { resolveActiveStationDir } from '../src/stations/resolve.js';
+
+// config.ts captures state at import time and can migrate station files. Read
+// only the active model settings before redirecting all controller imports.
+const sourceRoot = process.env.STATE_DIR || resolve(dirname(fileURLToPath(import.meta.url)), '../../state');
+const sourceSettings = join(resolveActiveStationDir(sourceRoot), 'settings.json');
+const replayStateDir = mkdtempSync(join(tmpdir(), 'subwave-leanings-replay-'));
+if (existsSync(sourceSettings)) copyFileSync(sourceSettings, join(replayStateDir, 'settings.json'));
+process.env.STATE_DIR = replayStateDir;
+const settings = await import('../src/settings.js');
+const { djObject } = await import('../src/llm/sdk.js');
+const {
   agenticLeaningsReviewPrompt,
   agenticLeaningsReviewSchema,
   agenticLeaningsReviewSystem,
   NO_AGENTIC_LEANINGS_INFLUENCE,
-} from '../src/broadcast/dj-agent/schemas.js';
-import {
-  agenticLeaningsPhrases,
+} = await import('../src/broadcast/dj-agent/schemas.js');
+const {
+  agenticLeaningsSources,
   agenticLeaningsSelectionReason,
   compactAgenticReviewCandidate,
   selectAgenticReviewCandidates,
   validateAgenticLeaningsReplacement,
-} from '../src/broadcast/dj-agent/leanings-review.js';
+} = await import('../src/broadcast/dj-agent/leanings-review.js');
 
 type ReplayFixture = {
   name: string;
@@ -50,12 +63,14 @@ async function main() {
   }
 
   const editorialLeanings = { host: fixture.musicalLeanings, guest: null };
-  const leaningsOptions = agenticLeaningsPhrases(editorialLeanings);
+  const leaningsSources = agenticLeaningsSources(editorialLeanings, fixture.djName);
+  const leaningsOptions = leaningsSources.map(({ phrase }) => phrase);
   const allCandidates = [fixture.baseline, ...fixture.candidates.filter((candidate) => candidate.id !== fixture.baseline.id)];
   let stableCandidateIds: string[] | null = null;
   let expected = 0;
 
   console.log(`\n=== Compact Agentic Leanings replay: ${fixture.name} × ${iterations} ===`);
+  console.log(`Isolated STATE_DIR: ${replayStateDir}`);
   console.log(`Leanings options: ${leaningsOptions.join(' | ')}`);
   for (let run = 0; run < iterations; run += 1) {
     const rotated = [...allCandidates.slice(run % allCandidates.length), ...allCandidates.slice(0, run % allCandidates.length)];
@@ -72,6 +87,7 @@ async function main() {
         baseline: compact[0],
         challengers: compact.slice(1),
         leaningsOptions,
+        leaningsSources,
         context: { currentTrack: fixture.currentTrack ?? null, djName: fixture.djName },
       }),
       schema: agenticLeaningsReviewSchema(candidateIds, leaningsOptions, fixture.baseline.id),

@@ -7,6 +7,11 @@
 
 import { bpmCompat, keyCompat } from '../../music/mix.js';
 
+// What modelTolerant writes when a review or Shortlist pick returns an
+// unusable musicalReason. It must never reach the Booth as if it were prose,
+// so every reason builder treats it as absent.
+export const MUSICAL_REASON_UNAVAILABLE = '[musical reason unavailable]';
+
 export type AgenticTrackRef = {
   id: string;
   title: string | null;
@@ -23,7 +28,11 @@ export type AgenticLeaningsReviewRejection =
   | 'not-flow-tie'
   | 'weak-musical-reason';
 
-export type AgenticPickResolution = {
+// One settled record of a pick for Debug and the event log, shared by both
+// selection routes so a field added for one cannot silently go missing from
+// the other. It rides the LLM call records by reference and is filled in only
+// after the guards and enqueue.
+export type PickResolution = {
   preliminary?: AgenticTrackRef;
   leaningsReview?: {
     outcome: AgenticLeaningsReviewOutcome;
@@ -34,6 +43,8 @@ export type AgenticPickResolution = {
     reviewedSelectedId?: string | null;
     candidateIds?: string[];
     leaningsOptions?: string[];
+    leaningsSources?: AgenticLeaningsOption[];
+    leaningsSource?: 'host' | 'guest' | null;
     proposedReplacementId?: string | null;
     rejectionReason?: AgenticLeaningsReviewRejection | null;
   };
@@ -42,7 +53,10 @@ export type AgenticPickResolution = {
   reason?: string | null;
   queued?: boolean;
   usedMusicalLeanings?: boolean;
+  rejectionReason?: AgenticLeaningsReviewRejection | 'queue-collision' | 'pool-rescue' | null;
 };
+
+export type AgenticPickResolution = PickResolution;
 
 export function agenticTrackRef(song: { id: unknown; title?: unknown; artist?: unknown }): AgenticTrackRef {
   return {
@@ -50,6 +64,77 @@ export function agenticTrackRef(song: { id: unknown; title?: unknown; artist?: u
     title: typeof song.title === 'string' ? song.title : null,
     artist: typeof song.artist === 'string' ? song.artist : null,
   };
+}
+
+function identityComparable(value: unknown): string {
+  return String(value ?? '')
+    .normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    .replace(/\bfeaturing\b/g, 'feat').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function trimDanglingEnding(value: string): string {
+  return value.replace(/\s*[,;:]\s*(?:and|or|but)?\s*$/i, '').replace(/\s+(?:and|or|but)\s*$/i, '').trim();
+}
+
+// Agentic reasons are verified against the final track at the queue boundary.
+// This keeps useful model variation while preventing a guard replacement from
+// inheriting another track's explanation or Shortlist-specific wording.
+export function agenticSelectionReason(track: any, reason: unknown): string {
+  const titleRaw = typeof track?.title === 'string' ? track.title.trim() : '';
+  const artistRaw = typeof track?.artist === 'string' ? track.artist.trim() : '';
+  const title = identityComparable(titleRaw);
+  const artist = identityComparable(artistRaw);
+  const note = identityComparable(reason);
+  if (note && (!title || note.includes(title)) && (!artist || note.includes(artist))) return String(reason).trim();
+
+  const raw = typeof reason === 'string' ? trimDanglingEnding(reason.replace(/\s+/g, ' ')) : '';
+  if (raw && titleRaw && artistRaw && artist && !note.includes(title)) {
+    const remainder = raw.replace(new RegExp(`^${escapeRegExp(artistRaw)}\\s*[-—,:]?\\s*`, 'i'), '').trim();
+    if (/^(?:fits|works|brings|keeps|matches|follows|continues|adds|carries|suits|makes|offers)\b/i.test(remainder)) {
+      return `“${titleRaw}” by ${artistRaw} — ${/[.!?]$/.test(remainder) ? remainder : `${remainder}.`}`;
+    }
+  }
+  const credited = titleRaw && artistRaw ? `“${titleRaw}” by ${artistRaw}` : titleRaw ? `“${titleRaw}”` : artistRaw ? `A track by ${artistRaw}` : '';
+  return credited ? `${credited} offers a strong musical fit with the current flow.` : 'Selected for its strong musical fit with the current flow.';
+}
+
+const QUEUE_LANGUAGE = /\b(?:next\s+up|up\s+next|coming\s+up|we(?:'|’)re\s+playing|we\s+have)\b/i;
+const LEANINGS_REFERENCE = /\b(?:reflecting\b.*\btaste\s+for|(?:musical\s+)?leanings?|broad\s+alternative\s+taste|(?:dj|host)(?:['’]s)?\s+(?:musical\s+)?(?:taste|tastes|preference|preferences|favo(?:u)?rites?)|(?:my|his|her|their)\s+(?:musical\s+)?(?:taste|tastes|preference|preferences)|[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}['’](?:s)?\s+(?:musical\s+)?(?:taste|tastes|preference|preferences|favo(?:u)?rites?))\b/i;
+
+function usableAgenticReason(reason: unknown, song: { artist?: unknown; title?: unknown }): string {
+  const note = typeof reason === 'string' ? reason.replace(/\s+/g, ' ').trim() : '';
+  if (note.length >= 24 && !QUEUE_LANGUAGE.test(note) && note !== '[selection note unavailable]') return note;
+  const artist = typeof song.artist === 'string' && song.artist.trim() ? song.artist.trim() : 'This artist';
+  const title = typeof song.title === 'string' && song.title.trim() ? song.title.trim() : 'this track';
+  return `${artist} — ${title}: selected for its fit with the current musical flow.`;
+}
+
+export function agenticDiscoverySelectionReason(track: any, reason: unknown): string {
+  const raw = typeof reason === 'string' ? reason.replace(/\s+/g, ' ').trim() : '';
+  const looksLikeNamedIdentity = /[“”"]|\b[\p{Lu}][\p{L}’'-]+(?:\s+[\p{Lu}][\p{L}’'-]+)+\b/u.test(raw);
+  if (raw.length >= 24 && !QUEUE_LANGUAGE.test(raw) && !looksLikeNamedIdentity) {
+    const title = typeof track?.title === 'string' ? track.title.trim() : '';
+    const artist = typeof track?.artist === 'string' ? track.artist.trim() : '';
+    const credited = title && artist ? `“${title}” by ${artist}` : title ? `“${title}”` : artist ? `A track by ${artist}` : '';
+    if (credited) return `${credited} — ${/[.!?]$/.test(raw) ? raw : `${raw}.`}`;
+  }
+  return agenticSelectionReason(track, reason);
+}
+
+export function agenticReasonMentionsLeanings(reason: unknown): boolean {
+  return LEANINGS_REFERENCE.test(String(reason ?? ''));
+}
+
+export function leaningsBlindPickReason(reason: unknown, song: { artist?: unknown; title?: unknown }): string {
+  return agenticReasonMentionsLeanings(reason) ? usableAgenticReason('', song) : String(reason ?? '');
+}
+
+export function verifiedAgenticReason(reason: unknown, usedMusicalLeanings: boolean, song: { artist?: unknown; title?: unknown }): string {
+  return usableAgenticReason(usedMusicalLeanings ? reason : leaningsBlindPickReason(reason, song), song);
 }
 
 function comparable(value: unknown): string {
@@ -69,52 +154,58 @@ function cleanLeaningsPhrase(value: string): string | null {
     .replace(/\s+/g, ' ')
     .replace(/^[,;:\s]+|[,;:\s]+$/g, '')
     .trim();
-  if ((phrase.length < 5 && !/^[A-Z0-9]{2,5}$/.test(phrase)) || phrase.length > 100) return null;
+  if (phrase.length < 2 || phrase.length > 100) return null;
   const words = phrase.split(/\s+/);
   if (words.length > 10) return null;
-  // A single genre such as "house" or "rock" is broad but still useful when
-  // the operator explicitly wrote it and the selected candidate carries that
-  // exact genre. Drop only nouns that cannot describe a musical preference.
   if (words.length === 1 && UNHELPFUL_SINGLE_WORDS.has(phrase.toLocaleLowerCase('en-GB'))) return null;
   return phrase;
 }
 
-// Turn the operator's prose into a small closed set of exact phrases. The
-// review model is told to copy from that set rather than inventing free text,
-// and the controller enforces the set after generation, removing
-// the two weak-model failure modes observed in live runs: null evidence beside
-// a changed id, and generic mood wording invented as preference evidence.
-export function agenticLeaningsPhrases(editorialLeanings: {
-  host?: string | null;
-  guest?: { musicalLeanings?: string | null } | null;
-} | null): string[] {
-  const sources = [editorialLeanings?.host, editorialLeanings?.guest?.musicalLeanings]
-    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+export type AgenticLeaningsOption = {
+  phrase: string;
+  source: 'host' | 'guest';
+  ownerName: string | null;
+};
+
+function phrasesFromSource(source: string): string[] {
   const phrases: string[] = [];
-  for (const source of sources) {
-    for (const rawSentence of source.split(/[.!?;]+/)) {
-      const sentence = rawSentence.trim();
-      const trigger = LEANINGS_TRIGGER.exec(sentence);
-      if (!trigger) continue;
-      const preference = sentence.slice((trigger.index ?? 0) + trigger[0].length).trim();
-      for (const rawPart of preference.split(/\s*,\s*|\s+and\s+|\s+alongside\s+|\s+across\s+/i)) {
-        const phrase = cleanLeaningsPhrase(rawPart);
-        if (phrase && !phrases.some((item) => comparable(item) === comparable(phrase))) phrases.push(phrase);
-      }
+  for (const rawSentence of source.split(/[.!?;]+/)) {
+    const sentence = rawSentence.trim();
+    const trigger = LEANINGS_TRIGGER.exec(sentence);
+    if (!trigger) continue;
+    const preference = sentence.slice(trigger.index + trigger[0].length).trim();
+    for (const rawPart of preference.split(/\s*,\s*|\s+and\s+|\s+alongside\s+|\s+across\s+/i)) {
+      const phrase = cleanLeaningsPhrase(rawPart);
+      if (phrase && !phrases.some((item) => comparable(item) === comparable(phrase))) phrases.push(phrase);
     }
   }
-  // Short operator-authored fields are often already a comma-separated list
-  // ("Warm voices, patient dub, deeper cuts") with no preference verb. Fall
-  // back to those exact clauses rather than refusing to run the review.
   if (phrases.length === 0) {
-    for (const source of sources) {
-      for (const rawPart of source.split(/[.!?;,]+|\s+and\s+/i)) {
-        const phrase = cleanLeaningsPhrase(rawPart);
-        if (phrase && !phrases.some((item) => comparable(item) === comparable(phrase))) phrases.push(phrase);
-      }
+    for (const rawPart of source.split(/[.!?;,]+|\s+and\s+/i)) {
+      const phrase = cleanLeaningsPhrase(rawPart);
+      if (phrase && !phrases.some((item) => comparable(item) === comparable(phrase))) phrases.push(phrase);
     }
   }
-  return phrases.slice(0, 16);
+  return phrases;
+}
+
+export function agenticLeaningsSources(editorialLeanings: {
+  host?: string | null;
+  guest?: { guest?: { name: string }; musicalLeanings?: string | null } | null;
+} | null, hostName: string | null = null): AgenticLeaningsOption[] {
+  const sources: AgenticLeaningsOption[] = [];
+  const add = (text: string | null | undefined, source: 'host' | 'guest', ownerName: string | null) => {
+    if (!text?.trim()) return;
+    for (const phrase of phrasesFromSource(text).slice(0, 16)) {
+      if (!sources.some((item) => comparable(item.phrase) === comparable(phrase))) sources.push({ phrase, source, ownerName });
+    }
+  };
+  add(editorialLeanings?.host, 'host', hostName);
+  add(editorialLeanings?.guest?.musicalLeanings, 'guest', editorialLeanings?.guest?.guest?.name ?? null);
+  return sources;
+}
+
+export function agenticLeaningsPhrases(editorialLeanings: Parameters<typeof agenticLeaningsSources>[0]): string[] {
+  return agenticLeaningsSources(editorialLeanings).map(({ phrase }) => phrase);
 }
 
 function stringList(value: unknown): string[] {
@@ -158,10 +249,6 @@ function exactLeaningsMetadataMatches(candidate: any, leaningsOptions: string[])
     const phrase = comparable(option);
     if (!phrase) return false;
     if (` ${metadata} `.includes(` ${phrase} `)) return true;
-    // Preserve the exact operator phrase as evidence while allowing harmless
-    // nouns such as "music" to be absent from a genre tag ("Electronic" is
-    // direct support for the profile phrase "electronic music"). Every
-    // meaningful phrase word must still be present in candidate metadata.
     const meaningful = phrase.split(' ').filter((word) => !METADATA_GENERIC_WORDS.has(word));
     return meaningful.length > 0 && meaningful.every((word) => metadataWords.has(word));
   });
@@ -174,13 +261,17 @@ function exactLeaningsMetadataScore(candidate: any, leaningsOptions: string[]): 
   );
 }
 
-// The discovery pick is the real Leanings-blind baseline. Review it against a
-// handful of challengers instead of asking a small model to rerank a sprawling
-// discovery pool: three metadata-near ordinary-flow choices, plus up to two
-// candidates whose own genre/mood tags exactly match a supplied profile phrase.
-// Inclusion is not influence — the reviewer must still declare an equally
-// sound flow tie and choose that exact phrase. Stable scores and ids make the
-// reviewed set invariant to tool/source insertion order.
+// Host preferences win whenever the baseline or a viable challenger supports
+// them. A guest can nudge only a choice the host's supplied evidence cannot settle.
+export function eligibleAgenticLeanings(baseline: any, candidates: any[], sources: AgenticLeaningsOption[]): AgenticLeaningsOption[] {
+  const host = sources.filter(({ source }) => source === 'host');
+  const hostPhrases = host.map(({ phrase }) => phrase);
+  const hostSupported = [baseline, ...candidates].some((candidate) =>
+    (String(candidate?.id) === String(baseline?.id) || ordinarySimilarity(baseline, candidate) >= 2.5)
+    && exactLeaningsMetadataMatches(candidate, hostPhrases).length > 0);
+  return hostSupported ? host : sources;
+}
+
 export function selectAgenticReviewCandidates(baseline: any, candidates: any[], leaningsOptions: string[] = [], limit = 6): any[] {
   if (!baseline?.id) return [];
   const baselineId = String(baseline.id);
@@ -215,10 +306,11 @@ export function selectAgenticReviewCandidates(baseline: any, candidates: any[], 
 
 export function compactAgenticReviewCandidate(track: any, leaningsOptions: string[] = [], baseline: any = null): Record<string, unknown> {
   const leaningsMatches = exactLeaningsMetadataMatches(track, leaningsOptions);
+  const similarity = baseline?.id ? ordinarySimilarity(baseline, track) : null;
   const flowCloseness = baseline?.id && String(track?.id) === String(baseline.id)
     ? 'baseline'
-    : baseline?.id
-      ? ordinarySimilarity(baseline, track) >= 4 ? 'close' : ordinarySimilarity(baseline, track) >= 2.5 ? 'possible' : 'weak'
+    : similarity != null
+      ? similarity >= 4 ? 'close' : similarity >= 2.5 ? 'possible' : 'weak'
       : undefined;
   return Object.fromEntries(Object.entries({
     id: track?.id,
@@ -239,10 +331,6 @@ export function compactAgenticReviewCandidate(track: any, leaningsOptions: strin
   }).filter(([, value]) => value !== undefined && value !== null));
 }
 
-// A model-proposed replacement is only evidence of a Leanings tie-break when
-// its public rationale is internally consistent and exposes the exact profile
-// wording that settled the choice. This prevents a valid alternative id paired
-// with a reason for the preliminary track from producing a false badge.
 export function validateAgenticLeaningsReplacement({
   musicalReason,
   leaningsBasis,
@@ -260,7 +348,8 @@ export function validateAgenticLeaningsReplacement({
 }): { valid: true; basis: string } | { valid: false; reason: AgenticLeaningsReviewRejection } {
   const rawBasis = typeof leaningsBasis === 'string' ? leaningsBasis.trim().replace(/\s+/g, ' ') : '';
   const basis = comparable(rawBasis);
-  if (!basis || !allowedLeanings.some((option) => comparable(option) === basis)) {
+  const allowedBasis = allowedLeanings.find((option) => comparable(option) === basis);
+  if (!basis || !allowedBasis) {
     return { valid: false, reason: 'missing-leanings-basis' };
   }
   if (!comparable(musicalLeanings).includes(basis)) {
@@ -274,24 +363,27 @@ export function validateAgenticLeaningsReplacement({
   }
   const reason = typeof musicalReason === 'string' ? musicalReason.replace(/\s+/g, ' ').trim() : '';
   if (reason.length < 16) return { valid: false, reason: 'weak-musical-reason' };
-  return { valid: true, basis: rawBasis };
+  return { valid: true, basis: allowedBasis };
 }
 
 export function agenticLeaningsSelectionReason({
   replacement,
   djName,
+  leaningsOwnerName,
   basis,
   musicalReason,
 }: {
   replacement: { title?: unknown; artist?: unknown };
   djName: unknown;
+  leaningsOwnerName?: string | null;
   basis: string;
   musicalReason: unknown;
 }): string {
   const title = typeof replacement.title === 'string' ? replacement.title.trim() : 'this track';
   const artist = typeof replacement.artist === 'string' ? replacement.artist.trim() : 'the selected artist';
   const presenter = typeof djName === 'string' && djName.trim() ? djName.trim() : 'The DJ';
-  const possessive = /s$/i.test(presenter) ? `${presenter}’` : `${presenter}’s`;
+  const owner = leaningsOwnerName?.trim() || presenter;
+  const possessive = /s$/i.test(owner) ? `${owner}’` : `${owner}’s`;
   let detail = typeof musicalReason === 'string'
     ? musicalReason.replace(/\s+/g, ' ').trim().replace(/[.!?]+$/, '')
     : 'its musical character brings a natural change of colour to the sequence';
@@ -304,9 +396,6 @@ export function agenticLeaningsSelectionReason({
   ].filter((value) => value && value !== 'this track'))]
     .sort((left, right) => right.length - left.length);
 
-  // Small local models often ignore the request not to repeat identity. Turn
-  // constructions such as "the reflective mood of Rand McNally" or "the
-  // Goldfrapp remix of You Never Know" into a natural pronoun-led clause.
   for (const identity of titleVariants) {
     const escapedIdentity = identity.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const quotedIdentity = `[“”"'‘’]?${escapedIdentity}[“”"'‘’]?`;
@@ -331,9 +420,6 @@ export function agenticLeaningsSelectionReason({
   for (const identity of titleVariants) {
     const escapedIdentity = identity.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     detail = detail.replace(new RegExp(`[“"'‘]${escapedIdentity}[”"'’]`, 'giu'), 'the track');
-    // Avoid corrupting ordinary prose when a title is itself a common short
-    // word (for example "It" or "Easy"). Unquoted identity is cleaned only
-    // for a sufficiently distinctive multiword title.
     if (identity.length >= 6 && /\s/.test(identity)) {
       detail = detail.replace(new RegExp(`(?<![\\p{L}\\p{N}])${escapedIdentity}(?![\\p{L}\\p{N}])`, 'giu'), 'the track');
     }
@@ -372,7 +458,7 @@ export function agenticLeaningsSelectionReason({
     .replace(/\s{2,}/g, ' ')
     .replace(/[,:;\s]+$/, '')
     .trim();
-  if (!detail || detail === '[musical reason unavailable]' || detail.length < 16) {
+  if (!detail || detail === MUSICAL_REASON_UNAVAILABLE || detail.length < 16) {
     detail = 'its musical character brings a natural change of colour to the sequence';
   }
   if (detail) detail = detail[0].toLocaleLowerCase('en-GB') + detail.slice(1);

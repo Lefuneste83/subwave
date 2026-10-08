@@ -1,12 +1,15 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useState } from 'react';
 import { useAdminAuth } from '../../lib/adminAuth';
+import { adminJson, useAdminQuery } from '../../lib/admin-query';
 import { Btn, Card, Eyebrow } from './ui';
 import { Textarea } from '../ui/textarea';
 
 type ToolInfo = { name: string; available: boolean; description: string | null };
 type Catalog = { current: { id?: string; title?: string; artist?: string; genre?: string } | null; tools: ToolInfo[] };
+
+const discoveryKeys = { catalog: () => ['discovery', 'catalog'] as const };
 
 const DEFAULTS: Record<string, (current: Catalog['current']) => Record<string, unknown>> = {
   similarSongs: (current) => ({ songId: current?.id || '' }),
@@ -24,7 +27,6 @@ const DEFAULTS: Record<string, (current: Catalog['current']) => Record<string, u
 
 export default function DiscoveryPanel() {
   const { adminFetch, hydrated, needsAuth } = useAdminAuth();
-  const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [selected, setSelected] = useState<ToolInfo | null>(null);
   const [args, setArgs] = useState('{}');
   const [result, setResult] = useState<unknown>(null);
@@ -33,21 +35,15 @@ export default function DiscoveryPanel() {
   const [running, setRunning] = useState(false);
 
   const ready = hydrated && !needsAuth;
-  useEffect(() => {
-    if (!ready) return;
-    void (async () => {
-      try {
-        const r = await adminFetch('/debug/discovery');
-        const body = await r.json();
-        if (!r.ok) throw new Error(body?.error || `request failed (${r.status})`);
-        setCatalog(body);
-      } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
-    })();
-  }, [adminFetch, ready]);
-
-  const title = useMemo(() => catalog?.current
+  const catalogQuery = useAdminQuery<Catalog>({
+    key: discoveryKeys.catalog(), adminFetch, enabled: ready, refetchOnMount: 'always',
+    request: (fetcher, signal) => adminJson<Catalog>(fetcher, '/debug/discovery', undefined, signal),
+  });
+  const catalog = catalogQuery.data;
+  const visibleError = error ?? (catalogQuery.error instanceof Error ? catalogQuery.error.message : null);
+  const title = catalog?.current
     ? `${catalog.current.title || 'Unknown track'} — ${catalog.current.artist || 'Unknown artist'}`
-    : 'No live track', [catalog]);
+    : 'No live track';
 
   const choose = (tool: ToolInfo) => {
     setSelected(tool);
@@ -62,11 +58,10 @@ export default function DiscoveryPanel() {
     try { body = JSON.parse(args); } catch { setError('Tool input must be valid JSON.'); return; }
     setRunning(true); setError(null);
     try {
-      const r = await adminFetch(`/debug/discovery/tool/${encodeURIComponent(selected.name)}`, {
+      // admin-query-imperative: discovery-tool-preview
+      const payload = await adminJson(adminFetch, `/debug/discovery/tool/${encodeURIComponent(selected.name)}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       });
-      const payload = await r.json();
-      if (!r.ok) throw new Error(payload?.error || `request failed (${r.status})`);
       setResult(payload);
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setRunning(false); }
@@ -75,9 +70,8 @@ export default function DiscoveryPanel() {
   const compare = async () => {
     setRunning(true); setError(null);
     try {
-      const r = await adminFetch('/debug/discovery/compare', { method: 'POST' });
-      const payload = await r.json();
-      if (!r.ok) throw new Error(payload?.error || `request failed (${r.status})`);
+      // admin-query-imperative: discovery-comparison-preview
+      const payload = await adminJson(adminFetch, '/debug/discovery/compare', { method: 'POST' });
       setComparison(payload);
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setRunning(false); }
@@ -100,13 +94,13 @@ export default function DiscoveryPanel() {
             <div className="min-w-0 flex-1"><div className="font-mono text-[13px] font-bold">{tool.name}</div><div className="mt-0.5 text-[10px] leading-[1.45] text-muted">{tool.description || 'Unavailable for this scope.'}</div></div>
             <Btn sm onClick={() => choose(tool)} disabled={!tool.available}>Run</Btn>
           </div>)}
-          {!catalog && <span className="field-hint">Loading live picker scope…</span>}
+          {!catalog && !visibleError && <span className="field-hint">Loading live picker scope…</span>}
         </div>
       </Card>
       <Card title={selected ? `Response — ${selected.name}` : 'Response'} sub="the tool’s direct result">
         {selected && <><label className="caption mb-1 block">Arguments (JSON)</label><Textarea value={args} onChange={e => setArgs(e.target.value)} rows={7} className="font-mono text-[11px]" />
           <div className="mt-2"><Btn sm onClick={run} disabled={running}>{running ? 'Running…' : 'Run tool'}</Btn></div></>}
-        {error && <p className="mt-3 text-[12px] text-[var(--danger)]">{error}</p>}
+        {visibleError && <p className="mt-3 text-[12px] text-[var(--danger)]">{visibleError}</p>}
         {result !== null && <pre className="term mt-3 max-h-[520px] overflow-auto text-[11px]">{JSON.stringify(result, null, 2)}</pre>}
         {!selected && <p className="field-hint italic">Choose an available tool to inspect its live response.</p>}
       </Card>

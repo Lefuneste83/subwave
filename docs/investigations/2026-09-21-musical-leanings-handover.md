@@ -138,7 +138,9 @@ evidence and reason are authoritative.
 `controller/scripts/agentic-leanings-review-replay.ts` exercises the new
 contract without queueing music. It rotates discovery insertion order on each
 iteration and asserts that the controller's compact candidate set remains
-stable.
+stable. It copies the active model settings into a temporary state directory
+before importing the controller, so its telemetry and token usage cannot change
+the station logs or budget.
 
 - The replay input is about 1,900 tokens, compared with roughly 8,000–10,000
   tokens observed in the earlier full-context review.

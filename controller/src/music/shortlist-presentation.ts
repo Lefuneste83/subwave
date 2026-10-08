@@ -16,19 +16,19 @@ const SOURCE_LABELS: Record<string, string> = {
   deepCuts: 'deep-cut discovery',
   recentlyAdded: 'recent additions',
   starredSongs: 'station favourites',
+  listenerFavourites: 'listener favourites',
   randomSongs: 'a library wildcard',
   showPlaylistTracks: 'the show’s music selection',
   tracksTowardJourney: 'the station’s sonic journey',
 };
 
+// A candidate records only the source that FIRST surfaced it (see
+// executeShortlistPlan), so the hint names one route, never a list.
 export function shortlistSourceHint(sources: unknown): string | null {
   if (!Array.isArray(sources)) return null;
-  const labels = [...new Set(sources
+  const label = sources
     .filter((source): source is string => typeof source === 'string')
     .map((source) => SOURCE_LABELS[source])
-    .filter((label): label is string => !!label))];
-  if (!labels.length) return null;
-  if (labels.length === 1) return `Surfaced through ${labels[0]}.`;
-  if (labels.length === 2) return `Surfaced through ${labels[0]} and ${labels[1]}.`;
-  return `Surfaced through ${labels[0]}, ${labels[1]}, and other routes.`;
+    .find((candidate): candidate is string => !!candidate);
+  return label ? `Surfaced through ${label}.` : null;
 }

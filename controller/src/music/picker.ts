@@ -316,17 +316,10 @@ async function buildCandidates(mood: string | null | undefined, recentIds: Set<s
   }
 
   // 1d-bis. Listener favourites (#991), behind likes.influenceDj. Never a lock.
-  {
-    const likeCfg = settings.get()?.likes;
-    if (likeCfg?.enabled && likeCfg?.influenceDj) {
-      try {
-        const favs = likes
-          .topLiked({ windowDays: likeCfg.windowDays, limit: likeCfg.maxTracks })
-          .map((f) => f.track);
-        add('listener-liked', sampleFresh(lean(shuffle(favs)), recentIds, nz(CAP_LIKED)));
-      } catch {}
-    }
-  }
+  try {
+    const favs = likes.djFavourites(settings.get()?.likes).map((f) => f.track);
+    add('listener-liked', sampleFresh(lean(shuffle(favs)), recentIds, nz(CAP_LIKED)));
+  } catch {}
 
   // 1e. Show genres / decades. getRandomSongs takes ONE genre + ONE year range,
   // so it is one call per genre against eraSpan, then inYearRange, then energy-prefer.
@@ -588,7 +581,11 @@ async function buildCandidates(mood: string | null | undefined, recentIds: Set<s
   return { candidates: final, sources, strictInfo, playlistInfo };
 }
 
-function summariseRecent(queue: { current?: QueueEntry | null; history: QueueEntry[] }) {
+// The on-air track and the last HISTORY_DEPTH plays, most recent first, with
+// their moods and energy: the arc of the set. Shared by the pool prompt and the
+// Track Shortlist's selection context — neither has the Agentic route's session
+// history to read it from.
+export function summariseRecent(queue: { current?: QueueEntry | null; history: QueueEntry[] }) {
   const items: QueueEntry[] = [];
   if (queue.current) items.push(queue.current);
   items.push(...queue.history.slice(0, HISTORY_DEPTH));

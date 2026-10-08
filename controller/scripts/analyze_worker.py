@@ -2028,11 +2028,14 @@ def _path_loader(librosa, path):
     return load
 
 
-def demucs_head(detector, load, librosa, stems_dir=None):
+def demucs_head(detector, load, librosa, stems_dir=None, stems_require_marker=False):
     """Demucs over the head window: vocal ranges (+ head stems when
     `stems_dir`). Returns (vocal_ranges | None, stems_cached | None).
     Best-effort exactly like the code it was lifted from: a failure logs and
-    leaves vocal_ranges None; a stem write failure reports stems_cached False."""
+    leaves vocal_ranges None; a stem write failure reports stems_cached False.
+    With `stems_require_marker` the marker is re-checked right before the
+    write (the share can drop out during a long separation): no marker, no
+    write and stems_cached stays None, so the track is not stamped."""
     import numpy as np
 
     vocal_ranges = None
@@ -2042,6 +2045,7 @@ def demucs_head(detector, load, librosa, stems_dir=None):
         if ys is not None and np.size(ys) > 0:
             head_stems = detector.separate(ys)
             vocal_ranges = detector.detect(ys, DEMUCS_SR, librosa, stems=head_stems)
+            stems_dir = stems_dir_to_write(stems_dir, stems_require_marker)
             if stems_dir:
                 try:
                     write_stems(head_stems, "head", stems_dir)
@@ -2055,12 +2059,14 @@ def demucs_head(detector, load, librosa, stems_dir=None):
     return vocal_ranges, stems_cached
 
 
-def demucs_tail(detector, load, librosa, duration_s, outro, stems_dir=None):
+def demucs_tail(detector, load, librosa, duration_s, outro, stems_dir=None, stems_require_marker=False):
     """Demucs over the outro window: writes ABSOLUTE `outro["vocalRanges"]`
     ([] = analysed instrumental tail) and the tail stems + tail-meta when
     `stems_dir`. Only call with an outro computed from a proven tail.
     TAIL_VOCAL_MIN_LOUD (see its definition) guards against separation bleed
-    on a fading outro. Returns True when the tail vocals were measured."""
+    on a fading outro. Returns True when the tail vocals were measured.
+    With `stems_require_marker` the marker is re-checked before the tail stems
+    and again before the tail meta, as in demucs_head."""
     import numpy as np
 
     try:
@@ -2072,10 +2078,13 @@ def demucs_tail(detector, load, librosa, duration_s, outro, stems_dir=None):
         tail_vocals = detector.detect(
             y_tail, DEMUCS_SR, librosa, min_loud=TAIL_VOCAL_MIN_LOUD, stems=tail_stems
         )
+        stems_dir = stems_dir_to_write(stems_dir, stems_require_marker)
         if stems_dir:
             try:
                 write_stems(tail_stems, "tail", stems_dir)
-                write_tail_meta(stems_dir, tail_offset, duration_s)
+                stems_dir = stems_dir_to_write(stems_dir, stems_require_marker)
+                if stems_dir:
+                    write_tail_meta(stems_dir, tail_offset, duration_s)
             except Exception as e:  # noqa: BLE001 — cache is best-effort
                 log(f"stem cache write (tail) failed: {e}")
         shift_ms = tail_offset * 1000.0
@@ -2300,7 +2309,9 @@ def analyze(
         stems_cached = None
         load = _path_loader(librosa, path)
         if detector is not None:
-            vocal_ranges, stems_cached = demucs_head(detector, load, librosa, stems_dir)
+            vocal_ranges, stems_cached = demucs_head(
+                detector, load, librosa, stems_dir, stems_require_marker
+            )
         # Tail vocal activity (feature: vocal-aware transitions) — the outro
         # window gets its own Demucs pass so transitions know whether the
         # ENDING is sung. Gated on the same detector AND a computed outro:
@@ -2308,7 +2319,11 @@ def analyze(
         # for a distinct tail (see demucs_tail).
         if detector is not None and outro is not None and "startMs" in outro \
                 and not outro.get("_searched"):
-            demucs_tail(detector, load, librosa, duration_s, outro, stems_dir)
+            demucs_tail(detector, load, librosa, duration_s, outro, stems_dir, stems_require_marker)
+            # The share went away during the pass: report no stems_cached so
+            # the controller does not stamp a track whose stems are incomplete.
+            if stems_dir and stems_dir_to_write(stems_dir, stems_require_marker) is None:
+                stems_cached = None
     finally:
         if decoded_tmp is not None:
             try:

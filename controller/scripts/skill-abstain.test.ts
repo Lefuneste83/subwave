@@ -52,10 +52,10 @@ export default async () => {
 `);
 writeSkill('own-material', 'export const requiresData = false;\nexport default async () => ({ available: false });\n');
 
-const { requiresGrounding, unusableDataReason, standDownReason, declaredBool } =
+const { requiresGrounding, unusableDataReason, standDownReason, declaredBool, repairLegacySkillData, mentionsArtist } =
   await import('../src/skills/abstain-policy.js');
 const { agenticTick, forcedSchema, forcedSystem, runCapability } = await import('../src/skills/_agent.js');
-const { normalizeSegmentToolResult } = await import('../src/llm/segment-tools.js');
+const { buildSegmentTools } = await import('../src/llm/segment-tools.js');
 const { queue } = await import('../src/broadcast/queue.js');
 const webSearch = (await import('../src/skills/builtins/web-search/tool.mjs')).default;
 const nowPlayingDig = (await import('../src/skills/builtins/now-playing-dig/tool.mjs')).default;
@@ -116,13 +116,13 @@ test('a fetch error and an explicit available:false are both unusable', () => {
 });
 
 test('a persisted legacy news tool empty response is unavailable', () => {
-  const data = normalizeSegmentToolResult({ kind: 'news' }, { headlines: [] });
+  const data = repairLegacySkillData({ kind: 'news' }, { headlines: [] });
   assert.equal(typeof unusableDataReason(data), 'string');
   assert.deepEqual(data, { headlines: [], available: false });
 });
 
 test('an older now-playing dig with only unrelated snippets is unavailable', () => {
-  const data = normalizeSegmentToolResult({ kind: 'now-playing-dig' }, {
+  const data = repairLegacySkillData({ kind: 'now-playing-dig' }, {
     artist: 'Modest Mouse', title: 'Missed the Boat', answer: '',
     sources: ['BING magazine: the web missed the boat on production credits'],
   });
@@ -133,12 +133,39 @@ test('an older now-playing dig with only unrelated snippets is unavailable', () 
 });
 
 test('an older artist web-search with only unrelated snippets is unavailable', () => {
-  const data = normalizeSegmentToolResult({ kind: 'web-search' }, {
+  const data = repairLegacySkillData({ kind: 'web-search' }, {
     artist: 'Cue', answer: '', sources: ['Queueing etiquette: the latest advice'],
   });
   assert.deepEqual(data, {
     artist: 'Cue', answer: '', sources: ['Queueing etiquette: the latest advice'], available: false,
   });
+});
+
+test('legacy repair matches the artist as a whole word, like the shipped tool', () => {
+  assert.equal(mentionsArtist('Below the surface: a review', 'Low'), false, 'a substring is not a mention');
+  assert.equal(mentionsArtist('Low: Double Negative review', 'Low'), true);
+  const data = repairLegacySkillData({ kind: 'now-playing-dig' }, {
+    artist: 'Low', title: 'Lazy', answer: '', sources: ['Below average: why lazy reviews miss the point'],
+  });
+  assert.equal(data.available, false);
+  const kept = { artist: 'Low', answer: '', sources: ['Low: the slowcore band from Duluth'] };
+  assert.equal(repairLegacySkillData({ kind: 'now-playing-dig' }, kept), kept);
+  assert.equal(repairLegacySkillData({ kind: 'news' }, { headlines: [], available: true }).available, true,
+    'a tool that gives its own verdict is believed');
+});
+
+test('the segment wrapper preserves usable custom queries unrelated to the artist', async () => {
+  const sources = ['Sway: a ballroom standard recorded by many artists'];
+  const tools = buildSegmentTools({}, {}, [{
+    kind: 'web-search', toolName: 'search', toolInputs: { query: 'what to search for' },
+    toolFn: async (_ctx, _state, _services, _config, input) => webSearch({}, {}, {
+      nowPlaying: () => ({ artist: 'Cue' }),
+      searchWeb: async () => ({ answer: '', results: [{ title: 'Sway', content: 'a ballroom standard recorded by many artists' }] }),
+    }, {}, input),
+  }]);
+  const data = await tools.search.execute({ query: 'history of Sway' });
+  assert.deepEqual(data.sources, sources);
+  assert.equal(unusableDataReason(data), null);
 });
 
 test('now-playing dig drops unrelated generic-title results before Direct can see them', async () => {

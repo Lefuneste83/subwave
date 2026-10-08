@@ -1,7 +1,8 @@
-// Offline paired evaluation for Musical Leanings.
+// Offline paired evaluation of the earlier single-pass Musical Leanings diagnostic.
+// Use leanings:review-replay to evaluate the production counterfactual review.
 //
 // This deliberately runs outside the broadcast pipeline. It uses a fresh
-// STATE_DIR, frozen discovery-tool results, and the production Agentic schema
+// STATE_DIR, frozen discovery-tool results, and the shared diagnostic schema
 // and tool-loop. It never touches the queue, session, library, scrobbling, or
 // the station's persistent telemetry.
 //
@@ -456,6 +457,7 @@ async function main() {
     meta: {
       startedAt: new Date().toISOString(),
       stateIsolation: true,
+      contract: 'legacy-single-pass',
       experiment,
       models: models.map((model) => model.label),
       baseUrl: baseUrl || null,

@@ -107,7 +107,7 @@ async function main() {
   const out = resolve(args.out || join('scripts', 'shortlist-soul-eval', 'reports', `shortlist-soul-${new Date().toISOString().replace(/[:.]/g, '-')}.json`));
 
   const settings = await import('../src/settings.js');
-  const { djPick } = await import('../src/music/dj-pick.js');
+  const { djPick } = await import('../src/broadcast/dj-agent/shortlist-pick.js');
   const subsonic = await import('../src/music/subsonic.js');
   await settings.load();
   const cfg: any = settings.get();

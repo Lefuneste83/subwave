@@ -7,7 +7,13 @@ import { cacheSourcePool } from '../source-pool-cache.js';
 export default definePickerTool({
   name: 'tracksByMood',
   build: ({ collect, emptyResult }) => {
-    const moodPool = cacheSourcePool(library.songsByMood);
+    const moodPool = cacheSourcePool((mood: string) => {
+      const rows = library.songsByMood(mood);
+      return {
+        rows,
+        energyPool: cacheSourcePool((energy: string) => rows.filter((row: any) => row.energy === energy)),
+      };
+    });
     return tool({
       description: 'Songs carrying one of the station\'s mood tags: energetic, calm, reflective, celebratory, romantic, spiritual, focus, workout, driving, cooking, rainy, sunny, night, morning, evening, festival, cultural. That list is the WHOLE vocabulary — a word outside it matches nothing rather than being interpreted, so choose the closest listed mood. Optionally narrow by energy. An empty result names which filter emptied it: "no tracks tagged X" is a coverage gap, not an empty library.',
       inputSchema: z.object({
@@ -23,8 +29,8 @@ export default definePickerTool({
       execute: async ({ mood, energy }) => {
         try {
           await library.load();
-          const moodRows = moodPool(mood);
-          const rows = energy ? moodRows.filter((r: any) => r.energy === energy) : moodRows;
+          const { rows: moodRows, energyPool } = moodPool(mood);
+          const rows = energy ? energyPool(energy) : moodRows;
           const out = collect(rows);
           if (out.length) return out;
           // Empty for three distinct reasons — tell the model which, so a

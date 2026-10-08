@@ -22,6 +22,7 @@ import {
 import { recentCalls, generationHealthSnapshot } from '../llm/log.js';
 import type { Finding, StationSettings } from './types.js';
 import { classifyModel, isSchemaFailure } from './util.js';
+import { settingsAgentRoutes } from '../schemas/settings.js';
 
 // ---------------------------------------------------------------------------
 // Sections
@@ -119,30 +120,33 @@ export async function checkLlm(s: StationSettings | null): Promise<Finding[]> {
   // Model class — weigh the chosen model's *name* against how it's being used.
   // Heuristic only (name-based), so it never fails, only warns: a code-specialised
   // model is tuned for programming rather than DJ links / structured picks, and a
-  // small model paired with the agentic picker tends to time out into the pool.
+  // small model driving Agentic Tools tends to time out into the pool.
+  const routes = settingsAgentRoutes(s?.llm);
   const cls = classifyModel(activeModelLabel());
   if (cls.code) {
     out.push({
       label: 'model class',
       status: 'warn',
       detail: `${activeModelLabel()} looks code-specialised`,
-      hint: 'Code models are tuned for programming, not natural-language DJ links or schema-constrained JSON — they tend to write stiff intros and fail structured picks (the request matcher, pool picker and this very report). Prefer a general instruction-tuned model in Settings → LLM.',
+      hint: 'Code models are tuned for programming, not natural-language DJ links or schema-constrained JSON — they tend to write stiff intros and fail structured picks (the request matcher, Track Shortlist, the pool picker and this very report). Prefer a general instruction-tuned model in Settings → LLM.',
     });
-  } else if (cls.sizeB !== null && cls.sizeB < 11 && s?.llm?.pickerAgent !== false) {
+  } else if (cls.sizeB !== null && cls.sizeB < 11 && routes.picks) {
     out.push({
       label: 'model class',
       status: 'warn',
-      detail: `~${cls.sizeB}B model with the agentic picker on`,
-      hint: 'The agentic picker wants a ~12B-class (or good cloud) model; smaller models often time out into the pool fallback or fail structured picks. Either pick a larger model, or turn the agentic picker OFF (Settings → LLM) to use the simpler, more forgiving pool picker.',
+      detail: `~${cls.sizeB}B model with Agentic Tools selected`,
+      hint: 'Agentic Tools wants a ~12B-class (or good cloud) model; smaller models often time out into the pool fallback or fail structured picks. Either pick a larger model, or switch Settings → Music selection to Track Shortlist, where the controller builds the shortlist and the model makes one bounded choice.',
     });
   }
 
-  // Picker agent toggle — off is valid (stateless picker) but worth surfacing.
-  // DJ Doc weighs this against the model size + host resources in its review.
+  // Track selection route. Both are supported choices, so neither warns; DJ Doc
+  // weighs the route against the model size + host resources in its review.
   out.push({
-    label: 'picker agent',
-    status: s?.llm?.pickerAgent === false ? 'warn' : 'ok',
-    detail: s?.llm?.pickerAgent === false ? 'off — stateless pool picker' : 'on — session DJ agent (wants ~12B+ / good cloud model)',
+    label: 'track selection',
+    status: 'ok',
+    detail: routes.picks
+      ? 'Agentic Tools — model-led library search (wants ~12B+ / good cloud model)'
+      : 'Track Shortlist — controller-built shortlist, one bounded model choice',
   });
 
   // Chain-of-thought (reasoning) — on costs latency + tokens; only worth it on a

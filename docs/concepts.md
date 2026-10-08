@@ -64,7 +64,7 @@ Three things it does **not** do:
 
 ## Track Shortlist vs Agentic Tools
 
-**Where:** Admin → Settings → DJ Behaviour → **Track selection**.
+**Where:** Admin → Settings → Music selection → **How the DJ finds its next track**.
 
 Both end at the same place — one track id, handed to the queue — and both run
 inside a session and get logged. They apply the same show constraints, recency
@@ -305,7 +305,7 @@ By default, **nothing to rotation.** A like is recorded, it shows up in stats,
 and — if Navidrome starring is on — the track is starred in Navidrome. The DJ
 does not know about it.
 
-Rotation influence is opt-in: **Admin → Settings → Likes → AI DJ influence → Use likes to influence picks**.
+Rotation influence is opt-in: **Admin → Settings → Listeners → AI DJ influence → Use likes to influence picks**.
 Turned on, the most-liked tracks become one more source feeding the candidate
 pool, capped like every other source. It is a weighted preference, never a
 lock — the crowd can steer the pool without taking it over. By default that's

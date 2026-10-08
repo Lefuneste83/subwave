@@ -1,10 +1,6 @@
 import type { FormState } from './shared';
 
-/**
- * Read one dotted path out of the form. Returns undefined for a missing branch
- * rather than throwing, so a path that names a key a given settings.json has
- * never carried compares equal on both sides and reads as clean.
- */
+// Return undefined for missing form paths so absent settings compare as clean.
 export function atPath(form: FormState | null, path: string): unknown {
   let node: unknown = form;
   for (const key of path.split('.')) {
@@ -52,6 +48,24 @@ export function dirtyPaths(
 ): string[] {
   if (!form || !baseline) return [];
   return paths.filter(path => !samePath(form, baseline, path));
+}
+
+export function restorePaths(form: FormState, baseline: FormState, paths: readonly string[]): FormState {
+  const next = structuredClone(form);
+  for (const path of paths) {
+    const keys = path.split('.');
+    const leaf = keys.pop()!;
+    let target = next as unknown as Record<string, unknown>;
+    for (const key of keys) {
+      const child = target[key];
+      if (!child || typeof child !== 'object') target[key] = {};
+      target = target[key] as Record<string, unknown>;
+    }
+    const value = atPath(baseline, path);
+    if (value === undefined) delete target[leaf];
+    else target[leaf] = structuredClone(value);
+  }
+  return next;
 }
 
 /**

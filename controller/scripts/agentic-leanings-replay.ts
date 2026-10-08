@@ -12,7 +12,7 @@ import { z } from 'zod';
 import * as settings from '../src/settings.js';
 import { djAgent, djObject, modelTolerant } from '../src/llm/sdk.js';
 import { pickSchema, pickSchemaBase, pickSystem } from '../src/broadcast/dj-agent/schemas.js';
-import { shortlistPickPrompt, shortlistPickSchema } from '../src/music/dj-pick.js';
+import { shortlistPickPrompt, shortlistPickSchema } from '../src/broadcast/dj-agent/shortlist-pick.js';
 
 type Fixture = {
   name: string;

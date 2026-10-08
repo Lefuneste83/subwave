@@ -1,10 +1,6 @@
 'use client';
 
-/* Admin Stats page. Two data sources, two cadences:
-   - GET /stats (5s) aggregates the in-memory LLM / TTS / DJ-log / request rings
-     (since boot, lost on restart by design).
-   - GET /listeners (30s) returns the durable listener time-series persisted to
-     state/listeners.jsonl (24h–7d), drawn as the Audience trend chart. */
+// /stats reports activity since boot; /listeners reports persisted audience history.
 
 import type { ReactNode } from 'react';
 import { useEffect, useRef, useState } from 'react';
@@ -64,7 +60,11 @@ interface ContextWindowRow {
 
 interface ShortlistContextWindow {
   samples: number;
+  // Largest prompt the window must hold: this route's picker plus every LLM
+  // function sharing the one num_ctx. pickerPeakInputTokens is the route's own.
   peakInputTokens: number | null;
+  pickerPeakInputTokens?: number | null;
+  peakKind?: string | null;
   suggestedTokens: number | null;
   headroomPct?: number;
   responseReserveTokens?: number;
@@ -167,6 +167,7 @@ interface RequestsStats {
 
 interface StatsResponse {
   llm?: LlmStats;
+  trackSelection?: 'agentic' | 'shortlist';
   tts?: TtsStats;
   djLog?: DjLogStats;
   requests?: RequestsStats;
@@ -700,8 +701,6 @@ export default function StatsPanel() {
         sub={`where listeners came from · last ${rangeLabel}`}
       >
         <div className="grid gap-0">
-          {/* Independent of the durable beacon rollup below, so it still shows on
-              a fresh boot. No IPs here — device class, counts and durations only. */}
           <div className="border-b border-separator-strong p-3.5">
             <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
               <span className="caption">connected now · by device</span>
@@ -807,8 +806,6 @@ export default function StatsPanel() {
               ) : null
             }
           >
-            {/* Durable per-UTC-day tally, so it shows regardless of the
-                since-boot call count above, and only when a cap is set. */}
             {llm.budget?.enabled && (
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-separator-strong p-3.5">
                 <span className="caption">
@@ -891,16 +888,18 @@ export default function StatsPanel() {
 
           <Card
             title="LLM context windows"
-            sub={`reported input tokens · last ${llm.window} calls since controller start`}
-            right={llm.contextWindows?.agenticPicker.suggestedTokens ? (
-              <Pill tone="accent">
-                Agentic recommends {fmtTokens(llm.contextWindows.agenticPicker.suggestedTokens)}
-              </Pill>
-            ) : llm.contextWindows?.shortlist.suggestedTokens ? (
-              <Pill tone="accent">
-                shortlist recommends {fmtTokens(llm.contextWindows.shortlist.suggestedTokens)}
-              </Pill>
-            ) : null}
+            sub="reported input tokens · since controller start"
+            right={(() => {
+              // Lead with the route the station is actually running.
+              const active = data?.trackSelection === 'shortlist'
+                ? { label: 'shortlist', window: llm.contextWindows?.shortlist }
+                : { label: 'Agentic', window: llm.contextWindows?.agenticPicker };
+              return active.window?.suggestedTokens ? (
+                <Pill tone="accent">
+                  {active.label} recommends {fmtTokens(active.window.suggestedTokens)}
+                </Pill>
+              ) : null;
+            })()}
           >
             {(() => {
               const context = llm.contextWindows;
@@ -913,12 +912,12 @@ export default function StatsPanel() {
                     <StatCell label="Shortlist num_ctx" accent
                       value={fmtTokens(shortlist?.suggestedTokens)}
                       sub={shortlist?.suggestedTokens
-                        ? `${fmtTokens(shortlist.peakInputTokens)} peak shortlist prompt`
+                        ? `${fmtTokens(shortlist.peakInputTokens)} peak prompt${shortlist.peakKind ? ` · ${shortlist.peakKind.replace(/^sdk\./, '')}` : ''}`
                         : 'waiting for shortlist usage'} />
                     <StatCell label="Agentic Picker num_ctx" accent
                       value={fmtTokens(agenticPicker?.suggestedTokens)}
                       sub={agenticPicker?.suggestedTokens
-                        ? `${fmtTokens(agenticPicker.peakInputTokens)} largest model step`
+                        ? `${fmtTokens(agenticPicker.peakInputTokens)} peak prompt${agenticPicker.peakKind ? ` · ${agenticPicker.peakKind.replace(/^sdk\./, '')}` : ''}`
                         : 'waiting for Agentic usage'} />
                     <StatCell label="Headroom"
                       value={agenticPicker?.headroomPct != null ? `${agenticPicker.headroomPct}%` : shortlist?.headroomPct != null ? `${shortlist.headroomPct}%` : '—'}
@@ -930,9 +929,10 @@ export default function StatsPanel() {
                   </MetricStrip>
                   <div className="border-t border-separator-soft p-3.5">
                     <p className="field-hint mb-3 max-w-[760px]">
-                      Each picker path has its own recommendation. Shortlist uses its largest successful final-picker
-                      prompt; Agentic uses its largest individual model step rather than the whole tool loop. Both add
-                      headroom and a response reserve, then round up for a server context setting.
+                      Ollama&apos;s num_ctx is one setting for every call, so each route&apos;s figure must hold its own
+                      picker prompts and every other LLM function running beside it (links, segments, requests). Agentic
+                      counts its largest individual model step rather than the whole tool loop. Both add headroom and a
+                      response reserve, then round up for a server context setting. The peak names the function that set it.
                     </p>
                     <Table<ContextWindowRow>
                       empty="No LLM calls recorded yet"

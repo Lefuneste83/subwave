@@ -12,6 +12,7 @@ import {
   BACKUP_KEEP_BOUNDS,
   BACKUP_KEEP_DEFAULT,
   BEDS_THRESHOLD_SEC_BOUNDS,
+  SHORTLIST_PASSES_DEFAULT,
   CROSSFADE_DURATION_BOUNDS,
   DUCK_DEPTH_BOUNDS,
   HANDOVER_OFFSET_BOUNDS,
@@ -463,7 +464,7 @@ export const DEFAULTS = {
     trackSelection: 'agentic',
     // Native discovery passes. Kept separate from agent discoverySteps: the
     // latter is a tool-loop budget, while this is a controller source budget.
-    shortlistPasses: 3,
+    shortlistPasses: SHORTLIST_PASSES_DEFAULT,
     // Guest preferences are a deliberately optional, secondary programming
     // input. Keep them off for upgrades and new stations: a blank host field
     // must mean no Musical Leanings are sent to either picker.
