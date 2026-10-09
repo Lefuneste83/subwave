@@ -1,7 +1,7 @@
 // Per-track reads and writes: metadata, tags, enrichment, analysis and vectors.
 // The write path every ingest pass (tagger, analyzer, enricher) goes through.
 
-import { ANALYSIS_VERSION, AUDIO_EMBEDDING_DIM, SQL_HAS_MOODS, TAGGER_VERSION, getEmbeddingDim, requireDb } from './handle.js';
+import { ANALYSIS_VERSION, AUDIO_EMBEDDING_DIM, SQL_HAS_MOODS, TAGGER_VERSION, WHOLE_FILE_LOUDNESS_VERSION, getEmbeddingDim, requireDb } from './handle.js';
 import { clearFacetFailures, clearFacetRows, syncTrackFacets, type Facet, type FacetSource } from './facets.js';
 import type { TagWrite, TrackEnrichment, TrackKeyRange, TrackMeta, TrackOutro, TrackPaceSpan, TrackRecord, TrackRow, TrackSection } from './types.js';
 import { normaliseYear, rowToTrack, safeParseArray } from './rows.js';
@@ -410,8 +410,11 @@ export function upsertTrackAnalysis(id: string, a: TrackAnalysisWrite): void {
         musical_key         = ?,
         intro_ms            = ?,
         analysis_confidence = ?,
-        loudness_lufs       = ?,
-        peak_db             = ?,
+        -- A whole-file measurement (B13) outranks the analysis window's: the
+        -- head pass re-measures the window on every re-analysis, and must not
+        -- put the figures the whole-file pass replaced back.
+        loudness_lufs       = CASE WHEN COALESCE(loudness_version, 0) >= ${WHOLE_FILE_LOUDNESS_VERSION} THEN loudness_lufs ELSE ? END,
+        peak_db             = CASE WHEN COALESCE(loudness_version, 0) >= ${WHOLE_FILE_LOUDNESS_VERSION} THEN peak_db ELSE ? END,
         structure_json      = ?,
         pace_json           = ?,
         beats_json          = ?,
@@ -693,7 +696,12 @@ export function clearAnalysis(opts: { keepVocal?: boolean; clearStems?: boolean 
   const stemsCol = opts.clearStems ? ' stems_at = NULL,' : '';
   d.prepare(
     `UPDATE tracks SET bpm = NULL, musical_key = NULL, intro_ms = NULL,
-      analysis_confidence = NULL, loudness_lufs = NULL, peak_db = NULL,
+      analysis_confidence = NULL,
+      -- A whole-file loudness (B13) survives a re-analysis: it is not a product
+      -- of the analysis window, and re-reading every file to get it back is the
+      -- expensive pass. Only the window's figures are cleared.
+      loudness_lufs = CASE WHEN COALESCE(loudness_version, 0) >= ${WHOLE_FILE_LOUDNESS_VERSION} THEN loudness_lufs ELSE NULL END,
+      peak_db = CASE WHEN COALESCE(loudness_version, 0) >= ${WHOLE_FILE_LOUDNESS_VERSION} THEN peak_db ELSE NULL END,
       structure_json = NULL, pace_json = NULL, beats_json = NULL, bars_json = NULL,
       key_ranges_json = NULL, outro_json = NULL,
       lead_silence_ms = NULL, tail_silence_ms = NULL, tail_start_ms = NULL,${vocalCol}${stemsCol} analysis_version = NULL,

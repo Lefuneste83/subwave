@@ -14,6 +14,7 @@ Endpoints:
   GET  /health   → {ok, engines, analyze_loaded, analyze_audio_capable, analyze_vocal_capable,
                      analyze_facets_capable, …}
   POST /analyze  → {ok, bpm, key, intro_ms, confidence, ...}
+  POST /loudness → {ok, loudness_lufs, true_peak_db, sample_peak_db, lra_lu, seconds}
 """
 
 import asyncio
@@ -57,6 +58,15 @@ def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int
 
 
 ANALYZE_CONCURRENCY = _bounded_int_env("ANALYZE_CONCURRENCY", 1, 1, 8)
+
+# Whole-file loudness passes in flight (B13). Each is one short-lived ffmpeg
+# process on ONE CPU thread with no model, so it runs outside the analyze pool
+# (which holds CLAP/Demucs) and can go much wider. The controller sends up to
+# its own ANALYZE_LOUDNESS_CONCURRENCY; this caps what this host accepts.
+LOUDNESS_CONCURRENCY = _bounded_int_env("ANALYZE_LOUDNESS_CONCURRENCY", 4, 1, 32)
+# Wall-clock bound for one file. A long DJ mix streamed from Navidrome is the
+# slow case (a 247 MB mix took 89 s in the field test).
+LOUDNESS_TIMEOUT_S = float(_bounded_int_env("ANALYZE_LOUDNESS_TIMEOUT_S", 900, 30, 7200))
 
 # Idle worker recycle (#1204 follow-up). The worker's own idle release drops
 # the CLAP/Demucs singletons, but ~1GB of librosa/numba/torch scratch stays
@@ -594,6 +604,17 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="subwave-analyzer", lifespan=lifespan)
 
+# Created lazily inside the running loop (an asyncio primitive must not be
+# bound to an import-time loop).
+_loudness_sem: asyncio.Semaphore | None = None
+
+
+def _loudness_semaphore() -> asyncio.Semaphore:
+    global _loudness_sem
+    if _loudness_sem is None:
+        _loudness_sem = asyncio.Semaphore(LOUDNESS_CONCURRENCY)
+    return _loudness_sem
+
 
 @app.get("/health")
 async def health():
@@ -658,6 +679,11 @@ async def health():
             round(time.monotonic() - max(heavy_times), 1) if heavy_times else None
         ),
         "analyze_worker_recycles": sum(worker.recycles for worker in analyzer_workers),
+        # Whole-file loudness (B13) — a version signal: only images that ship
+        # POST /loudness emit the key, so a controller never sends the pass to
+        # an older sidecar. It does not depend on the worker pool being ready.
+        "analyze_loudness_capable": True,
+        "analyze_loudness_concurrency": LOUDNESS_CONCURRENCY,
     }
 
 
@@ -827,3 +853,54 @@ async def embed_text(req: EmbedTextRequest):
     if not msg.get("ok"):
         raise HTTPException(500, msg.get("error") or "embed-text failed")
     return {"ok": True, "embeddings": msg.get("text_embeddings") or []}
+
+
+class LoudnessRequest(BaseModel):
+    # Same two inputs as /analyze: a stream url (the usual case: the whole file
+    # is read, so the controller does not stage it) or a path on the shared
+    # volume.
+    url: str | None = None
+    path: str | None = None
+
+
+@app.post("/loudness")
+async def loudness(req: LoudnessRequest):
+    """Whole-file integrated loudness + true peak (B13): one streamed ffmpeg
+    pass over the WHOLE file at its own rate, in a one-shot worker process
+    (`analyze_worker.py --loudness`). No model, one CPU thread; bounded by its
+    own semaphore so a bulk re-measure never queues behind CLAP/Demucs jobs."""
+    if req.path:
+        if not os.path.isfile(req.path) or not os.access(req.path, os.R_OK):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "path_unavailable",
+                    "message": f"analyzer cannot read controller path: {req.path}",
+                },
+            )
+        src = req.path
+    elif req.url:
+        src = req.url
+    else:
+        raise HTTPException(400, "missing 'url' or 'path'")
+    async with _loudness_semaphore():
+        proc = await asyncio.create_subprocess_exec(
+            ANALYZE_PYTHON, ANALYZE_WORKER, "--loudness", src,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "ANALYZE_LOUDNESS_TIMEOUT_S": str(LOUDNESS_TIMEOUT_S)},
+        )
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=LOUDNESS_TIMEOUT_S + 30)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise HTTPException(500, f"loudness pass timed out after {LOUDNESS_TIMEOUT_S:.0f}s")
+    try:
+        msg = json.loads((out or b"").decode("utf-8", "replace").strip().splitlines()[-1])
+    except Exception:  # noqa: BLE001 — a worker that printed nothing usable
+        tail = (err or b"").decode("utf-8", "replace").strip()[-300:]
+        raise HTTPException(500, f"loudness worker gave no result: {tail or 'no output'}")
+    if not msg.get("ok"):
+        raise HTTPException(500, msg.get("error") or "loudness failed")
+    return msg

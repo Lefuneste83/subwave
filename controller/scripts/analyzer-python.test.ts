@@ -29,6 +29,7 @@ const SUITES = [
   'analyzer_beat_test.py', // main beat tracking is best-effort (#1647)
   'analyzer_facets_test.py', // facet functions are pure; path wrappers = decode + facet
   'analyzer_stems_marker_test.py', // no stem writes into an unmarked (unmounted) stems root
+  'analyzer_whole_loudness_test.py', // whole-file loudness + true peak (B13)
 ];
 
 const probe = spawnSync('python3', ['--version'], { stdio: 'ignore' });

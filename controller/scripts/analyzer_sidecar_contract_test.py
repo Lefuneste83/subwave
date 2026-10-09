@@ -3,6 +3,8 @@
 import asyncio
 import importlib.util
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import types
@@ -363,6 +365,47 @@ def test_concurrency_env_validation():
             os.environ["SUBWAVE_TEST_CONCURRENCY"] = old
 
 
+async def test_loudness_endpoint():
+    """POST /loudness (B13): same path contract as /analyze, a missing input is
+    a 400, a worker failure a 500 carrying the reason, and a real file comes
+    back with loudness and true peak from the one-shot worker."""
+    missing = "/definitely/not/here.flac"
+    try:
+        await server.loudness(server.LoudnessRequest(path=missing))
+        raise AssertionError("missing path should raise")
+    except HTTPException as err:
+        assert err.status_code == 422, err.status_code
+        assert err.detail["code"] == "path_unavailable", err.detail
+    try:
+        await server.loudness(server.LoudnessRequest())
+        raise AssertionError("no input should raise")
+    except HTTPException as err:
+        assert err.status_code == 400, err.status_code
+    old = (server.ANALYZE_PYTHON, server.ANALYZE_WORKER)
+    server.ANALYZE_PYTHON = sys.executable
+    server.ANALYZE_WORKER = str(Path(__file__).parent / "analyze_worker.py")
+    try:
+        try:
+            await server.loudness(server.LoudnessRequest(url="file:///definitely/not/here.flac"))
+            raise AssertionError("an unreadable source should raise")
+        except HTTPException as err:
+            assert err.status_code == 500, err.status_code
+            assert "ffmpeg" in str(err.detail), err.detail
+        if shutil.which("ffmpeg"):
+            with tempfile.TemporaryDirectory() as tmp:
+                src = os.path.join(tmp, "tone.flac")
+                subprocess.run(
+                    ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                     "sine=frequency=440:sample_rate=48000", "-t", "3", src],
+                    check=True,
+                )
+                out = await server.loudness(server.LoudnessRequest(path=src))
+                assert out["ok"] is True, out
+                assert out["loudness_lufs"] is not None and out["true_peak_db"] is not None, out
+    finally:
+        server.ANALYZE_PYTHON, server.ANALYZE_WORKER = old
+
+
 async def main():
     test_concurrency_env_validation()
     await test_pool_concurrency()
@@ -375,6 +418,7 @@ async def main():
     await test_latched_capability_error_does_not_fan_out()
     await test_path_contract()
     await test_facet_contract()
+    await test_loudness_endpoint()
 
 
 asyncio.run(main())

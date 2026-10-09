@@ -73,9 +73,11 @@ export function endingKeyFrom(
 export const LOUDNESS_TARGET_LUFS = -14;
 export const LOUDNESS_MAX_BOOST_DB = 6;
 export const LOUDNESS_CUT_CLAMP_DB = 12;
-// Boost never pushes the measured sample peak past this ceiling, which matches
-// radio.liq's brick-wall limiter threshold. Peak covers the analysis window
-// only, so the limiter stays the backstop for later peaks.
+// Boost never pushes the measured peak past this ceiling, which matches
+// radio.liq's limiter threshold. Once the whole-file loudness pass has run
+// (B13, library-db loudness_version) the peak is the file's TRUE peak, so the
+// ceiling holds for the whole track; before that it is the analysis window's
+// sample peak, and the limiter stays the backstop for anything louder later.
 export const LOUDNESS_PEAK_CEILING_DBFS = -1;
 
 // dB gain toward the target, clamped. null when the track has no loudness
@@ -125,7 +127,8 @@ export const REPLAYGAIN_REFERENCE_LUFS = -18;
 
 // OpenSubsonic `replayGain` → the same {lufs, peakDb} shape the analyzer
 // measures, and preferred over it when present (#998): the tag is a whole-file
-// R128 scan, the measurement covers only the leading window. trackPeak is
+// R128 scan, the head measurement covers only the leading window (the
+// whole-file loudness pass, B13, closes that gap when enabled). trackPeak is
 // linear (1.0 = FS) → dBFS. null when there is no usable trackGain.
 export function loudnessFromReplayGain(
   rg: unknown,

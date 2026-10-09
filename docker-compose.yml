@@ -341,6 +341,10 @@ services:
       - DEMUCS_MODEL=${DEMUCS_MODEL:-}
       - ANALYZE_SECONDS=${ANALYZE_SECONDS:-}
       - ANALYZE_CONCURRENCY=${ANALYZE_CONCURRENCY:-}
+      # Whole-file loudness passes (B13) this analyzer runs at once: one ffmpeg
+      # process on one CPU thread each, no model (default 4, 1-32).
+      - ANALYZE_LOUDNESS_CONCURRENCY=${ANALYZE_LOUDNESS_CONCURRENCY:-}
+      - ANALYZE_LOUDNESS_TIMEOUT_S=${ANALYZE_LOUDNESS_TIMEOUT_S:-}
       - ANALYZE_CLAP_WINDOWS=${ANALYZE_CLAP_WINDOWS:-}
       - ANALYZE_OUTRO_SECONDS=${ANALYZE_OUTRO_SECONDS:-}
       # CLAP isn't gated, but anonymous HF downloads are rate-limited. Same var
