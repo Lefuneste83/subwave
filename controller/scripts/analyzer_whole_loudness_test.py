@@ -101,6 +101,28 @@ def t_missing_fields_read_none():
     assert all(v is None for v in fig.values()), fig
 
 
+def t_failure_reason_names_the_cause():
+    err = (
+        "[Parsed_ebur128_0 @ 0x1] [Eval @ 0x2] Undefined constant or missing '(' in 'quiet'\n"
+        "[Parsed_ebur128_0 @ 0x1] Unable to parse option value \"quiet\"\n"
+        "Error reinitializing filters!\n"
+        "Failed to inject frame into filter network: Invalid argument\n"
+        "Conversion failed!\n"
+    )
+    r = aw.ffmpeg_failure_reason(err)
+    assert "Unable to parse option value" in r and "Conversion failed!" in r, r
+    assert aw.ffmpeg_failure_reason("") == "no output"
+    assert aw.ffmpeg_failure_reason("just a line\n") == "just a line"
+
+
+def t_filter_runs_on_old_ffmpeg():
+    # framelog=quiet is ffmpeg 6+ only: the analyzer image (Debian bookworm)
+    # ships 5.1, where it fails every pass. Pin the portable value.
+    src = open(os.path.join(HERE, "analyze_worker.py")).read()
+    assert "framelog=quiet" not in src, "framelog=quiet breaks ffmpeg 5.1"
+    assert "ebur128=peak=sample+true:framelog=verbose" in src
+
+
 def run_cli(src):
     p = subprocess.run(
         [sys.executable, os.path.join(HERE, "analyze_worker.py"), "--loudness", src],
@@ -172,6 +194,8 @@ test("parses the ebur128 summary", t_parses_summary)
 test("digital silence reads as no loudness", t_silence_is_no_loudness)
 test("only the final summary block counts", t_only_the_final_block_counts)
 test("missing fields read None", t_missing_fields_read_none)
+test("an ffmpeg failure names its cause, not just 'Conversion failed!'", t_failure_reason_names_the_cause)
+test("the filter options run on ffmpeg 5.1 (analyzer image)", t_filter_runs_on_old_ffmpeg)
 test("--loudness measures the whole file, not the opening", t_cli_measures_whole_file)
 test("--loudness on silence returns neither figure", t_cli_silence)
 test("--loudness reports a failure as ok:false, never a traceback", t_cli_reports_failure)
