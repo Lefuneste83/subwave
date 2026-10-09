@@ -347,6 +347,10 @@ services:
       - DEMUCS_MODEL=\${DEMUCS_MODEL:-}
       - ANALYZE_SECONDS=\${ANALYZE_SECONDS:-}
       - ANALYZE_CONCURRENCY=\${ANALYZE_CONCURRENCY:-}
+      # Whole-file loudness passes (B13) this analyzer runs at once: one ffmpeg
+      # process on one CPU thread each, no model (default 4, 1-32).
+      - ANALYZE_LOUDNESS_CONCURRENCY=\${ANALYZE_LOUDNESS_CONCURRENCY:-}
+      - ANALYZE_LOUDNESS_TIMEOUT_S=\${ANALYZE_LOUDNESS_TIMEOUT_S:-}
       - ANALYZE_CLAP_WINDOWS=\${ANALYZE_CLAP_WINDOWS:-}
       - ANALYZE_OUTRO_SECONDS=\${ANALYZE_OUTRO_SECONDS:-}
       # CLAP isn't gated, but anonymous HF downloads are rate-limited. Same var
@@ -670,6 +674,10 @@ services:
       - DEMUCS_MODEL=\${DEMUCS_MODEL:-}
       - ANALYZE_SECONDS=\${ANALYZE_SECONDS:-}
       - ANALYZE_CONCURRENCY=\${ANALYZE_CONCURRENCY:-}
+      # Whole-file loudness passes (B13) this analyzer runs at once: one ffmpeg
+      # process on one CPU thread each, no model (default 4, 1-32).
+      - ANALYZE_LOUDNESS_CONCURRENCY=\${ANALYZE_LOUDNESS_CONCURRENCY:-}
+      - ANALYZE_LOUDNESS_TIMEOUT_S=\${ANALYZE_LOUDNESS_TIMEOUT_S:-}
       - ANALYZE_CLAP_WINDOWS=\${ANALYZE_CLAP_WINDOWS:-}
       - ANALYZE_OUTRO_SECONDS=\${ANALYZE_OUTRO_SECONDS:-}
       # Anonymous HF downloads are rate-limited; same var as tts-heavy.
@@ -943,6 +951,10 @@ services:
       - DEMUCS_MODEL=\${DEMUCS_MODEL:-}
       - ANALYZE_SECONDS=\${ANALYZE_SECONDS:-}
       - ANALYZE_CONCURRENCY=\${ANALYZE_CONCURRENCY:-}
+      # Whole-file loudness passes (B13) this analyzer runs at once: one ffmpeg
+      # process on one CPU thread each, no model (default 4, 1-32).
+      - ANALYZE_LOUDNESS_CONCURRENCY=\${ANALYZE_LOUDNESS_CONCURRENCY:-}
+      - ANALYZE_LOUDNESS_TIMEOUT_S=\${ANALYZE_LOUDNESS_TIMEOUT_S:-}
       - ANALYZE_CLAP_WINDOWS=\${ANALYZE_CLAP_WINDOWS:-}
       - ANALYZE_OUTRO_SECONDS=\${ANALYZE_OUTRO_SECONDS:-}
       # Anonymous HF downloads are rate-limited; same var as tts-heavy.
@@ -1276,6 +1288,22 @@ SITE_URL=
 #                        # both station and GPU hosts. Each worker can load its
 #                        # own models, increasing CPU/RAM/VRAM plus network and
 #                        # source-server demand; tune to the smaller host limit.
+# ANALYZE_WHOLE_FILE_LOUDNESS=  # 1 = measure loudness + true peak over the
+#                               # WHOLE file (one streamed ffmpeg pass per
+#                               # track) instead of the first ANALYZE_SECONDS.
+#                               # The playback gain then follows the whole
+#                               # track and the boost ceiling sees its real
+#                               # peaks. Off by default: turning it on reads
+#                               # every file in the library once (~2-3 s of CPU
+#                               # per track plus a full download), resumably,
+#                               # quietest-reading tracks first.
+# ANALYZE_LOUDNESS_CONCURRENCY=  # whole-file loudness passes at once (1-32).
+#                                # Set it on BOTH hosts for a remote analyzer:
+#                                # the station sends up to its value (default
+#                                # 2), the analyzer runs up to its own (default
+#                                # 4). One CPU thread each, no GPU, no model.
+# ANALYZE_LOUDNESS_BATCH=0  # tracks per analysis pass (0 = the whole backlog)
+# ANALYZE_LOUDNESS_TIMEOUT_S=900  # one file's time limit, seconds (both hosts)
 # ANALYZE_PROBE_MS=60000  # how long "no analyzer at all" is cached before the
 #                         # /health probe runs again. A backend that ANSWERED is
 #                         # remembered until restart; only the miss is timed, so

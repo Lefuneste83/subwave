@@ -49,7 +49,7 @@ export interface TrackRecord {
   analysisConfidence: number | null;
   analysisVersion: number | null;
   loudnessLufs: number | null; // integrated LUFS (BS.1770); null → unity gain
-  peakDb: number | null;       // sample peak in dBFS over the analysis window
+  peakDb: number | null;       // dBFS: TRUE peak of the whole file once the whole-file loudness pass ran (loudness_version), else the analysis window's sample peak
   structure: TrackSection[] | null; // structural sections over the analysed window
   vocalRanges: TrackSection[] | null; // vocal-presence ranges; [] = instrumental, null = not computed
   pace: TrackPaceSpan[] | null;     // perceptual energy curve (0..1 per span)

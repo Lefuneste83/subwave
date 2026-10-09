@@ -98,6 +98,26 @@ export const config = {
     // the MISS is timed; a backend that answered is remembered for the process
     // lifetime. 0 disables the caching.
     missProbeIntervalMs: envInt('ANALYZE_PROBE_MS', 60_000, { min: 0 }),
+    // Whole-file loudness (B13): integrated loudness + true peak over the WHOLE
+    // file, replacing the analysis window's figures as the playback gain's
+    // input. Off unless enabled: turning it on re-reads every file in the
+    // library once (a full download per track), so an upgrade alone must not
+    // start it. See docs/internals/music.md "Whole-file loudness".
+    wholeFileLoudness: envStr('ANALYZE_WHOLE_FILE_LOUDNESS', '').toLowerCase(),
+    // Loudness passes in flight. Each is one ffmpeg process on one CPU thread
+    // with no model, so it can go wider than ANALYZE_CONCURRENCY; the sidecar
+    // caps what it accepts with its own ANALYZE_LOUDNESS_CONCURRENCY.
+    loudnessConcurrency: envInt('ANALYZE_LOUDNESS_CONCURRENCY', 2, { min: 1, max: 32 }),
+    // Cap on tracks re-measured per analysis pass; 0 (default) = the whole
+    // backlog. The pass is resumable (a track's stamp is its progress) and the
+    // quiet gate pauses it, so the cap is only for an operator who wants a
+    // library-wide re-measure spread over several runs.
+    loudnessBatch: envInt('ANALYZE_LOUDNESS_BATCH', 0, { min: 0 }),
+    // One file's wall-clock bound (a long mix streamed over the network is the
+    // slow case).
+    // Same variable (and unit) as the analyzer sidecar's, so one .env line
+    // sets both.
+    loudnessTimeoutMs: envInt('ANALYZE_LOUDNESS_TIMEOUT_S', 900, { min: 30, max: 7200 }) * 1000,
   },
   kokoro: {
     python: envStr('KOKORO_PYTHON', '/opt/kokoro/venv/bin/python'),

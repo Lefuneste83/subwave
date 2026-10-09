@@ -438,6 +438,13 @@ export async function migrate(embeddingDim: number, reseed = false, adoptStoredD
     }).immediate();
   }
 
+  // Whole-file loudness (B13). Added by NAME on every open rather than as a
+  // numbered step: user_version is a single counter, and a numbered step here
+  // would either collide with the next upstream migration or, on a fork that
+  // takes this change before an earlier-numbered upstream step, jump past that
+  // step and skip it for good. Idempotent and nullable, so it costs one PRAGMA.
+  ensureWholeFileLoudnessColumns(d);
+
   // Reconcile the requested embedding dim against what physically exists. The
   // vec0 table's FLOAT[N] schema is the authority for what inserts accept, not
   // embedding_meta, which is written separately by the tagger and can lag.
@@ -548,4 +555,15 @@ function vecTableDim(d: Database.Database): number | null {
 // behind --reseed.
 function vecCount(d: Database.Database): number {
   return (d.prepare('SELECT COUNT(*) AS n FROM track_vectors').get() as { n: number }).n;
+}
+
+// `loudness_version` says WHICH measurement loudness_lufs/peak_db hold: NULL =
+// the analysis window's (first ANALYZE_SECONDS at ANALYZE_SR, sample peak),
+// WHOLE_FILE_LOUDNESS_VERSION = integrated loudness + TRUE peak over the whole
+// file at its native rate. `loudness_attempts` counts consecutive failed
+// whole-file passes, so a file that can never be read leaves the scope.
+function ensureWholeFileLoudnessColumns(d: Database.Database): void {
+  const have = new Set((d.prepare('PRAGMA table_info(tracks)').all() as Array<{ name: string }>).map(c => c.name));
+  const add = [['loudness_version', 'INTEGER'], ['loudness_attempts', 'INTEGER']].filter(([c]) => !have.has(c));
+  if (add.length) runDdl(d, add.map(([c, t]) => `ALTER TABLE tracks ADD COLUMN ${c} ${t};`).join('\n'));
 }

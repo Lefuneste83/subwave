@@ -2047,6 +2047,96 @@ def facet_loudness(y_src, sr):
     return out
 
 
+# --- Whole-file loudness (B13) ------------------------------------------------
+# facet_loudness above measures the decoded analysis WINDOW: the first
+# ANALYZE_SECONDS, resampled to ANALYZE_SR. That is the right input for bpm and
+# key, and the wrong one for a playback gain: a quiet opening reads the whole
+# track as quiet (so it is boosted for the opening), and the peak that caps the
+# boost never sees the louder passages after it, nor the inter-sample peaks the
+# 22 kHz resample filters away. Measured on a real library: whole-file loudness
+# above the window figure by +1.6 dB median (up to +19.6 dB), and 8 of 30
+# tracks reaching a true peak over 0 dBFS with the window-derived gain.
+#
+# This pass reads the WHOLE file at its own rate, in one streamed ffmpeg run
+# (constant memory, no decode into RAM): BS.1770 integrated loudness and the
+# true peak (4x oversampled) from the same pass over the same audio, so the two
+# figures always describe one measurement. CPU only; ~2-3 s for a typical
+# track on one thread, linear in duration.
+
+# Below the BS.1770 absolute gate nothing counts: ffmpeg prints -70 LUFS for
+# digital silence. Treated as "no loudness", like measure_loudness's -inf.
+_WHOLE_LOUDNESS_FLOOR_LUFS = -69.9
+_WHOLE_LOUDNESS_TIMEOUT_S = float(
+    os.environ.get("ANALYZE_LOUDNESS_TIMEOUT_S", "").strip() or "900"
+)
+
+
+def parse_ebur128_summary(text):
+    """Integrated loudness, LRA, sample peak and true peak out of ffmpeg's
+    ebur128 summary (the block printed at the end of the run). A field is None
+    when absent or -inf. Pure, so it is tested without ffmpeg."""
+    # Only the final block counts; with framelog=quiet it is the only one, but
+    # a per-frame log line must never be read as the result.
+    summary = text[text.rfind("Summary:"):] if "Summary:" in text else text
+
+    def grab(pattern):
+        m = re.search(pattern, summary)
+        if not m or m.group(1) in ("-inf", "inf", "nan"):
+            return None
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
+
+    num = r"(-?inf|nan|-?[\d.]+)"
+    lufs = grab(r"Integrated loudness:\s*\n\s*I:\s*" + num + r"\s*LUFS")
+    lra = grab(r"Loudness range:\s*\n\s*LRA:\s*" + num + r"\s*LU")
+    sample_peak = grab(r"Sample peak:\s*\n\s*Peak:\s*" + num + r"\s*dBFS")
+    true_peak = grab(r"True peak:\s*\n\s*Peak:\s*" + num + r"\s*dBFS")
+    if lufs is not None and lufs <= _WHOLE_LOUDNESS_FLOOR_LUFS:
+        lufs = None
+    return {"loudness_lufs": lufs, "lra_lu": lra, "sample_peak_db": sample_peak, "true_peak_db": true_peak}
+
+
+def measure_whole_file_loudness(src, timeout_s=None):
+    """One streamed ffmpeg pass over the whole of `src` (a URL or a path) at its
+    native rate. Returns {"loudness_lufs", "true_peak_db", "sample_peak_db",
+    "lra_lu", "seconds"}; loudness and true peak are both set or both None
+    (digital silence), never one without the other. Raises on any ffmpeg
+    failure, so the caller records an attempt instead of a measurement."""
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("ffmpeg not found")
+    t0 = time.monotonic()
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-threads", "1",
+                "-i", src, "-map", "0:a:0", "-vn",
+                "-af", "ebur128=peak=sample+true:framelog=quiet",
+                "-f", "null", "-",
+            ],
+            capture_output=True, text=True, errors="replace",
+            timeout=timeout_s or _WHOLE_LOUDNESS_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"loudness pass timed out after {timeout_s or _WHOLE_LOUDNESS_TIMEOUT_S:.0f}s")
+    elapsed = time.monotonic() - t0
+    err = proc.stderr or ""
+    if proc.returncode != 0:
+        last = [l for l in err.strip().splitlines() if l.strip()]
+        raise RuntimeError(f"ffmpeg exited {proc.returncode}: {last[-1] if last else 'no output'}")
+    if "Summary:" not in err:
+        raise RuntimeError("ffmpeg printed no ebur128 summary")
+    fig = parse_ebur128_summary(err)
+    if fig["loudness_lufs"] is None or fig["true_peak_db"] is None:
+        # One measurement: a loudness without its peak would let a boost
+        # through with no ceiling, so both go together or neither does.
+        fig["loudness_lufs"] = None
+        fig["true_peak_db"] = None
+    fig["seconds"] = round(elapsed, 2)
+    return fig
+
+
 # Field order of analyze()'s flat response, kept stable across the facet split
 # so the emitted JSON is unchanged. Unknown keys (none today) go last.
 _RESULT_ORDER = (
@@ -2270,6 +2360,18 @@ def analyze(
 
 
 def main():
+    # One-shot whole-file loudness (B13): `analyze_worker.py --loudness <url|path>`
+    # prints one JSON line and exits. No librosa/model import, so it starts in
+    # tens of milliseconds and many can run side by side (the sidecar's
+    # /loudness endpoint and the local backend both spawn it per track).
+    if len(sys.argv) >= 3 and sys.argv[1] == "--loudness":
+        try:
+            print(json.dumps({"ok": True, **measure_whole_file_loudness(sys.argv[2])}))
+        except Exception as e:  # noqa: BLE001 — reported, never a traceback
+            print(json.dumps({"ok": False, "error": str(e)[:500]}))
+        sys.stdout.flush()
+        return
+
     try:
         import librosa  # noqa: F401
         import numpy  # noqa: F401

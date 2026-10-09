@@ -22,6 +22,17 @@ export const TAGGER_VERSION = 3;
 // v7: added edge dead air (lead_silence_ms, tail_silence_ms, tail_start_ms).
 export const ANALYSIS_VERSION = 7;
 
+// Which measurement loudness_lufs/peak_db hold (column loudness_version, B13).
+// NULL = the analysis window's figures (the first ANALYZE_SECONDS at
+// ANALYZE_SR, sample peak). This = integrated loudness + TRUE peak over the
+// whole file at its own rate, written by the whole-file loudness pass. Bump to
+// re-measure every track once (e.g. a change to the measurement itself); a head
+// re-analysis never overwrites a row stamped at or above it.
+export const WHOLE_FILE_LOUDNESS_VERSION = 2;
+// Consecutive failed whole-file passes before a track leaves the scope (a file
+// the music server cannot serve). A success, or a clear, resets it.
+export const MAX_LOUDNESS_ATTEMPTS = 3;
+
 // CLAP audio-embedding dim, fixed by the model — no per-model negotiation, and a
 // different space from the text vectors, in its own vec0 table.
 export const AUDIO_EMBEDDING_DIM = 512;
