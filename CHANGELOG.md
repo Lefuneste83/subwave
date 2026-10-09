@@ -12,6 +12,43 @@
   independent. Operators who already reconfigured profiles under #1777 must
   mark those profiles before upgrading. See [upgrade and recovery steps](docs/multi-station.md#upgrading-existing-profiles).
 
+## [1.21.0](https://github.com/perminder-klair/subwave/compare/v1.20.0...v1.21.0) (2026-10-09)
+
+
+### Features
+
+* **app:** add an About sheet that shows listeners how to run their own station ([#1849](https://github.com/perminder-klair/subwave/issues/1849)) ([ea3575d](https://github.com/perminder-klair/subwave/commit/ea3575dc8e9adf29cabe69cc4959d1fda893ebdf))
+* **app:** show each show's description and its DJ's tagline in the schedule ([#1848](https://github.com/perminder-klair/subwave/issues/1848)) ([#1852](https://github.com/perminder-klair/subwave/issues/1852)) ([df3601a](https://github.com/perminder-klair/subwave/commit/df3601aac5319aec348e643cbdfde2caf9e425bd))
+* **app:** unlock private stations with the station password ([#1848](https://github.com/perminder-klair/subwave/issues/1848)) ([#1853](https://github.com/perminder-klair/subwave/issues/1853)) ([2c3fc58](https://github.com/perminder-klair/subwave/commit/2c3fc58e6ad93c9ccdc52bb83e4c80db4df07163))
+* **web:** add AXO-1, an isometric hi-fi stack player skin ([#1832](https://github.com/perminder-klair/subwave/issues/1832)) ([4a91212](https://github.com/perminder-klair/subwave/commit/4a912126675b8f0b4e0d3e16f39aed218b186711))
+* **web:** add Cipher-3, a rotor cipher machine player skin ([4a91212](https://github.com/perminder-klair/subwave/commit/4a912126675b8f0b4e0d3e16f39aed218b186711))
+* **web:** draw DJ Doc's rig, the empty states and admin loading in isometric ([4a91212](https://github.com/perminder-klair/subwave/commit/4a912126675b8f0b4e0d3e16f39aed218b186711))
+* **web:** draw Under the Hood and the 404 in isometric ([4a91212](https://github.com/perminder-klair/subwave/commit/4a912126675b8f0b4e0d3e16f39aed218b186711))
+
+
+### Bug Fixes
+
+* **app:** show the DJ's words when the listener hears them ([#1848](https://github.com/perminder-klair/subwave/issues/1848)) ([#1850](https://github.com/perminder-klair/subwave/issues/1850)) ([4456be0](https://github.com/perminder-klair/subwave/commit/4456be0391cafdec1474916200bbc1722a006f5e))
+* **app:** switch to a show's theme on air, and show Played times ([#1848](https://github.com/perminder-klair/subwave/issues/1848)) ([#1851](https://github.com/perminder-klair/subwave/issues/1851)) ([26e9f49](https://github.com/perminder-klair/subwave/commit/26e9f49f439788fba93a0c230b3d523566de5a77))
+* **controller:** bound per-client limiter maps and harden the admin lockout ([#1859](https://github.com/perminder-klair/subwave/issues/1859)) ([e3c12ce](https://github.com/perminder-klair/subwave/commit/e3c12ce7df6fef098f348261159629d87fa00e5c))
+* **controller:** close backup, request and MCP hardening gaps ([#1866](https://github.com/perminder-klair/subwave/issues/1866)) ([c7c668e](https://github.com/perminder-klair/subwave/commit/c7c668ea813cec54734b582669463c85e0e96f51))
+* **controller:** give GET /state and GET /session explicit public projections ([#1858](https://github.com/perminder-klair/subwave/issues/1858)) ([6d98d82](https://github.com/perminder-klair/subwave/commit/6d98d82ae47ac5c3b3b3b980411ec6a3b5b01b41))
+* **controller:** harden picker tools, LLM failure handling and star curation ([#1865](https://github.com/perminder-klair/subwave/issues/1865)) ([8a568f1](https://github.com/perminder-klair/subwave/commit/8a568f1df02bb25cb801083a9e541ed9ba4c1391))
+* **controller:** harden provider credential, settings file and tune-in URL handling ([#1860](https://github.com/perminder-klair/subwave/issues/1860)) ([d8e6cff](https://github.com/perminder-klair/subwave/commit/d8e6cff3125296c6f6d6b750829242d88571cb43))
+* **controller:** harden route reliability for onboarding, webhooks, archives and library maintenance ([#1864](https://github.com/perminder-klair/subwave/issues/1864)) ([b08e4fa](https://github.com/perminder-klair/subwave/commit/b08e4fac67d3e3ee4b73b2da59055755c17d5f88))
+* **controller:** harden the daily token budget, request line and Open-Meteo usage ([#1862](https://github.com/perminder-klair/subwave/issues/1862)) ([43b1ed1](https://github.com/perminder-klair/subwave/commit/43b1ed133767213a5cd21e740253642595e68a26))
+* **controller:** harden the station-password auth surfaces ([#1857](https://github.com/perminder-klair/subwave/issues/1857)) ([1bc0587](https://github.com/perminder-klair/subwave/commit/1bc05871829b04f30cee4f49e287b8dd1b513d72))
+* **controller:** hold imported skill code for review and validate backup/persona imports ([#1863](https://github.com/perminder-klair/subwave/issues/1863)) ([e41265c](https://github.com/perminder-klair/subwave/commit/e41265cfeb13423b57b02278b52e7d0cb5d87f02))
+* **controller:** treat listener request text as data on every path ([#1861](https://github.com/perminder-klair/subwave/issues/1861)) ([80e4b47](https://github.com/perminder-klair/subwave/commit/80e4b476f361b7646a43489d00a56adda64d1c0f))
+* **docker:** read icecast secrets as data and harden the state root ([#1856](https://github.com/perminder-klair/subwave/issues/1856)) ([12da85e](https://github.com/perminder-klair/subwave/commit/12da85e9e36e879b48dbf129aad115ed86e16c78))
+* **web:** slim Cipher and AXO chrome, frame the whole AXO stack on phones, icons over glyphs ([#1843](https://github.com/perminder-klair/subwave/issues/1843)) ([932aede](https://github.com/perminder-klair/subwave/commit/932aede7cfcc92297e4adad8826f87f13d094fae))
+* **web:** time the lock-screen DJ swap to what the listener hears, and show Played times ([#1855](https://github.com/perminder-klair/subwave/issues/1855)) ([fc34e8a](https://github.com/perminder-klair/subwave/commit/fc34e8afb467edeb309d3eafa4c5667081e45bbb))
+
+
+### Documentation
+
+* private-station.md, concepts.md, app/CLAUDE.md, app/README.md. ([2c3fc58](https://github.com/perminder-klair/subwave/commit/2c3fc58e6ad93c9ccdc52bb83e4c80db4df07163))
+
 ## [1.20.0](https://github.com/perminder-klair/subwave/compare/v1.19.0...v1.20.0) (2026-10-08)
 
 
