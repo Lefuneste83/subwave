@@ -2229,8 +2229,8 @@ def parse_ebur128_summary(text):
     """Integrated loudness, LRA, sample peak and true peak out of ffmpeg's
     ebur128 summary (the block printed at the end of the run). A field is None
     when absent or -inf. Pure, so it is tested without ffmpeg."""
-    # Only the final block counts; with framelog=quiet it is the only one, but
-    # a per-frame log line must never be read as the result.
+    # Only the final block counts: per-frame lines are kept out of the log
+    # (framelog=verbose), but one must never be read as the result.
     summary = text[text.rfind("Summary:"):] if "Summary:" in text else text
 
     def grab(pattern):
@@ -2252,6 +2252,24 @@ def parse_ebur128_summary(text):
     return {"loudness_lufs": lufs, "lra_lu": lra, "sample_peak_db": sample_peak, "true_peak_db": true_peak}
 
 
+# ffmpeg ends every failure with the same generic line ("Conversion failed!"),
+# the cause is earlier. The first line naming an error is the useful one; the
+# last line stays as the fallback. Pure, so it is tested without ffmpeg.
+_FFMPEG_ERROR_HINTS = ("error", "invalid", "unable", "no such", "not found", "failed", "refused", "denied", "server returned")
+
+
+def ffmpeg_failure_reason(stderr):
+    lines = [l.strip() for l in (stderr or "").splitlines() if l.strip()]
+    if not lines:
+        return "no output"
+    generic = {"conversion failed!"}
+    for l in lines:
+        low = l.lower()
+        if low not in generic and any(h in low for h in _FFMPEG_ERROR_HINTS):
+            return l[:300] if l == lines[-1] else f"{l[:300]} (… {lines[-1][:120]})"
+    return lines[-1][:300]
+
+
 def measure_whole_file_loudness(src, timeout_s=None):
     """One streamed ffmpeg pass over the whole of `src` (a URL or a path) at its
     native rate. Returns {"loudness_lufs", "true_peak_db", "sample_peak_db",
@@ -2266,7 +2284,12 @@ def measure_whole_file_loudness(src, timeout_s=None):
             [
                 "ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-threads", "1",
                 "-i", src, "-map", "0:a:0", "-vn",
-                "-af", "ebur128=peak=sample+true:framelog=quiet",
+                # framelog=verbose, NOT quiet: `quiet` only exists from ffmpeg
+                # 6, and 5.1 (Debian bookworm, the analyzer image) rejects the
+                # whole filter, so every pass failed with "Conversion failed!".
+                # verbose sits above the default info level, so the per-frame
+                # lines stay out of stderr and only the summary is printed.
+                "-af", "ebur128=peak=sample+true:framelog=verbose",
                 "-f", "null", "-",
             ],
             capture_output=True, text=True, errors="replace",
@@ -2277,8 +2300,7 @@ def measure_whole_file_loudness(src, timeout_s=None):
     elapsed = time.monotonic() - t0
     err = proc.stderr or ""
     if proc.returncode != 0:
-        last = [l for l in err.strip().splitlines() if l.strip()]
-        raise RuntimeError(f"ffmpeg exited {proc.returncode}: {last[-1] if last else 'no output'}")
+        raise RuntimeError(f"ffmpeg exited {proc.returncode}: {ffmpeg_failure_reason(err)}")
     if "Summary:" not in err:
         raise RuntimeError("ffmpeg printed no ebur128 summary")
     fig = parse_ebur128_summary(err)
