@@ -675,6 +675,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
       const vocal = want
         ? (want.vocal ? (lyricVocal && !stems_dir ? false : true) : (stems_dir ? undefined : false))
         : vocalBackfill ? (lyricVocal && !stems_dir ? false : true) : undefined;
+      let viaUrl = !localPath;
       const a = localPath
         ? await analyzer.analyzePathWithUrlFallback(id, localPath, {
             embed,
@@ -683,7 +684,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
             stems_dir,
             stems_require_marker: stems_dir ? true : undefined,
             embedding_only: embeddingOnly || undefined,
-          })
+          }, () => { viaUrl = true; })
         : await analyzer.analyze(id, {
             embed,
             vocal,
@@ -724,9 +725,9 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
           tailStartMs: a.tailStartMs,
           stemsAttempted: a.stemsCached !== null,
           // Recorded on the facet rows; 'capped' explains a missing tail.
-          source: localPath
-            ? (localComplete === true ? 'full' : localComplete === false ? 'capped' : 'unknown')
-            : 'url',
+          source: viaUrl
+            ? 'url'
+            : (localComplete === true ? 'full' : localComplete === false ? 'capped' : 'unknown'),
         });
         storedVocal = vocalRanges != null;
         // Surface the tail-vocal stuck case rather than retargeting it forever.
