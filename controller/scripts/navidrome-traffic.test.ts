@@ -153,12 +153,18 @@ test('durable attempt events carry attribution without URLs or credentials', asy
 test('a separate maintenance process is visible in durable events but not controller counters', async () => {
   const { stdout } = await promisify(execFile)(process.execPath, [
     '--import', 'tsx', '--input-type=module', '-e',
-    "const s = await import('./src/music/subsonic.ts'); await s.getAlbumList(); console.log(process.pid);",
+    "const s = await import('./src/music/subsonic.ts'); await s.getAlbumList(); process.stdout.write(String(process.pid) + '\\n');",
   ], { env: { ...process.env, STATE_DIR: state } });
-  // The pid is the child's LAST stdout line: anything the import chain prints
-  // first (a dependency notice, a warning routed to stdout) must not turn it
-  // into NaN.
-  const childPid = Number(stdout.trim().split('\n').pop());
+  // The child writes its pid as a plain string: console.log(number) goes
+  // through util.inspect, which colours numbers whenever the inherited env
+  // forces colour (FORCE_COLOR, set by the test runner when the parent runs
+  // on a terminal), and Number('\x1b[33m123\x1b[39m') is NaN: the cause of
+  // this test's intermittent failure. The pid is also read as the last
+  // stdout line with any escape codes stripped, so a dependency notice
+  // printed first, or colour from elsewhere, cannot turn it into NaN.
+  // eslint-disable-next-line no-control-regex
+  const lastLine = stdout.replace(/\x1b\[[0-9;]*m/g, '').trim().split('\n').pop() ?? '';
+  const childPid = Number(lastLine);
   assert.ok(Number.isInteger(childPid) && childPid > 0, `child printed no pid: ${JSON.stringify(stdout)}`);
   assert.equal(requests, 1);
   assert.equal(traffic.snapshot().httpAttempts.total, 0);
