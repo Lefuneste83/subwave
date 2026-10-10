@@ -115,6 +115,16 @@ def t_failure_reason_names_the_cause():
     assert aw.ffmpeg_failure_reason("just a line\n") == "just a line"
 
 
+def t_failure_reason_hides_stream_credentials():
+    url = "http://nd.example:4533/rest/stream?u=someone&t=0123456789abcdef&s=salt42&id=X&format=raw"
+    err = f"{url}: Invalid data found when processing input\n"
+    r = aw.ffmpeg_failure_reason(err)
+    assert "Invalid data found" in r, r
+    assert "0123456789abcdef" not in r and "salt42" not in r and "u=someone" not in r, r
+    assert "http://nd.example:4533/" in r, r
+    assert aw.redact_urls("see https://h.example/a?b=c and /music/x.mp3") == "see https://h.example/… and /music/x.mp3"
+
+
 def t_filter_runs_on_old_ffmpeg():
     # framelog=quiet is ffmpeg 6+ only: the analyzer image (Debian bookworm)
     # ships 5.1, where it fails every pass. Pin the portable value.
@@ -195,6 +205,7 @@ test("digital silence reads as no loudness", t_silence_is_no_loudness)
 test("only the final summary block counts", t_only_the_final_block_counts)
 test("missing fields read None", t_missing_fields_read_none)
 test("an ffmpeg failure names its cause, not just 'Conversion failed!'", t_failure_reason_names_the_cause)
+test("an ffmpeg failure never carries the stream URL's credentials", t_failure_reason_hides_stream_credentials)
 test("the filter options run on ffmpeg 5.1 (analyzer image)", t_filter_runs_on_old_ffmpeg)
 test("--loudness measures the whole file, not the opening", t_cli_measures_whole_file)
 test("--loudness on silence returns neither figure", t_cli_silence)

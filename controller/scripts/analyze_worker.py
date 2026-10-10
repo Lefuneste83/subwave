@@ -2258,8 +2258,20 @@ def parse_ebur128_summary(text):
 _FFMPEG_ERROR_HINTS = ("error", "invalid", "unable", "no such", "not found", "failed", "refused", "denied", "server returned")
 
 
+# A stream URL carries the music server's credentials in its query string
+# (Subsonic u/t/s: a token+salt pair is replayable until the password
+# changes). ffmpeg echoes the input URL in its errors, and these messages end
+# up in run logs, the booth log and the admin UI, so every URL is reduced to
+# its scheme and host before a message leaves the worker.
+_URL_RE = re.compile(r"(https?://)([^/\s?#]+)[^\s]*", re.IGNORECASE)
+
+
+def redact_urls(text):
+    return _URL_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}/…", text or "")
+
+
 def ffmpeg_failure_reason(stderr):
-    lines = [l.strip() for l in (stderr or "").splitlines() if l.strip()]
+    lines = [l.strip() for l in redact_urls(stderr or "").splitlines() if l.strip()]
     if not lines:
         return "no output"
     generic = {"conversion failed!"}
@@ -3441,7 +3453,7 @@ def main():
         try:
             print(json.dumps({"ok": True, **measure_whole_file_loudness(sys.argv[2])}))
         except Exception as e:  # noqa: BLE001 — reported, never a traceback
-            print(json.dumps({"ok": False, "error": str(e)[:500]}))
+            print(json.dumps({"ok": False, "error": redact_urls(str(e))[:500]}))
         sys.stdout.flush()
         return
 

@@ -19,6 +19,7 @@ Endpoints:
 
 import asyncio
 import json
+import re
 import logging
 import os
 import time
@@ -899,7 +900,9 @@ async def loudness(req: LoudnessRequest):
     try:
         msg = json.loads((out or b"").decode("utf-8", "replace").strip().splitlines()[-1])
     except Exception:  # noqa: BLE001 — a worker that printed nothing usable
-        tail = (err or b"").decode("utf-8", "replace").strip()[-300:]
+        # Same rule as the worker's messages: a stream URL carries the music
+        # server's credentials, so it never reaches a response or a log.
+        tail = re.sub(r"(https?://[^/\s?#]+)[^\s]*", r"\1/…", (err or b"").decode("utf-8", "replace")).strip()[-300:]
         raise HTTPException(500, f"loudness worker gave no result: {tail or 'no output'}")
     if not msg.get("ok"):
         raise HTTPException(500, msg.get("error") or "loudness failed")
