@@ -543,7 +543,7 @@ export function deepCuts(days: number = DEEP_CUT_DAYS, k = 60): any[] {
 // this on the pick path; stats() is the dashboard's full aggregate.
 export function pickStats(): db.PickStats {
   if (!loaded) {
-    return { total: 0, mirrorTotal: 0, distinctArtists: 0, withEmbedding: 0, withAudioEmbedding: 0, hasMoodCoverage: false, hasEnergyCoverage: false };
+    return { total: 0, mirrorTotal: 0, distinctArtists: 0, withEmbedding: 0, withAudioEmbedding: 0, hasMoodCoverage: false, hasEnergyCoverage: false, byMood: {} };
   }
   return db.pickStats();
 }

@@ -63,7 +63,9 @@ test('every pickStats field agrees with the dashboard stats()', () => {
     withAudioEmbedding: full.withAudioEmbedding,
     hasMoodCoverage: Object.keys(full.byMood).length > 0,
     hasEnergyCoverage: Object.keys(full.byEnergy).length > 0,
+    byMood: full.byMood,
   });
+  assert.deepEqual(Object.keys(p.byMood).sort(), ['calm', 'dark', 'warm'], 'per-mood counts, for the mood tools');
   assert.equal(p.mirrorTotal, 302);
   assert.ok(p.total > 0 && p.total < 302, 'untagged rows are excluded from total');
 });
