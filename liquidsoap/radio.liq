@@ -428,6 +428,14 @@ music = cue_cut(music)
 # distinguishes new airings of the same local file, including repeated jingles;
 # fallback metadata replay keeps that request ID and reuses its stamps.
 cross_prev_end = ref(crossfade_duration())
+# CLIP SEAM SLACK — a stem-blend clip seam (`liq_clip_lead` stamped on the
+# outgoing track and on the clip) buffers this much MORE than its cue lead.
+# `cross` buffers whole frames, so the buffer it reports can land a frame
+# (20ms on 2.4.5: 0.28s measured for a 0.3s stamp) short of the stamp, while
+# the controller's cues assume the overlap is exactly the lead. With the slack
+# the buffer always covers the lead, and dj_transition delays the incoming
+# side by the excess (CLIP SEAM ALIGNMENT). Five frames of margin.
+clip_seam_slack = 0.1
 cross_last_file = ref("")
 cross_last_rid = ref("")
 cross_last_stamps = ref([])
@@ -442,6 +450,8 @@ def cross_stamps(m) =
   else
     own = float_of_string(default=crossfade_duration(), m["liq_cross_duration"])
     own = if own < 0. then crossfade_duration() else own end
+    lead = float_of_string(default=-1., m["liq_clip_lead"])
+    own = if lead >= 0. then lead + clip_seam_slack else own end
     stamps = [
       ("liq_cross_start_duration", string(cross_prev_end())),
       ("liq_cross_end_duration", string(own)),
@@ -488,6 +498,28 @@ def dj_transition(a, b) =
   d = if buffered > 0. and buffered < 600. then buffered else stamp end
   if abs(d - stamp) > 0.25 then
     log(label="cross.size", level=2, "transition buffer #{d}s differs from the outgoing stamp #{stamp}s — fading over the buffer")
+  end
+  # CLIP SEAM ALIGNMENT. At a stem-blend clip seam (either side is the clip)
+  # the controller cues X out, and Y in, `liq_clip_lead` seconds outside the
+  # clip's edges, so the two sides line up only if the incoming side starts
+  # exactly `lead` before the outgoing one ends. The buffer is `d`, which
+  # cross_stamps sized past the lead by clip_seam_slack: the outgoing side
+  # starts `d` before its end, the incoming side waits `d - lead`, and both
+  # reach the same instant of the music whatever whole number of frames
+  # `cross` buffered. Without it each clip seam was off by the frame cross
+  # dropped (~20ms flam, scripts/stem-seam-test.sh). The incoming fade runs
+  # over the lead, so both fades still end together and never sum above unity.
+  clip_meta =
+    if b.metadata["subwave_clip"] == "1" then b.metadata
+    elsif a.metadata["subwave_clip"] == "1" then a.metadata
+    else [] end
+  clip_lead = float_of_string(default=-1., clip_meta["liq_clip_lead"])
+  b_delay = if clip_lead >= 0. and d > clip_lead then d - clip_lead else 0. end
+  if clip_lead >= 0. then
+    log(label="clip.seam", level=3, "buffered #{d}s, cue lead #{clip_lead}s: incoming waits #{b_delay}s")
+    if d < clip_lead then
+      log(label="clip.seam", level=2, "buffer #{d}s is shorter than the cue lead #{clip_lead}s — this seam is #{clip_lead - d}s off")
+    end
   end
   # EFFECT ARMING. Every effect is APPLIED to the outgoing branch, but which
   # track carries the FLAG differs, which is why there is no arming state and no
@@ -1005,6 +1037,9 @@ def dj_transition(a, b) =
   # outgoing still up when the incoming arrives; here it is already gone. For
   # d <= 10, chop_dd == d and the render is byte-identical.
   b_fade = if chopping then chop_dd else d end
+  # A clip seam's incoming side waits b_delay (CLIP SEAM ALIGNMENT above) and
+  # fades over the lead, so both fades still end together.
+  b_fade = if b_delay > 0. then d - b_delay else b_fade end
   b_source = fade.in(duration=b_fade, initial_metadata=b.metadata, b.source)
   # INCOMING SIDE. Every effect here releases by driving WETNESS to 0, never by
   # parking the cutoff open: an RC filter at its open cutoff is still not
@@ -1078,6 +1113,12 @@ def dj_transition(a, b) =
              filter.rc(frequency=surf_cut, mode="low", wetness=surf_wet, in_src))
       bs_low = filter.rc(frequency=160., mode="low", wetness=1., bs)
       add(normalize=false, [bs, amplify(bass_amt, bs_low)])
+    else
+      b_source
+    end
+  b_source =
+    if b_delay > 0. then
+      sequence(merge=true, [blank(duration=b_delay), b_source])
     else
       b_source
     end

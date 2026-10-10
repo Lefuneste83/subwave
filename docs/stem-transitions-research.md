@@ -250,7 +250,20 @@ worker and the production annotation writers, `cue_cut`, `dj_transition`
 and `cross` wiring. It lifts mixer code directly from `liquidsoap/radio.liq`
 and checks 0, 0.1 and the mixer default, including an ordinary predecessor
 whose duration stamp can affect a broken mixer's buffers. It checks both
-buffer sizes and beat intervals, with a 25ms tolerance for audio frames.
+buffer sizes and beat intervals.
+
+`cross` buffers whole frames (20ms on 2.4.5), so a seam stamped 0.3s can
+overlap by 0.28s, and by how much depends on where the track's end falls
+in a frame. With cues that assume exactly 0.3s, each clip seam was off by
+up to one frame: one ~20ms beat interval at each seam, heard as a flam
+where the clip takes over. The outgoing track and the clip therefore
+carry the cue lead as `liq_clip_lead`; `cross_stamps` buffers those seams
+`clip_seam_slack` (0.1s) past the lead, and `dj_transition` delays the
+incoming side by whatever was buffered beyond it, so the clip starts
+exactly one lead before X's cut whatever the frame phase. The harness now
+holds the beat grid to 5ms (`SEAM_TOLERANCE_MS`); buffer sizes may sit
+one frame under the stamp or up to the slack over it. A mixer without the
+alignment ignores the key and keeps the old frame residual.
 
 For combined validation before either PR is merged, fetch the final #1774
 commit and run `STEM_SEAM_RADIO_REF=<commit-sha> bash scripts/stem-seam-test.sh`.

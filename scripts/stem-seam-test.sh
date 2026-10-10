@@ -12,8 +12,11 @@
 # Needs controller/node_modules (npm ci), Python with numpy + soundfile
 # (or ANALYZER_IMAGE), and savonet/liquidsoap:v2.4.5 (or LIQ_BIN).
 # Output: scripts/.fx-render/stemseam/ or STEM_SEAM_WORK.
-# Residual: frame-boundary cross buffering can leave up to one 20ms frame
-# of beat error. SEAM_TOLERANCE_MS defaults to 25ms.
+# Frame-boundary buffering: `cross` can buffer a frame (20ms) less than a
+# seam's stamp. radio.liq's clip seam alignment absorbs that, so the beat grid
+# must hold to SEAM_TOLERANCE_MS (default 5ms) across both seams; a mixer
+# without it shows one ~20ms interval per seam and fails. The buffer-size
+# check tolerates the frame and the alignment slack separately.
 set -euo pipefail
 
 IMAGE="${LIQ_IMAGE:-savonet/liquidsoap:v2.4.5}"
@@ -76,8 +79,8 @@ for station in 0 0.1 "$default_cross"; do
       echo "STEMSEAM FAIL: Liquidsoap failed ($name)"
       exit 1
     fi
-    grep 'STEMSEAM:' "$WORK/seam-$name.log"
-    if py analyse-render "/work/seam-$name.wav" "/work/seam-$name.log" "/work/fixture-$name.json" "$clip_sec" "${SEAM_TOLERANCE_MS:-25}"; then
+    grep -E 'STEMSEAM:|clip\.seam' "$WORK/seam-$name.log"
+    if py analyse-render "/work/seam-$name.wav" "/work/seam-$name.log" "/work/fixture-$name.json" "$clip_sec" "${SEAM_TOLERANCE_MS:-5}"; then
       echo "   $name: beat grid intact"
     else
       echo "   $name: wrong buffer or broken beat grid"

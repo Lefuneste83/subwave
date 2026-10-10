@@ -10,7 +10,7 @@
   stem-seam-test.py analyse <wav> <seam-x> <seam-y> [tolerance-ms]
       Finds the click onsets in a Liquidsoap render and checks the beat grid
       around the two clip seams. Exit 0 = every interval is one beat, within
-      the tolerance (default 25 ms).
+      the tolerance (default 5 ms).
 
   mixer <radio.liq> <work-dir>
       Extracts the full transition callback and actual cross wiring, verbatim.
@@ -44,6 +44,12 @@ HEAD_SECONDS = 40.0   # analyze_worker default ANALYZE_SECONDS
 WIND_DOWN = 54.0      # X's outro "wind-down" start: the last usable bar ends here
 
 SEAM_WINDOW = 2.5     # seconds either side of a seam that are checked
+# A clip seam's buffer may fall up to one frame short of its stamp (`cross`
+# buffers whole frames) and, on a mixer that aligns clip seams, runs past it by
+# up to radio.liq's clip_seam_slack. Short station crossfades leaking into the
+# seam (the #1774 bug) still land far outside this window.
+BUFFER_SHORT_MS = 25.0
+BUFFER_LONG_MS = 150.0
 
 
 def click_train(dur, level_down=0.5, level_beat=0.35, freq=2000.0):
@@ -239,8 +245,10 @@ def analyse_render(path, log_path, fixture_path, clip_sec, tol_ms):
     seam_x = X_DUR - overlaps["P"] + fixture["outCueSec"] - overlaps["X"]
     seam_y = seam_x + clip_sec - overlaps["clip"]
     for a in ("X", "clip"):
-        if abs(overlaps[a] - fixture["crossSec"]) * 1000 > tol_ms:
-            print(f"  wrong {a} seam buffer: {overlaps[a]}s, expected {fixture['crossSec']}s")
+        off_ms = (overlaps[a] - fixture["crossSec"]) * 1000
+        if off_ms < -BUFFER_SHORT_MS or off_ms > BUFFER_LONG_MS:
+            print(f"  wrong {a} seam buffer: {overlaps[a]}s, expected {fixture['crossSec']}s"
+                  f" (-{BUFFER_SHORT_MS:.0f}/+{BUFFER_LONG_MS:.0f} ms)")
             sys.exit(1)
     analyse(path, seam_x, seam_y, tol_ms)
 
@@ -250,7 +258,7 @@ if __name__ == "__main__":
     if cmd == "prepare":
         prepare(sys.argv[2], sys.argv[3])
     elif cmd == "analyse":
-        analyse(sys.argv[2], float(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5]) if len(sys.argv) > 5 else 25.0)
+        analyse(sys.argv[2], float(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5]) if len(sys.argv) > 5 else 5.0)
     elif cmd == "mixer":
         mixer(sys.argv[2], sys.argv[3])
     elif cmd == "render-script":
