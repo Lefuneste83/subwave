@@ -358,6 +358,65 @@ def t_a_facet_failure_stays_in_its_facet():
     assert out["loudness"] == {"status": "failed", "reason": "loudness meter exploded"}, out
 
 
+def _stems_marker_run(mark, lose_after=None):
+    """vocal + stems with stems_require_marker against a real temp root.
+    lose_after: separation call count after which the marker disappears
+    (the share is unmounted mid-pass)."""
+    import tempfile
+    root = tempfile.mkdtemp(prefix="subwave-facet-stems-")
+    marker = os.path.join(root, aw.STEMS_MARKER)
+    if mark:
+        with open(marker, "w") as f:
+            f.write("{}\n")
+    calls = []
+
+    class Detector:
+        def separate(self, y):
+            calls.append("separate")
+            if lose_after is not None and len(calls) == lose_after and os.path.exists(marker):
+                os.remove(marker)
+            return {"vocals": y}
+
+        def detect(self, y, sr, librosa, min_loud=None, stems=None):
+            return [{"startMs": 1000, "endMs": 3000}]
+
+    written = []
+    y = np.concatenate([tone(12.0), silence(8.0)])
+    with Patched(get_vocal_detector=lambda force=False: Detector(), measure_loudness=fixed_loudness,
+                 write_stems=lambda stems, window, d: written.append(window),
+                 write_tail_meta=lambda d, off, dur: written.append("meta"), log=lambda *_a: None):
+        out = aw.analyze_facets(FakeLibrosa, FakeSource(tail=(y, SR, 180.0)), ["vocal", "stems"],
+                                stems_dir=os.path.join(root, "track-1"), stems_require_marker=True)
+    return out, written, calls
+
+
+def t_stems_facet_marked_root_writes():
+    out, written, _calls = _stems_marker_run(mark=True)
+    assert written == ["head", "tail", "meta"], written
+    assert out["stems"] == {"status": "ok", "data": {"stems_cached": True, "tail_stems": True}}, out
+
+
+def t_stems_facet_unmarked_root_is_unavailable_and_writes_nothing():
+    out, written, calls = _stems_marker_run(mark=False)
+    assert written == [], written
+    assert out["stems"]["status"] == "unavailable" and aw.STEMS_MARKER in out["stems"]["reason"], out
+    # Vocal activity does not need the share: it still answers.
+    assert calls == ["separate", "separate"], calls
+    assert out["vocal"]["status"] == "ok", out
+
+
+def t_stems_facet_mount_lost_mid_pass_is_unavailable():
+    # Marker gone after the head separation: the head stems are already on
+    # the share, nothing more is written, and stems is not reported ok.
+    out, written, _calls = _stems_marker_run(mark=True, lose_after=1)
+    assert written == [], written
+    assert out["stems"]["status"] == "unavailable", out
+    out, written, _calls = _stems_marker_run(mark=True, lose_after=2)
+    assert written == ["head"], written
+    assert out["stems"]["status"] == "unavailable", out
+    assert out["vocal"]["status"] == "ok", out
+
+
 test("facet_tail is pure and equals analyze_outro", t_facet_tail_is_pure_and_matches_analyze_outro)
 test("decode_tail refuses a short track of unknown completeness before decoding",
      t_decode_tail_refuses_unknown_short_track_without_decoding)
@@ -376,6 +435,10 @@ test("a measured tail lifts the silence fields like the flat response", t_tail_o
 test("FileSource refuses to prove the end of a capped or unprovable file", t_file_source_tail_gates)
 test("a failure in one facet does not fail the others", t_a_facet_failure_stays_in_its_facet)
 test("vocal + stems share one separation; tail ranges are absolute", t_vocal_and_stems_share_one_separation_and_shift_tail_ranges)
+test("stems facet, marked root: stems written", t_stems_facet_marked_root_writes)
+test("stems facet, unmarked root: unavailable, nothing written, vocal still ok",
+     t_stems_facet_unmarked_root_is_unavailable_and_writes_nothing)
+test("stems facet, share lost mid-pass: unavailable, no further writes", t_stems_facet_mount_lost_mid_pass_is_unavailable)
 
 if failures:
     print(f"✗ analyzer_facets_test.py: {failures} failure(s)")
