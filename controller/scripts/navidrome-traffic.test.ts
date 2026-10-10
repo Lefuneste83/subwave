@@ -155,13 +155,26 @@ test('a separate maintenance process is visible in durable events but not contro
     '--import', 'tsx', '--input-type=module', '-e',
     "const s = await import('./src/music/subsonic.ts'); await s.getAlbumList(); console.log(process.pid);",
   ], { env: { ...process.env, STATE_DIR: state } });
-  const childPid = Number(stdout.trim());
+  // The pid is the child's LAST stdout line: anything the import chain prints
+  // first (a dependency notice, a warning routed to stdout) must not turn it
+  // into NaN.
+  const childPid = Number(stdout.trim().split('\n').pop());
+  assert.ok(Number.isInteger(childPid) && childPid > 0, `child printed no pid: ${JSON.stringify(stdout)}`);
   assert.equal(requests, 1);
   assert.equal(traffic.snapshot().httpAttempts.total, 0);
-  const events = readdirSync(join(state, 'logs')).filter(n => n.startsWith('events-')).flatMap(n =>
-    readFileSync(join(state, 'logs', n), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)));
+  // Event appends are best-effort and asynchronous, and this file is shared
+  // with the parent's own pending appends: poll for the child's line, as the
+  // test above does for its own, instead of reading once.
+  let events: any[] = [];
+  for (let i = 0; i < 100; i++) {
+    events = readdirSync(join(state, 'logs')).filter(n => n.startsWith('events-')).flatMap(n =>
+      readFileSync(join(state, 'logs', n), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)));
+    if (events.some(e => e.type === 'navidrome.http-attempt' && e.pid === childPid)) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
   const event = events.find(e => e.type === 'navidrome.http-attempt' && e.pid === childPid);
-  assert.ok(event);
+  assert.ok(event, `no attempt event from child ${childPid}; attempt pids seen: ${JSON.stringify(
+    events.filter(e => e.type === 'navidrome.http-attempt').map(e => e.pid))}`);
   assert.equal(event.endpoint, 'getAlbumList2');
   assert.notEqual(event.pid, process.pid);
 });
