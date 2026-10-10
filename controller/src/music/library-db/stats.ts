@@ -68,6 +68,10 @@ export interface PickStats {
   withAudioEmbedding: number; // CLAP vectors
   hasMoodCoverage: boolean;
   hasEnergyCoverage: boolean;
+  // Tagged tracks per mood, as stats().byMood: the picker registers a mood tool
+  // only for covered moods (#1687's moodWildcard reads it), so leaving it out
+  // silently drops that tool from every live pick.
+  byMood: Record<string, number>;
 }
 
 // After the TTL a pick still gets the last numbers at once; the recompute runs
@@ -108,6 +112,7 @@ export function pickStats(): PickStats {
       withAudioEmbedding: s.withAudioEmbedding,
       hasMoodCoverage: Object.keys(s.byMood ?? {}).length > 0,
       hasEnergyCoverage: Object.keys(s.byEnergy ?? {}).length > 0,
+      byMood: { ...(s.byMood ?? {}) },
     };
     pickStatsCache = { at: now, value };
     return value;
@@ -162,13 +167,23 @@ function computePickStats(): PickStats {
   const total = countTagged();
   const withEmbedding = (d.prepare('SELECT COUNT(*) AS n FROM track_vectors').get() as { n: number }).n;
   const withAudioEmbedding = (d.prepare('SELECT COUNT(*) AS n FROM track_audio_vectors').get() as { n: number }).n;
-  // byMood has a key iff some row's moods JSON holds a value; byEnergy iff some
-  // row has an energy. Both stop at the first hit.
-  const hasMoodCoverage = !!d
-    .prepare('SELECT 1 FROM tracks, json_each(tracks.moods) WHERE tracks.moods IS NOT NULL LIMIT 1')
-    .get();
+  // The per-mood counts are one grouped pass over the moods JSON: the one scan
+  // pickStats keeps, because a pick-time tool gate needs the counts, not just
+  // a yes/no. It runs at most once per TTL and off the pick path after the
+  // first call. Mood coverage follows from it; energy still stops at the
+  // first hit.
+  const byMood: Record<string, number> = {};
+  for (const r of d
+    .prepare(
+      `SELECT value AS mood, COUNT(*) AS n FROM tracks, json_each(tracks.moods)
+       WHERE ${SQL_HAS_MOODS} GROUP BY value`,
+    )
+    .all() as Array<{ mood: string; n: number }>) {
+    byMood[r.mood] = r.n;
+  }
+  const hasMoodCoverage = Object.keys(byMood).length > 0;
   const hasEnergyCoverage = !!d.prepare('SELECT 1 FROM tracks WHERE energy IS NOT NULL LIMIT 1').get();
-  return { total, mirrorTotal, distinctArtists, withEmbedding, withAudioEmbedding, hasMoodCoverage, hasEnergyCoverage };
+  return { total, mirrorTotal, distinctArtists, withEmbedding, withAudioEmbedding, hasMoodCoverage, hasEnergyCoverage, byMood };
 }
 
 export function stats(): LibraryStats {
