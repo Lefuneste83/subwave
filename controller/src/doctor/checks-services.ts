@@ -28,7 +28,12 @@ import { settingsAgentRoutes } from '../schemas/settings.js';
 // Sections
 // ---------------------------------------------------------------------------
 
-export async function checkLlm(s: StationSettings | null): Promise<Finding[]> {
+// `candidatePoolMigrated` is passed in rather than read here, so the check
+// stays a function of its arguments (settings.migratedFromCandidatePool()).
+export async function checkLlm(
+  s: StationSettings | null,
+  { candidatePoolMigrated = false }: { candidatePoolMigrated?: boolean } = {},
+): Promise<Finding[]> {
   const out: Finding[] = [];
 
   // Primary leg. probeLegReachable returns true for cloud providers (no cheap
@@ -147,6 +152,11 @@ export async function checkLlm(s: StationSettings | null): Promise<Finding[]> {
     detail: routes.picks
       ? 'Agentic Tools — model-led library search (wants ~12B+ / good cloud model)'
       : 'Track Shortlist — controller-built shortlist, one bounded model choice',
+    // Not a fault (Shortlist is a supported route), but the one upgrade that
+    // changed behaviour unasked, so it is named until a save records it.
+    hint: candidatePoolMigrated
+      ? 'This station used the retired Candidate Pool and was moved to Track Shortlist, its replacement. Keep it, or switch to Agentic Tools in Settings → Music selection; saving any setting records the choice and clears this note.'
+      : undefined,
   });
 
   // Chain-of-thought (reasoning) — on costs latency + tokens; only worth it on a

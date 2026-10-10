@@ -7,6 +7,10 @@ import { buildPickerTools, type PickerScope } from '../llm/tools.js';
 import { SHORTLIST_PASSES_BOUNDS } from '../schemas/settings.js';
 import * as library from './library.js';
 import { mixCompat, type Analysis } from './mix.js';
+import { filterPickerCandidates } from './recency.js';
+import { type YearRange, hasEraBound } from './show-filter.js';
+import { shortlistOffers, type CandidateOffers } from './shortlist-offers.js';
+import { shortlistSearchCalls, type ShortlistSearch } from './shortlist-search.js';
 
 export type ShortlistSourceCall = {
   source: string;
@@ -18,15 +22,20 @@ export type ShortlistPlanningContext = {
   scope: PickerScope;
   // The current track remains a discovery seed, never a shortlist candidate.
   currentTrackId: string | null;
+  currentArtist?: string | null;
   discoveryPasses: number;
   // Resolved from the show snapshot by the eventual controller call site. The
   // scope carries strict locks; these soft values are only source arguments.
   moods?: string[] | null;
   energies?: string[] | null;
   genres?: string[] | null;
+  eras?: YearRange[] | null;
+  dominantMood?: string | null;
   // Mirrors the existing ε-greedy deep-cut nudge. Callers decide the random
   // draw once, outside this deterministic planner.
   explore?: boolean;
+  // Prepared query data only. The controller chooses executable sources.
+  searches?: readonly ShortlistSearch[];
   // Where the family and source rotation starts. The live pick passes a fresh
   // draw so a station does not run the same plan every time one anchor (or a
   // cold start with no anchor) comes round; absent, the rotation is keyed on
@@ -41,8 +50,8 @@ export type ShortlistPlanningContext = {
 
 const ENERGY_VALUES = new Set(['low', 'medium', 'high']);
 
-function firstString(values: string[] | null | undefined): string | null {
-  return values?.find((value): value is string => typeof value === 'string' && value.length > 0) ?? null;
+function strings(values: string[] | null | undefined): string[] {
+  return [...new Set((values ?? []).filter(value => typeof value === 'string' && value.length > 0))];
 }
 
 function stableOffset(value: string | null): number {
@@ -58,8 +67,8 @@ function rotated<T>(values: T[], offset: number): T[] {
 }
 
 // Build a bounded mix of musical context, local continuity and catalogue
-// diversity. Search and request-only tools need listener intent, so they do not
-// belong in this generic plan. All candidates still pass through the shared
+// diversity. Targeted searches need prepared editorial intent; request-only
+// tools never belong in this plan. All candidates pass through the shared
 // picker registry and its show, recency and policy guards.
 export function planShortlistSources(
   context: ShortlistPlanningContext,
@@ -83,17 +92,30 @@ export function planShortlistSources(
     if (availableSources.has(source)) lanes[family].push({ source, args, family });
   };
 
-  const mood = firstString(context.moods);
-  const energy = context.energies?.find((value): value is 'low' | 'medium' | 'high' => ENERGY_VALUES.has(value)) ?? null;
-  const genre = firstString(context.genres) ?? firstString(context.scope.genreLock);
+  const moods = strings(context.moods);
+  if (!moods.length && context.dominantMood) moods.push(context.dominantMood);
+  const energies = strings(context.energies).filter(value => ENERGY_VALUES.has(value));
+  const genres = strings(context.genres?.length ? context.genres : context.scope.genreLock);
   const ownsDirection = !!(context.scope.episodeSource || context.scope.playlistLock || context.scope.audioWaypoint?.length);
 
   if (context.scope.episodeSource) add('context', 'episodeArtistTracks');
   if (context.scope.audioWaypoint?.length) add('context', 'tracksTowardJourney');
   if (context.scope.playlistTracks?.length) add('context', 'showPlaylistTracks');
-  if (mood) add('context', 'tracksByMood', { mood, energy });
-  else if (energy) add('context', 'tracksByEnergy', { energy });
-  if (genre) add('context', 'songsByGenre', { genre });
+  const targeted: ShortlistSourceCall[] = shortlistSearchCalls(context.searches ?? [], availableSources);
+  lanes.context.push(...targeted);
+  // Every allowed value participates in rotation; a bounded pick need not
+  // query every value, but the first chip must not own discovery indefinitely.
+  for (const mood of moods) {
+    for (const energy of energies.length ? energies : [null]) add('context', 'tracksByMood', { mood, energy });
+  }
+  if (!context.scope.hasPlaylistAnchor && !context.scope.playlistTracks?.length && !context.scope.playlistLock) {
+    for (const mood of moods) add('context', 'moodPlaylistTracks', { mood });
+  }
+  if (!moods.length) for (const energy of energies) add('context', 'tracksByEnergy', { energy });
+  for (const genre of genres) add('context', 'songsByGenre', { genre });
+  for (const era of context.eras ?? context.scope.eraLock ?? []) {
+    if (hasEraBound([era])) add('context', 'songsByEra', { fromYear: era.fromYear ?? null, toYear: era.toYear ?? null });
+  }
   // The audience is context too, but a station-wide lean. Where an episode,
   // journey or strict playlist owns the direction, a favourites pass either
   // comes back intersected to nothing or pulls against that direction.
@@ -103,22 +125,26 @@ export function planShortlistSources(
     add('continuity', 'tracksThatSoundLikeThis', { songId: context.currentTrackId });
     add('continuity', 'tracksLikeThis', { songId: context.currentTrackId });
     add('continuity', 'similarSongs', { songId: context.currentTrackId });
+    add('continuity', 'sonicSimilarTracks', { songId: context.currentTrackId });
   }
+
+  if (context.currentArtist) add('continuity', 'similarArtistTracks', { artist: context.currentArtist });
 
   // Strict playlists and sonic journeys own the direction, so they do not
   // spend a pass on an unfocused diversity source.
   const diversity = (context.scope.playlistLock || context.scope.audioWaypoint?.length
     ? []
     : rotated(
-      ['deepCuts', 'starredSongs', 'recentlyAdded', 'randomSongs'],
-      offset,
+      ['deepCuts', 'starredSongs', 'recentlyAdded', 'randomSongs', 'frequentAlbums',
+        ...(!strings(context.moods).length && !context.scope.moodLock?.length && moods.length && !ownsDirection ? ['moodWildcard'] : [])],
+      Math.floor(offset / 3),
     )
   ).filter((source) => availableSources.has(source));
   if (context.explore && diversity.includes('deepCuts')) {
     diversity.splice(diversity.indexOf('deepCuts'), 1);
     diversity.unshift('deepCuts');
   }
-  for (const source of diversity) add('diversity', source);
+  for (const source of diversity) add('diversity', source, source === 'moodWildcard' ? { excludeMoods: moods } : {});
 
   const calls: ShortlistSourceCall[] = [];
   const families: ShortlistSourceCall['family'][] = ['context', 'continuity', 'diversity'];
@@ -130,6 +156,20 @@ export function planShortlistSources(
       familyOrder.splice(familyOrder.indexOf('diversity'), 1);
       familyOrder.unshift('diversity');
     }
+  }
+  // A soft playlist is operator direction too. Reserve one of the configured
+  // passes for it; stronger episode/journey direction keeps its precedence.
+  if (!ownsDirection && context.scope.playlistTracks?.length) {
+    const playlistIndex = lanes.context.findIndex(call => call.source === 'showPlaylistTracks');
+    if (playlistIndex >= 0) calls.push(...lanes.context.splice(playlistIndex, 1));
+  }
+  // Reserve at most one existing pass for the show's targeted intent when
+  // there is room for another source. A one-pass station rotates it normally;
+  // episodes, strict playlists and journeys retain their precedence.
+  if (!ownsDirection && budget >= 2 && targeted.length && calls.length < budget) {
+    const target = rotated(targeted, Math.floor(offset / 3))[0];
+    calls.push(target);
+    lanes.context = lanes.context.filter(call => !targeted.includes(call));
   }
   const cycle = () => ({
     context: [...lanes.context],
@@ -209,12 +249,22 @@ export async function executeShortlistPlan(
   tools: PickerToolSet,
   seen: Map<string, any>,
   plan: ShortlistSourceCall[],
+  options: { topUps?: ShortlistSourceCall[]; minimumCandidates?: number; maxPerArtist?: number; offers?: CandidateOffers } = {},
 ): Promise<ShortlistResult> {
   const started = performance.now();
   const sourceRuns: ShortlistSourceRun[] = [];
   const sourcesById = new Map<string, string[]>();
 
-  for (const call of plan) {
+  const balanced = () => balanceShortlist([...seen.values()], options.maxPerArtist, options.offers);
+  const calls = [...plan];
+  // Recovery is at most the supplied top-up sources, not an unbounded retry.
+  // It never weakens scope locks or changes how either route handles models.
+  for (const call of options.topUps ?? []) {
+    if (!calls.some(planned => planned.source === call.source)) calls.push(call);
+  }
+  for (let index = 0; index < calls.length; index++) {
+    if (index >= plan.length && balanced().length >= (options.minimumCandidates ?? 4)) break;
+    const call = calls[index];
     const tool = tools[call.source];
     if (!tool?.execute) {
       sourceRuns.push({ ...call, status: 'unavailable', returned: 0, accepted: 0, elapsedMs: 0 });
@@ -263,9 +313,9 @@ export async function executeShortlistPlan(
     }
   }
 
-  const candidates = [...seen.entries()].map(([id, candidate]) => ({
+  const candidates = balanced().map(candidate => ({
     ...candidate,
-    shortlistSources: sourcesById.get(id) || [],
+    shortlistSources: sourcesById.get(candidate.id) || [],
   }));
   return {
     candidates,
@@ -278,15 +328,31 @@ export async function executeShortlistPlan(
 // Native entry point: build the same source-owned registry the agent used,
 // plan only from sources it actually exposed, then reuse the shared filtered
 // accumulator for execution. No LLM calls, choice, or queue writes occur here.
-export async function buildShortlist(context: ShortlistPlanningContext): Promise<ShortlistResult> {
+export async function buildShortlist(context: ShortlistPlanningContext, offers: CandidateOffers = shortlistOffers): Promise<ShortlistResult> {
   const { tools, seen } = buildPickerTools(context.scope);
   const plan = planShortlistSources(context, new Set(Object.keys(tools)));
-  const result = await executeShortlistPlan(tools as PickerToolSet, seen, plan);
+  const topUps: ShortlistSourceCall[] = ['starredSongs', 'randomSongs']
+    .filter(source => source in tools)
+    .map(source => ({ source, args: {}, family: 'diversity' }));
+  const result = await executeShortlistPlan(tools as PickerToolSet, seen, plan, {
+    topUps, minimumCandidates: 4,
+    maxPerArtist: context.scope.playlistLock || context.scope.episodeSource ? Infinity : 3,
+    offers,
+  });
   if (!context.transitionTarget) return result;
   return {
     ...result,
-    candidates: orderByTransitionFit(result.candidates, context.transitionTarget, (candidate) => library.bpmKeyFor(candidate)),
+    candidates: orderByTransitionFit(result.candidates, context.transitionTarget, (candidate) => library.bpmKeyFor(candidate), offers),
   };
+}
+
+// Apply the cap to the merged set at choice time, leaving Agentic discovery
+// intact. Strict single-artist playlists and prepared episodes are exempt.
+export function balanceShortlist<T extends PickerCandidate>(
+  candidates: T[], maxPerArtist = Infinity, offers?: CandidateOffers,
+): T[] {
+  const ordered = offers ? offers.order(candidates) : candidates;
+  return filterPickerCandidates(ordered, { maxPerArtist });
 }
 
 // Soft order, never a filter: the candidates that meet the target cleanly lead
@@ -298,10 +364,14 @@ export function orderByTransitionFit<T>(
   candidates: T[],
   target: Analysis | null | undefined,
   analysisOf: (candidate: T) => Analysis,
+  offers?: CandidateOffers,
 ): T[] {
   if (!target || (target.bpm == null && target.key == null && target.keyEnd == null)) return candidates;
   return candidates
-    .map((candidate, index) => ({ candidate, index, fit: mixCompat(target, analysisOf(candidate)) }))
+    .map((candidate, index) => ({
+      candidate, index,
+      fit: mixCompat(target, analysisOf(candidate)) - (offers ? offers.penalty((candidate as PickerCandidate).id) : 0),
+    }))
     .sort((a, b) => b.fit - a.fit || a.index - b.index)
     .map(({ candidate }) => candidate);
 }

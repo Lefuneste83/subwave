@@ -14,8 +14,20 @@ dead-air trim, festivals, listener request hardening, likes, and the blocklist
 rules.
 
 **Agentic Musical Leanings.** Discovery and guard re-picks receive no persona
-preferences. A separate review can replace the discovered baseline only with a
-metadata-supported close or possible flow match. Short genres such as jazz,
+preferences. A separate review keeps the discovered baseline by default. It can replace it
+only when a metadata-supported preference absent from the baseline genuinely
+settles a close or convincingly comparable possible-flow choice. Shared matches
+(such as rock on both tracks) are compatibility, not a Leanings advantage.
+The compact review exposes `leaningsAdvantages`, reserves evidence slots for
+distinguishing preferences among close/possible-flow candidates, and skips the
+model when no viable advantage exists. Weak-flow matches cannot occupy the
+reserved evidence slots ahead of a viable challenger. Both routes join stored
+Last.fm tags into private review copies of the baseline and candidates, after
+initial selection; discovery payloads and the picker’s candidate map stay
+unchanged. Including the baseline prevents shared tags earning false credit.
+The tags are existing library evidence, not a new Last.fm fetch.
+The final validator independently rejects a basis already supported by the
+baseline, even if the model proposes a swap. Short genres such as jazz,
 rock and soul are valid phrases. Parse each persona independently, including
 noun-phrase fallback, then merge with the host owning duplicate phrases.
 `dj-agent/leanings-review.ts` owns extraction, source priority, evidence
@@ -79,7 +91,7 @@ Failed or deferred state migration keeps automatic recovery retryable.
 - **Seed vs pick (#1247)**: every pick/request event message hands the agent a real discovery seed's `[id: …]` — the pick event uses the expected predecessor (the queued tail, or the on-air track when the queue is empty), while a request event uses the on-air track — and the discovery tools all EXCLUDE that seed from their own results (`library-db/vectors.ts` `knnByBuffer` drops `excludeId`), so that id is the one real, well-formed track id in the model's context that no tool returned. `util/pick-seed.ts` owns the one wording that says so (`SEED_NOT_A_PICK_CLAUSE`, shared by the pick + request schema `id` descriptions AND `picker-tools.ts`'s empty-result `rule`) — never inline a second copy, and don't weaken it to "never invent an id", which an echoed seed literally satisfies. The trigger is upstream: the harness allows exactly ONE discovery call (`COMMIT_AFTER_STEPS = 1`) before pinning `activeTools: ['done']`, so a seed tool that returns nothing corners the model with an empty `seen` — where BOTH salvage stages are structurally dead (`nearestId` has no keys, `repickFromSeen` returns null on its first line). Hence `buildPickerTools`'s cross-index rescue: `tracksLikeThis`/`tracksThatSoundLikeThis` answer from the OTHER index when the one asked holds no vector for this seed (gated on the primary matching *nothing* — an all-filtered-by-recency primary keeps its `emptyResult`), and it says which index answered so the model doesn't reason about audio neighbours on the text axis. A zero-candidate run does NOT count against the agent circuit breaker (`classifyPickFailure`) when at least one real discovery call ran (`toolCalls > 0`; `flattenToolCalls` excludes the synthetic `done`): the empty set proves this run cannot validate a pick, but does not by itself distinguish index coverage, active filters, an upstream miss, or recovery behaviour, so it is not evidence that the model cannot drive tool calls. Opening the breaker there would kill the session-aware picker for 10 min while advising "switch model". An empty `seen` with ZERO discovery calls means the model never explored (`no-discovery`), which is exactly the breaker's failure class and still counts.
 - **Dead-air trim**: some rips carry seconds of silence before the music starts or after it ends, and on air that plays as dead air. The analyzer measures both edges against an **absolute** dBFS floor (`SILENCE_DBFS`, default -50) as `lead_silence_ms` / `tail_silence_ms` (+ `tail_start_ms`, the same tail measurement as an ABSOLUTE offset — a cue_out derived as `duration - gap` inherits every disagreement between the container tag and the decoded file, so the cut moves by whatever the header got wrong), and `music/silence-trim.ts` turns them into `liq_cue_in` / `liq_cue_out` — `radio.liq`'s existing `cue_cut` (added for the #447 length cap) does the cutting, so no mixer change was needed. **The absolute floor is the whole design.** The two measurements that already looked like the answer — `estimate_intro_ms` and `analyze_outro`'s wind-down — are RELATIVE gates gauged against the track's own loud level, which is the right question for "may the DJ still be talking" and the wrong one here: a quiet piano intro clears neither and is unambiguously music, so reusing them would cut into the record. Never wire a relative gate to a cue point. Three guards bound the damage, each for a different failure: the operator's `silenceTrim.minGapMs` floor (a track legitimately opens a beat after zero, and a segued album's inter-track space is deliberate), a fixed `MARGIN_MS` left in place at each edge (the measurement reports the first frame ABOVE the floor, so cutting exactly there lands on the attack), and a per-edge ceiling so one bad measurement can't halve a song: 30 s at the head (`MAX_LEAD_TRIM_SEC`), 600 s at the tail (`MAX_TAIL_TRIM_SEC`) — the tail is measured back from the file's proven end, so everything it cuts is trailing silence with nothing after it, and the analyzer searches up to 600 s for where the music stops (hidden-track gaps and DJ sets run well past 30 s). **Off by default** — it acts on a measurement, and an upgrade must sound byte-identical until the operator asks for it; `ANALYSIS_VERSION` 7 re-targets the library so the columns fill on the next pass. Three consumers share the module and must not drift: the queue drain, the `auto.m3u` rewrite (`broadcast/scheduler.ts`) and `/now-playing`'s track clock — the last one publishes the PLAYABLE span (`drain-policy.playableDurationSec`), because a tagged duration runs every skin's progress bar past the end of the song by exactly the silence that was cut — the fallback playlist is exactly where a divergent second copy goes unnoticed, because nobody is watching when it plays. **A trimmed head shifts every onset the analyzer measured from byte zero**: `shiftOnsetMs` is applied inside `introMsFor` / `firstVocalMsFor` / `introMsOf`, at `applyPairStamps`, and on the bed's ramp budget in `maybePushBed` — that last one is the same vocal onset `firstVocalMsFor` shifts, and leaving it raw made the two disagree about one track (the prompt told the runway was 2s while the bed decision still thought it was 8s and declined a bed the link needed). The tail moves things too: the ending-aware exit canvas measures its wind-down to the trimmed end, not the tagged one, or it counts the silence being cut as part of the ramp. **Every consumer of the trimmed timeline is a `resolveSilenceTrim` call, never a local subtraction.** Both cue points also fold into the queue clock: the playable span is `[cue_in, min(duration, cue_out)]`, so pair-drain deadlines do not count either the skipped head or the cut tail as runway. The tail is measurable only off a file the analyzer proved COMPLETE (a byte-capped download's "tail" is mid-song), so it follows `outro_json`'s COALESCE write rule; head trim works either way. That proof has two different shapes and they are not interchangeable: for a normal track the seek to `duration-20s` IS the proof (a truncated file cannot reach it, and the short-decode check catches it), but the short-track path decodes from offset ZERO, where a file truncated to 70% decodes 70% and clears the same check — so a short track is measured **only** when the caller's `complete` flag says so. A rendered stem seam vetoes on either trimmed edge (`maybeRenderBlend`), because the clip is mixed FROM the outgoing tail and the incoming head: a trimmed successor head would be baked into the clip and air the very silence the trim removes. Pinned by `scripts/silence-trim.test.ts` (the arithmetic, including a cold-load round trip on the settings key), `scripts/silence-trim-library.test.ts` (**the plumbing** — nothing in production hands the resolver a track object carrying the measurements, so `library.get()`'s hand-written projection IS the feature: a column missing from that field list doesn't degrade the trim, it disables it silently with the analysis sitting in the row), `scripts/drain-policy.test.ts`, and `scripts/analyzer_silence_test.py`.
 - **Festivals**: operator-editable via admin → Settings → Festivals (`settings.festivals`, validated by `festivalsSchema` through the settings patch registry; seeded from `FESTIVAL_DEFAULTS` in `settings.ts` only when the key is absent — an emptied list stays empty). Fixed month/day schema, so lunar holidays (Easter, Eid, Lunar New Year) shift year-to-year and need per-year entries. `windowDays` spans month/year boundaries (`getFestivalContext` compares real dates).
-- **Listener request hardening** (raid 2026-07-28): every on-air safety decision for requests lives in `util/request-guard.ts` (scripted-opener stripping, verbatim-echo guard on intros/acks, requester-name screening), pinned by `scripts/request-guard.test.ts` — never inline a guard in routes or agents. `settings.requests` (enabled / maxPending / cooldownSec / perIpHourlyCap / globalHourlyCap / onePendingPerIp / repeatCooldownMin) drives `POST /request`'s gates and `middleware/ratelimit.ts`, applies live, and coerces to safe defaults when absent; env `REQUESTS_DISABLED` stays the hard override. Conversational messages are classified by an explicit `kind: 'track' | 'chat'` on **both** paths (`matchRequest`'s `REQUEST_SCHEMA_TOLERANT` and the agent's `requestSchema()`), each with `objectFallbacks: { kind: 'track' }` — chat gets an in-persona text ack, nothing queued. The classification must never be inferred from a null `id` alone: `coerceModelPayload` maps an OMITTED key to null, so "the model forgot the field" and "the listener wasn't asking for music" would be the same wire value, and a real request would silently play nothing. An omitted/botched `kind` degrades to `track` and falls through to the repick salvage + stateless cascade. `languageDirective`/`agentLanguageReminder` now ALWAYS render (default English) with a never-switch clause — the empty-when-unset behaviour is what let session-history mimicry flip the station into Russian; do not restore it. Raw request text survives only in the operator request log; the session, prompts, and air see cleaned text.
+- **Listener request hardening** (raid 2026-07-28): every on-air safety decision for requests lives in `util/request-guard.ts` (scripted-opener stripping, verbatim-echo guard on intros/acks, requester-name screening), pinned by `scripts/request-guard.test.ts` — never inline a guard in routes or agents. `settings.requests` (enabled / maxPending / cooldownSec / perIpHourlyCap / globalHourlyCap / onePendingPerIp / repeatCooldownMin) drives `POST /request`'s gates and `middleware/ratelimit.ts`, applies live, and coerces to safe defaults when absent; env `REQUESTS_DISABLED` stays the hard override. Conversational messages are classified by an explicit `kind: 'track' | 'chat'` on **both** paths (`matchRequest`'s `REQUEST_SCHEMA_TOLERANT` and the agent's `requestSchema()`), each with `objectFallbacks: { kind: 'track' }` — chat gets an in-persona text ack, nothing queued. The classification must never be inferred from a null `id` alone: `coerceModelPayload` maps an OMITTED key to null, so "the model forgot the field" and "the listener wasn't asking for music" would be the same wire value, and a real request would silently play nothing. An omitted/botched `kind` degrades to `track` and falls through to the repick salvage + stateless cascade. `languageDirective`/`agentLanguageReminder` now ALWAYS render (default English) with a never-switch clause — the empty-when-unset behaviour is what let session-history mimicry flip the station into Russian; do not restore it. Raw request text survives only in the operator request log; the session, prompts, and air see cleaned text. Four rules keep that true. **One normaliser** (`normalizeListenerText`: NFKC, then DELETE every `\p{Cf}` format character) runs inside `sanitizeRequestText`, the opener stripper, the echo tokeniser and the requester-name screen — invisible characters are silent in TTS, so a check that sees a different string from the one that airs is no check; combining marks are kept, since Indic and Thai scripts need them. **The echo horizon is the agents' window**: the request event turn carries `meta.requestText`, `session.windowRequestTexts()` returns every request in the same `WINDOW_TURNS` slice `windowMessages()` reads (pending ones included), and the request agent's intro/ack and the pick path's links are checked against all of it, never a fixed lookback. **Listener-derived text is data, never a Rule**: the cascade's missed artist is cleaned by `cleanMissedArtist` (refused, not truncated, when it cannot be a name), reaches `generateIntro` only as a JSON line under a judgment clause, is withheld from the echo-guard retry, and never appears in the ack, which is fixed copy; `identifyRequestedTrack` returns library candidates or a fixed note, never the web/model guess. **Reserved names match on a skeleton** — normalised, case- and look-alike-folded, and as a run of whole words — so punctuation, full-width forms and Cyrillic/Greek look-alikes key the same as the plain name while a name that merely contains the letters is left alone. Separately, `likes.operatorStarred` filters Navidrome stars that exist only because of listener likes out of the request paths that present stars as operator curation (the `starredSongs` tool and the cascade's starred fallback), unless `likes.influenceDj` is on. A star with no like record at all — set in Navidrome by hand — stays. The same filter and gate apply wherever else a star is weighted as curation: the auto.m3u coast's starred source (`broadcast/scheduler.ts`), the pool picker's starred fallback (`music/picker.ts`), the tagger's operator-signal seed layer (`music/seed-selector.ts`, which loads the store `readOnly` because it runs in the tagger child and `likes.json` has one writer) and the playlist generator's filler (`music/playlist-gen.ts`). The coast and the pool picker are never-starve scopes, so there a listener-only star is held back rather than discarded: it comes back as the last filler only when every other source returned nothing, and the filter is never what empties the pool. Pinned by `scripts/operator-starred-consumers.test.ts`.
 - **Likes + the operator heart** (#991, #1253): `state/likes.json` (`broadcast/likes.ts`) is accountless — one record per apparent listener per AIRING, keyed `HMAC(persisted secret, ip)`; the raw IP is never stored and one NAT is one key. The **operator's own heart** (the admin library row action) is a real record under the reserved `listenerKey: 'operator'` + `via: 'operator'`, paired with a synthetic `${songId}|operator` airing key so the existing dedup makes it idempotent per song. It counts in `countForSong` and reaches the picker like any like — the `via` marker exists so surfaces can tell them apart, not so one is second-class. Every DJ reader of likes goes through ONE gate, `likes.djFavourites` (the `likes.influenceDj` opt-in, windowed and capped by `windowDays`/`maxTracks`): the Agentic pick event's favourites clause, the pool's `listener-liked` source, the `listenerFavourites` discovery tool (registered through `PickerScope.listenerFavourites`, never on the request path) and the Track Shortlist's selection context. Before #1687's review the pool was the only route that turned a like into a candidate. Two exemptions are load-bearing and must not be "simplified" away: an operator record **skips the `topLiked` window cutoff** (a listener like ageing out is a taste snapshot expiring, an operator like ageing out is the DJ forgetting curation the operator set by hand) and **survives the `MAX_RECORDS` trim** (`trimTo` evicts oldest LISTENER records first, falling back to plain oldest-first only when curation alone exceeds the cap, so the bound always holds). Deleting likes never unstars in Navidrome, with ONE deliberate exception: the operator un-hearting when **no likes remain** for the song — that is a toggle, not a purge, and the "none remain" guard is what stops a star earned by twenty listener likes being discarded. Row hearts on every library view read one `GET /likes/index` map rather than per-endpoint annotation, because browse/search/sounds-like come from three different sources and Navidrome search rows have no `library.db` row to annotate. Pinned by `scripts/likes.test.ts`.
 - **Blocklist rules** (#1300 FR 1, closes #752): the never-play blocklist carries **rule entries** beside the id entries — attribute predicates (`genre`/`tag`/`mood`/`artist`/`album`/`title`/`playlist` + any-of values) with an optional seasonal **allow-window** (inclusive month/day, wraps year-end, station zone) and an optional show scope — same `blocklist.json`, same routes, same Blocked tab. Pure matching lives in `music/blocklist-rules.ts` (pinned by `scripts/blocklist-rules.test.ts`); `blocklist.ts` owns the evaluation context — a ~15s-memoised active-rule set (clock via `zonedParts`, show via `resolveActiveShow`, both resolved once per sweep, NOT per track) and pre-resolved playlist member sets (the one async input, so `matchOf` stays synchronous). **Enforcement is inherited, not added**: rules ride `hitOf()`/`isBlocked()` inside the existing chokepoints (subsonic reject, library sources, `queue.push` gate, request declines, `annotate`) — never add a second rule-filter at a pick path, that's how the two kinds would drift. `hitOf()` answers entries-FIRST (the UI unblocks exactly the entry), and `BlockRef` is now a `kind: 'entry' | 'rule'` union. Rules are absolute like the id list — no never-starve anywhere, requests included; the row UI deliberately offers **no one-click unblock for a rule ref** (one rule can block hundreds of rows — edits happen on the Blocked tab). `tag` matches EXACT-normalised across every ingested namespace (genres ∪ moods ∪ audioMoods ∪ Last.fm — `show-filter.trackAllTags`); `genre` reuses `genreMatches`' refine direction (blocking "Punk" drops "Punk Rock", not the reverse). Custom file tags (e.g. a country) only work once they land in a field the pipeline ingests — that's an ingestion boundary, not a rules bug. Spec: `docs/superpowers/specs/2026-08-05-exclusion-rules-design.md`.
 - **An artist block reads the whole credit, not just the lead** (#1603): a Subsonic song carries one `artistId` — the act it leads with — and `tracks.artist_id` stores that same single id, so before this both the id tier and the exact-name fallback missed a track credited "Y feat. X" and the operator had to block those one by one. `music/recency.ts` `artistParticipantKeys` splits a credit into its acts beside `artistRootKey`, which answers the opposite question (who LEADS it, for the repeat guard), and both halves of the blocklist read it: `matchOf`'s artist tier and `blocklist-rules`' `field: 'artist'` case, whose comment already declared itself to BE the name fallback's semantics. The WHOLE credit is probed first and the acts after it, in ORDER, so a row several artist entries could claim always names the most specific — `matchOf`'s ordering contract, which the admin badge and its one-click unblock depend on. That first probe is the pre-#1603 tier and is load-bearing, not a leftover: `POST /library/blocklist` resolves an artist block from a track row as `{ id: song.artistId, name: song.artist }`, so blocking "this artist" on a `"Host feat. Guest"` row persists the COMPOSITE as the name — a key no participant walk can ever produce. Matching acts alone stranded every such entry, and on the sources with no `artistId` to fall back on (library rows whose `artist_id` predates migration 23, `ruleMatchRows`, queue items) rows the operator had already blocked would have started airing again. The rule half carries the same probe for the same reason: a rule value can be a pasted credit. **The split is `feat.`/`ft.`/`featuring` and nothing else, and that is the design decision, not a first cut**: `&`, `+`, `,` and `x` sit inside act names far more often than they join two credits (Simon & Garfunkel, Hall & Oates, Florence + the Machine, Earth, Wind & Fire, Tyler, the Creator, Chase & Status), and this list is the one place with **no never-starve behind it** — a wrong key silently removes music the operator never blocked, with no starvation fallback to make the loss visible. `FEATURE_SPLIT` already carries the reason it is the exception (always a credit on someone else's track, never part of a name). The cost is honest under-matching — "Y feat. A & B" keys as `["y", "a & b"]`, so a block on A alone does not fire, and a co-credit "A & B" is reachable only through the id tier migration 23 stored it for. A marker at index 0 is not a marker ("Ft. Lauderdale …"), the same guard `artistRootKey` applies, and the bracket cleanup that follows a split drops ONE orphaned closer from the segments after it — never from the lead, whose brackets are part of its name ("Sunn O)))"). The one shared normaliser is `artistNameKey` (case, curly-vs-straight apostrophes, whitespace — `artistRootKey`'s own base fold), used on BOTH sides so a stored entry name and an incoming credit can't disagree; it is deliberately NOT the rest of `artistRootKey`'s folding (article strip, root aliases, join split), which widens a MATCHING key — right for a preference the repeat guard reads as "pick someone else", wrong for a hard drop. **A participant LIST would be the better source and there isn't one**: OpenSubsonic's per-track `artists`/`participants` are not ingested and `tracks` has no column for them, so the display credit is all there is; adding that ingest is the way to reach the shapes this refuses to guess at. Pinned by `scripts/blocklist-featured-artists.test.ts` (the named bands are the collateral cases).
@@ -90,6 +102,159 @@ Failed or deferred state migration keeps automatic recovery retryable.
   **Complete empty walks are an exception.** When zero tracks were walked, the tagger, Reconcile and analyzer skip `adoptAndPrune` entirely, even with `--confirm-prune`. No ID adoption, scan-status query or mass-removal confirmation occurs, and all existing rows remain. This preserves the protection against a transient empty catalogue; confirmation cannot authorize deleting the whole library through an empty walk. Reconcile keeps its existing successful exit and "Library is in sync with Navidrome" progress label, with only the console warning that pruning was skipped, rather than a structured hold warning. `scripts/library-prune-integration.test.ts` pins the empty analyzer and reconcile paths.
 
 - **Navidrome 0.64 ID adoption (#1255, #1699)**: every authoritative library walk calls `id-rotation.adoptAndPrune` before deleting orphans. A track is adopted only if its canonical ID is present in the live walk. Derived columns, vectors and play attribution move in one SQLite transaction, which also inserts the confirmed map into `id_rotation_journal` (schema 26). Never publish the only copy of that map after committing adoption: a stopped child would delete the old rows and lose the map. The controller replays journal entries through blocklist, likes, recipes and settings; each replay must persist even when a previous failed write already changed its cache. Likes and blocklist saves share one ordered writer per store, including ordinary/debounced saves: atomic rename alone lets an older in-flight snapshot overwrite migrated IDs after the journal has been acknowledged. A failed save rejects its caller without poisoning the writer queue. Boot can read the journal before the library/vector handle opens. Stem-directory moves are replayable and best-effort. Playlist IDs require a live-index match; an unavailable index keeps the map and suppresses post-tag sync. Only successfully persisted mappings are acknowledged, and acknowledgement deletes just the consumed snapshot so a concurrent adoption survives. Legacy `id-rotation.json` handoffs remain readable; malformed/unreadable handoffs hold sync. Recovery tests exercise process exit after DB commit, transaction rollback, later-batch preservation, and failures in all four state stores. Already-pruned derived data requires a pre-migration backup. A failed Liquidsoap handoff may start this walk automatically only when `id-rotation-recovery.ts` proves the stored ID is absent and its deterministic canonical image resolves live; a generic fetch failure or canonical fixed point never starts maintenance. The detector and the maintenance child are both single-flight. A successful tag/reconcile run refreshes `auto.m3u` only after the rotation journal has settled, so the fallback cannot keep serving the pre-migration IDs until its hourly rebuild.
+
+## Track Shortlist discovery parity
+
+`music/shortlist.ts` plans the configured one-to-five passes across context,
+continuity and diversity. All show mood/energy combinations, genres and bounded
+era windows participate in source rotation; a pick remains bounded rather than
+querying every configured value. When there are no show moods, the prepared
+context's `dominantMood` supplies the mood seed. A soft playlist reserves one
+configured pass. Episodes and journeys retain their existing precedence.
+
+The shared registry adds `songsByEra` and `sonicSimilarTracks`. Era sampling uses
+the tagged mirror's resolved-original-year query with a random page; an empty
+mirror result uses a bounded server year query and rechecks resolved years.
+Server sonic discovery is registered only when `PickerScope.sonicSimilarity`
+is true, resolved by the existing cached extension probe in `livePickerScope`.
+Both tools use the existing collector and source blocklist chokepoints.
+
+The remaining pool sources also use this registry: `frequentAlbums` (scrobble
+history), `moodPlaylistTracks` (curated names), `similarArtistTracks` (artist graph
+then top songs), and `moodWildcard` (three tracks from another covered mood).
+Mood playlists are unavailable whenever a show pins playlists, including a stale
+unresolved anchor (`hasPlaylistAnchor`). Wildcards enter only the autonomous plan
+without configured show moods; all resulting tracks still obey strict locks.
+Frequent albums and wildcards use the diversity lane; artist neighbours use
+continuity, and mood playlists use context. Family and source rotation remain
+independent so a one-pass station can eventually reach every eligible source.
+
+Recently-added sampling now shuffles twelve albums and three tracks per album,
+including later track positions. Frequent sampling uses the same wide pool and
+rotates offsets 0/12/24, retrying zero on an empty later page. Expensive server
+sources cache raw pools for 30 minutes (empty results for five); every invocation
+recollects under the current scope/seen set. Empty album/catalogue sources are
+hidden until their retry TTL expires. Unknown standard server sources remain
+available until probed; missing artist-graph data returns an explicit empty-result
+note. The cache is bounded to 128 entries and shares pool invalidation, including
+protection against old in-flight responses after a server change.
+
+Energy inside `tracksByMood` is a soft preference: eligible matches lead, then
+other tracks in that same mood fill remaining slots. Recency, artist caps,
+exclusions and duration limits still apply across both groups. An explicit strict
+show energy lock remains hard and cannot be relaxed by this preference.
+
+After the planned passes, fewer than four merged, artist-balanced candidates
+may trigger at most two unused top-up sources: `starredSongs`, then `randomSongs`.
+These calls use the same scope and never relax locks, exclusions or duration
+policy. They are additional recovery calls, not additional model attempts.
+Source-run telemetry records each actual call. The merged list caps each artist
+at three tracks, with the same strict-playlist/artist-episode exemptions as the
+collector. This happens at choice time and does not change Agentic collection.
+
+`shortlist-offers.ts` holds bounded, in-memory offer history: 30-minute expiry,
+0.15 per offer up to 0.45, and at most 1,000 identities. It orders the merged
+set before the artist cap and subtracts the penalty from transition-fit ranking.
+It never excludes a track merely for being offered. The live route records
+only the actual model-facing list and clears the final queued track, after
+Leanings and guards, rather than the preliminary choice. Cache invalidation
+clears this history. The Discovery Bench reads it without recording offers or
+clearing choices.
+
+`shortlistSituation` whitelists time period/mood/vibe, weather condition,
+temperature/unit/mood/daylight and festival name/description/mood from the
+prepared selection snapshot; it never copies persona Leanings or private
+location. Live and bench calls use the same helper. The compact candidate view
+includes `duration_sec`, known measured `intro_ms` and the first discovery
+`source`; other controller fields stay private. Intro length is in milliseconds:
+zero is a measured immediate start, while absent or invalid measurements are
+omitted. When a link is planned, intro space is a soft preference between fitting
+tracks; musical flow comes first. Initial and corrective choices receive it.
+The separate link writer and shared speech-budget checks still determine what
+can actually air. Similarity evidence is a labelled cosine score carrying
+its actual `audio` or `text` index and reference. Cross-index seed rescue labels
+the index that answered, never the requested one. Query and journey scores name
+their own reference; neither cosine is BPM/key transition compatibility. Missing,
+non-finite or out-of-range scores are omitted, while zero remains evidence.
+Pinned by `scripts/shortlist-candidate-pool-parity.test.ts` and the runner tests.
+
+Shortlist selection receives a compact journey steer and the same occasional
+exploration flag used by its discovery plan. Journey choices prefer a fitting
+`tracksTowardJourney` result; exploration choices give fitting unaired or
+long-unplayed deep cuts extra consideration. Runs and journeys suppress that
+exploration steer. Corrective choices keep the same selection context.
+
+Conversation continuity is limited to three distinct, already-aired editorial
+remarks from `session.promptMemory()`, newest first, at most 140 characters each
+and two hours old. Routine links, idents, clock checks and handoffs are omitted.
+The existing session boundary drops prior-show speech and excludes private pick
+rationales and raw listener messages. These excerpts are soft musical context,
+not instructions or speech to repeat. They stay in `selectionContext`, never
+the separate link writer's arguments or queued track fields. Shortlist system
+wording describes this compact input rather than a chat session or tool loop.
+
+**Targeted search preparation** is optional and separate from discovery and
+selection. For an active show with a nonblank topic or prepared editorial brief,
+`broadcast/shortlist-search-preparation.ts` makes one tool-free text call for up
+to three structured search intents. Zero is the default for generic presenter
+biographies and atmosphere; these must not become invented lyrical themes or
+literal library queries. No persona Leanings, listener text, track IDs or
+executable tools enter that call. Presenter names are supplied only to exclude
+hosts from artist searches. The input is capped to 2,000 characters per brief
+field; each query is at most 120 characters. Each proposed search supplies a
+supporting quote of at most 160 characters. `shortlist-search.ts` checks that it
+occurs in the brief, contains the query's subject words and has cues appropriate
+to that kind of music search. Requests to avoid music are excluded even when a
+quote omits the sentence's prohibition. Unsupported proposals are omitted,
+and an empty grounded result is cached normally. This conservative check may omit ambiguous
+or paraphrased requests; ordinary discovery continues in those cases.
+
+Prepared queries, including successful empty results, persist in
+`state/shortlist-search-preparations.json` under the scheduled/takeover occurrence
+and brief content. Concurrent callers share preparation; later picks and
+restarts reuse it. Version 1 cached queries are discarded on upgrade because
+they were not checked for grounding. Changed briefs and new airings prepare
+separately. Failure
+keeps ordinary discovery, with a five-minute retry delay and at most two
+preparation attempts per input. Expired results are discarded; the store keeps
+at most 64 records. A failed state write retains the in-memory result and logs
+the persistence error. Prepared artist catalogues skip this extra call, and
+token-budget soft/hard modes do not start it.
+
+The controller maps validated intent to `searchLibrary`, `topSongsByArtist`,
+`recentByArtist`, `searchByLyrics` or `searchBySound`, using the existing registry
+availability gates, collector and station locks. No model executes those tools.
+Multi-pass ordinary discovery reserves at most one configured pass for a
+rotating targeted query and keeps other sources in the remaining passes;
+one-pass discovery rotates searches normally. Episodes, journeys and strict
+playlists keep their priority, and soft playlists keep their reserved pass.
+An unavailable search is omitted; empty/error results use the existing bounded
+recovery sources. No extra discovery passes, tool loops or picking-model calls
+are introduced. Search briefs never become speech context. Regression checks
+capture actual HTTP/model calls and verify cache recovery and policy filtering.
+
+**Model-failure recovery** matches the pool's own move. When `djPick` fails,
+`djObject` has already spent both of its attempts, so the route queues the top
+of its own fit-ordered list rather than handing the slot to the pool, which
+would spend two more attempts on the model that just failed. Nothing
+model-shaped runs after that: the Leanings review is skipped, and the artist
+and album guards still choose WHICH candidates are eligible but take the first
+of them instead of asking for a re-pick (`guardRepick`). The pick carries the
+neutral Booth clause and no transition gesture. It is not a success: the route
+reports `health.modelFailed` and `runTrackEvent` counts a breaker failure, never
+a `breakerSuccess`, so three in a row still open the breaker. The spoken link is
+still attempted, as the pool's is, because a model that cannot hold a structured
+pick can often still write free text. Pinned by
+`scripts/shortlist-model-fallback.test.ts`. A failed corrective Shortlist re-pick
+(or an unusable corrective ID) likewise takes the first track from that call's
+already-guarded subset, preserving fit order and artist/album exclusions. It
+marks the same breaker failure, carries a neutral reason and no transition, and
+prevents subsequent model-shaped corrections. Empty subsets retain the existing
+starvation/recovery policy. Agentic and request corrective calls keep their
+existing failure handling. Pinned by `scripts/shortlist-corrective-fallback.test.ts`.
+The additional discovery/energy/similarity guards are pinned by
+`scripts/shortlist-remaining-discovery.test.ts` and
+`scripts/picker-soft-energy-similarity.test.ts`.
 
 ## Prepared artist episodes
 

@@ -69,6 +69,7 @@ export async function runLeaningsReview({
   seen,
   editorialLeanings,
   djName,
+  lastfmTagsFor = () => [],
   context,
   resolution,
   route,
@@ -81,6 +82,8 @@ export async function runLeaningsReview({
   seen: Map<string, any>;
   editorialLeanings: EditorialLeaningsContext;
   djName: string | null;
+  // Read existing library evidence privately, after the Leanings-blind pick.
+  lastfmTagsFor?: (id: string) => readonly string[] | null | undefined;
   context: AgenticLeaningsReviewContext;
   resolution: PickResolution;
   route: LeaningsRoute;
@@ -92,10 +95,21 @@ export async function runLeaningsReview({
   resolution.leaningsReview = { outcome: 'not-run', replacementId: null };
   if (!editorialLeanings.promptValue || seen.size <= 1) return { song, object, reviewed: false };
 
-  const candidates = [...seen.values()];
-  const leaningsSources = eligibleAgenticLeanings(song, candidates, agenticLeaningsSources(editorialLeanings, djName));
+  // Tool candidates omit Last.fm tags to keep discovery compact. Enrich copies
+  // only for this review, including the baseline so shared evidence cannot be
+  // mistaken for a challenger advantage. Never mutate the picker’s seen map.
+  const withEvidence = (candidate: any) => ({
+    ...candidate,
+    lastfm_tags: [...new Set([
+      ...(Array.isArray(candidate.lastfm_tags) ? candidate.lastfm_tags : []),
+      ...(lastfmTagsFor(String(candidate.id)) ?? []),
+    ])],
+  });
+  const reviewBaseline = withEvidence(song);
+  const candidates = [...seen.values()].map(withEvidence);
+  const leaningsSources = eligibleAgenticLeanings(reviewBaseline, candidates, agenticLeaningsSources(editorialLeanings, djName));
   const leaningsOptions = leaningsSources.map(({ phrase }) => phrase);
-  const reviewCandidates = selectAgenticReviewCandidates(song, candidates, leaningsOptions);
+  const reviewCandidates = selectAgenticReviewCandidates(reviewBaseline, candidates, leaningsOptions);
   if (reviewCandidates.length < 2 || leaningsOptions.length === 0) return { song, object, reviewed: false };
 
   const common = {
@@ -104,8 +118,17 @@ export async function runLeaningsReview({
     leaningsOptions,
     leaningsSources,
   };
+  const compactCandidates = reviewCandidates.map((candidate) => compactAgenticReviewCandidate(candidate, leaningsOptions, reviewBaseline));
+  const baselineSupportedLeanings = (compactCandidates[0].leaningsMatches ?? []) as string[];
+  // No distinguishing preference among viable challengers means there is no
+  // tie for Leanings to settle. Keep the original pick without a model call.
+  if (!compactCandidates.slice(1).some(candidate =>
+    (candidate.flowCloseness === 'close' || candidate.flowCloseness === 'possible')
+    && Array.isArray(candidate.leaningsAdvantages) && candidate.leaningsAdvantages.length > 0)) {
+    resolution.leaningsReview = { outcome: 'not-run', replacementId: null, ...common };
+    return { song, object, reviewed: false };
+  }
   try {
-    const compactCandidates = reviewCandidates.map((candidate) => compactAgenticReviewCandidate(candidate, leaningsOptions, song));
     const compactById = new Map(compactCandidates.map((candidate) => [String(candidate.id), candidate]));
     const answer: any = await review({
       system: agenticLeaningsReviewSystem(),
@@ -150,6 +173,7 @@ export async function runLeaningsReview({
       musicalLeanings: editorialLeanings.promptValue,
       allowedLeanings: leaningsOptions,
       supportedLeanings: Array.isArray(compactReplacement?.leaningsMatches) ? compactReplacement.leaningsMatches as string[] : [],
+      baselineSupportedLeanings,
       flowCloseness: compactReplacement?.flowCloseness,
     });
     if (!validation.valid) {
@@ -175,7 +199,7 @@ export async function runLeaningsReview({
       leaningsBasis: validation.basis, leaningsSource: owner?.source ?? null, reviewedSelectedId, ...common,
     };
     return {
-      song: replacement,
+      song: seen.get(String(replacement.id)) ?? replacement,
       object: { ...object, id: replacement.id, reason: route.replacementReason(replacement, leaningsReason), transition: answer.transition },
       reviewed: true,
     };

@@ -132,15 +132,15 @@ export function agenticLeaningsReviewSchema(ids: string[], leaningsOptions: stri
     // artificial 100% "keep" rate, while candidate ids at position zero drove
     // the previous independent-rerank bias. The controller still validates
     // both fields against these closed lists before a replacement can count.
-    selectedId: z.string().trim().min(1).max(160).describe(`copy the final exact id from baseline or challengers. Choose a close challenger with a supported Leanings match; otherwise use ${baselineId}. Never invent an id.`),
-    leaningsBasis: z.string().trim().min(1).max(100).describe(`write ${NO_AGENTIC_LEANINGS_INFLUENCE} when selectedId is ${baselineId}. When changing selectedId, copy exactly one supplied leaningsOptions phrase that materially caused that change; never invent or paraphrase evidence.`),
+    selectedId: z.string().trim().min(1).max(160).describe(`copy the final exact id from baseline or challengers. Keep ${baselineId} by default. Change only when a supported Leanings advantage genuinely settles an otherwise comparable choice. Never invent an id.`),
+    leaningsBasis: z.string().trim().min(1).max(100).describe(`write ${NO_AGENTIC_LEANINGS_INFLUENCE} when selectedId is ${baselineId}. When changing selectedId, copy exactly one of that challenger's leaningsAdvantages that materially caused the change; a preference also matched by the baseline is not an advantage. Never invent or paraphrase evidence.`),
     musicalReason: z.string().trim().min(16).max(180).describe('one natural, specific clause about the selected track, beginning with "its" or "it". Describe sound, texture, melody, rhythm, production or songwriting like a music lover, not a metadata report. Do not name the DJ, artist, title, preferences, Leanings, baseline, challenger, preliminary choice, current flow, queue position, BPM, key, energy level or mood tag; the controller adds verified identity and evidence.'),
     transition: pickSchemaBase().shape.transition,
   }), { objectFallbacks: { leaningsBasis: NO_AGENTIC_LEANINGS_INFLUENCE, musicalReason: MUSICAL_REASON_UNAVAILABLE } });
 }
 
 export function agenticLeaningsReviewSystem(): string {
-  return 'You are performing one private music-editor review. The controller has already selected an eligible baseline without Musical Leanings. First look for a supplied challenger that is a verified close ordinary-flow choice and has a controller-supported Leanings match; that is a genuine tie-break and should replace the baseline. Use a possible-flow match only when its musical fit is convincingly comparable. Keep the baseline when no such challenger exists. Never invent tracks, preference evidence or facts beyond the supplied data.';
+  return 'You are performing one private music-editor review. Keep the eligible baseline by default. Musical Leanings are a soft tie-breaker: change only when a controller-supported preference advantage genuinely settles an otherwise comparable choice. A preference shared with the baseline does not justify a replacement. Prefer close ordinary-flow choices; consider possible-flow choices only when their musical fit is convincingly comparable. Having a matching challenger never obliges a swap. Never invent tracks, preference evidence or facts beyond the supplied data.';
 }
 
 export function agenticLeaningsReviewPrompt({
@@ -164,8 +164,8 @@ export function agenticLeaningsReviewPrompt({
     leaningsSources,
   }, null, 2)
     + '\n\nleaningsSources identifies the owner of each preference. Host preferences are primary; guest preferences are secondary. Only leaningsOptions are eligible: the controller excludes guest evidence whenever a viable host-supported choice exists.'
-    + '\n\nUse this decision order: (1) scan every challenger for flowCloseness="close" plus a non-empty leaningsMatches; if present, choose the strongest such challenger and copy its matching phrase into leaningsBasis. (2) Otherwise consider a flowCloseness="possible" match only when its musical continuation is genuinely comparable. (3) Only when neither exists, keep the baseline and write leaningsBasis=NO_LEANINGS_INFLUENCE. Do not independently rerank tracks that have no supported match.'
-    + '\n\nflowCloseness is a Leanings-blind controller comparison using energy, mood, tempo, key and genre. A candidate’s leaningsMatches contains exact active-profile phrases supported by its genre/mood tags. The controller independently verifies both fields, so copy ids and phrases exactly.'
+    + '\n\nUse this decision order: (1) keep the baseline by default. (2) Consider a challenger with flowCloseness="close" and non-empty leaningsAdvantages only when that preference genuinely distinguishes it; a flowCloseness="possible" choice also needs convincingly comparable musical continuation. (3) Change only if that supported advantage materially settles the close choice, copying its exact phrase into leaningsBasis. Otherwise keep the baseline and write leaningsBasis=NO_LEANINGS_INFLUENCE. A matching challenger never obliges a swap. Do not independently rerank tracks that have no distinguishing preference.'
+    + '\n\nflowCloseness is a Leanings-blind controller comparison using energy, mood, tempo, key and genre. A candidate’s leaningsMatches contains exact active-profile phrases supported by its genre/mood tags. leaningsAdvantages contains only those matches absent from the baseline: a shared genre such as rock is compatibility, not evidence that Leanings changed the choice. The controller independently verifies flow and this difference, so copy ids and phrases exactly.'
     + '\n\nAlways write musicalReason for selectedId as one natural, specific musical clause of roughly 12–28 words, beginning with "its" or "it". Write like a music lover: describe an audible texture, melody, rhythm, production choice or songwriting quality. Do not repeat the DJ, artist or title. Do not mention preferences, Leanings, baseline, challenger, preliminary choice, current flow, queue position, BPM, key, energy levels or mood tags. Avoid stock evaluator wording such as "complements the current flow". The controller adds the verified names and exact evidence. Set transition for selectedId.'
     + transitionChoiceNudge(context.recentTransitions);
 }
@@ -338,7 +338,7 @@ export function pickSystem(
   // with the cross-hour memory in broadcast/session.ts, which now keeps that
   // history alive across daypart turnovers.
   const djModeLine = persona?.djMode
-    ? `\n\n${instruction('picker', 'dj-mode')}`
+    ? `\n\n${instruction('picker', nativeShortlist ? 'shortlist-dj-mode' : 'dj-mode')}`
     : '';
   // The show topic must live in the system prompt, not only in the session-
   // opening message: the session window (~40 turns) scrolls past the opener
@@ -370,7 +370,9 @@ export function pickSystem(
   // the showPlaylistTracks tool is NOT registered — telling the model to call
   // a tool that doesn't exist burns steps and invites fabrication.
   const playlistLean = activeShow?.playlistIds?.length && playlistResolved
-    ? `\n\n${instruction('picker', activeShow.playlistStrict ? 'playlist-strict' : 'playlist-soft')}`
+    ? `\n\n${instruction('picker', nativeShortlist
+      ? (activeShow.playlistStrict ? 'shortlist-playlist-strict' : 'shortlist-playlist-soft')
+      : (activeShow.playlistStrict ? 'playlist-strict' : 'playlist-soft'))}`
     : '';
   // Listener favourites (#991) deliberately do NOT render here: the list
   // changes as likes land, and re-rendering it inside the system prompt broke
@@ -394,11 +396,11 @@ export function pickSystem(
       : instruction('picker', 'finding-candidates');
   return `${settings.agentPersonaPreamble(persona)}
 
-${instruction('picker', 'frame')}${djModeLine}${showLine}${musicLean}${playlistLean}
+${instruction('picker', nativeShortlist ? 'shortlist-frame' : 'frame')}${djModeLine}${showLine}${musicLean}${playlistLean}
 
 ${dj.PICKER_CRITERIA}
 
-${instruction('picker', 'listener-requests', { listenerText: LISTENER_TEXT_CLAUSE })}${dj.REQUESTER_NAME_CLAUSE}
+${instruction('picker', nativeShortlist ? 'shortlist-listener-text' : 'listener-requests', { listenerText: LISTENER_TEXT_CLAUSE })}${dj.REQUESTER_NAME_CLAUSE}
 
 ${findingCandidates}${dj.effectsGuidance()}${editorialLeaningsPrompt}`;
 }

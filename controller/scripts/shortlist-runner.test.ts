@@ -58,7 +58,9 @@ test('native builder plans from source-owned availability before execution', asy
     moods: ['calm'], energies: ['low'],
   });
   assert.ok(result.sourceRuns.length > 0);
-  assert.ok(result.sourceRuns.every((run) => run.source === 'tracksByMood'));
+  assert.equal(result.sourceRuns[0].source, 'tracksByMood');
+  assert.ok(result.sourceRuns.slice(1).every(run => ['starredSongs', 'randomSongs'].includes(run.source)),
+    'thin results may use only the bounded recovery sources');
 });
 
 test('narrow shortlists rotate all discovery families and continuity sources across seeds', () => {
@@ -172,13 +174,21 @@ test('Shortlist sends a compact selection-only candidate payload', () => {
     bpm: 120, key: '8A', pace: 0.7, sections: 4, unaired: true,
     play_count: 2, last_played_days_ago: 30, artist_play_count: 5,
     artist_last_played_days_ago: 10,
+    duration_sec: 240, intro_ms: 12_000, source: 'deepCuts',
   });
   const prompt = shortlistPickPrompt([candidate]);
   const payload = JSON.parse(prompt.slice(0, prompt.indexOf('\n\nChoose one id'))) as { shortlist: Array<Record<string, unknown>> };
   assert.equal(payload.shortlist.length, 1);
   assert.equal('shortlistSources' in payload.shortlist[0], false);
-  assert.equal('duration_sec' in payload.shortlist[0], false);
-  assert.equal('intro_ms' in payload.shortlist[0], false);
+  assert.equal(payload.shortlist[0].duration_sec, 240);
+  assert.equal(payload.shortlist[0].source, 'deepCuts');
+  assert.equal(payload.shortlist[0].intro_ms, 12_000);
+  assert.equal(shortlistCandidateForPick({ id: 'immediate', intro_ms: 0 }).intro_ms, 0,
+    'a measured immediate start is distinct from an unknown intro');
+  for (const intro_ms of [undefined, null, -1, NaN, Infinity, '12000']) {
+    assert.equal('intro_ms' in shortlistCandidateForPick({ id: 'unknown', intro_ms }), false,
+      'unknown or invalid intro measurements must not become facts for the model');
+  }
   assert.doesNotMatch(prompt.slice(0, prompt.indexOf('\n\nChoose one id')), /\n\s+"/,
     'candidate JSON is compact rather than indentation-heavy');
 });

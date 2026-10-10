@@ -78,6 +78,9 @@ assert.match(prompt, /Do not independently rerank/i);
 assert.match(prompt, /leaningsBasis=NO_LEANINGS_INFLUENCE/i);
 assert.match(prompt, /flowCloseness="close"/i);
 assert.match(prompt, /leaningsMatches/i);
+assert.match(prompt, /leaningsAdvantages/i);
+assert.match(prompt, /keep the baseline by default/i);
+assert.match(prompt, /A matching challenger never obliges a swap/i);
 assert.match(prompt, /roughly 12–28 words/i);
 assert.match(prompt, /controller adds the verified names and exact evidence/i);
 assert.match(prompt, /beginning with "its" or "it"/i);
@@ -115,7 +118,7 @@ assert.deepEqual(reviewedForward, ['baseline', 'close-a', 'close-b']);
 assert.deepEqual(reviewedReverse, reviewedForward, 'challenger selection is invariant to discovery insertion order');
 const profileMatchPool = [
   ...candidatePool,
-  { id: 'profile-match', energy: 'high', moods: ['workout'], genre: 'Synth-Pop', bpm: 90, key: '2B', instrumental: false },
+  { id: 'profile-match', energy: 'medium', moods: ['reflective'], genre: 'Synth-Pop', bpm: 90, key: '2B', instrumental: false },
   { id: 'ordinary-third', energy: 'medium', moods: ['reflective'], genre: 'Rock', bpm: 123, key: '8A', instrumental: false },
 ];
 assert.ok(
@@ -150,6 +153,20 @@ assert.equal(
   'the compact payload exposes a coarse Leanings-blind flow comparison',
 );
 
+const rockBaseline = { ...baselineCandidate, genre: 'Rock' };
+const crowdedPool = Array.from({ length: 8 }, (_, i) => ({ ...rockBaseline, id: `rock-${i}` }));
+const distinguishingPunk = { ...rockBaseline, id: 'punk', genre: 'Punk', bpm: 121 };
+assert.ok(
+  selectAgenticReviewCandidates(rockBaseline, [...crowdedPool, distinguishingPunk], ['rock', 'punk'])
+    .some(candidate => candidate.id === 'punk'),
+  'shared rock matches cannot crowd a distinguishing punk preference out of the compact review',
+);
+assert.deepEqual(
+  compactAgenticReviewCandidate({ ...rockBaseline, id: 'peer', genre: 'Alternative Rock' }, ['rock'], rockBaseline).leaningsAdvantages,
+  undefined,
+  'a shared genre is not a preference advantage',
+);
+
 const replacement = { artist: 'Buddy Holly', title: 'Rave On' };
 const musicalLeanings = 'She enjoys warm voices, strong melodies, thoughtful songwriting and records that reveal themselves gradually.';
 assert.deepEqual(validateAgenticLeaningsReplacement({
@@ -158,6 +175,7 @@ assert.deepEqual(validateAgenticLeaningsReplacement({
   musicalLeanings,
   allowedLeanings: ['warm voices', 'strong melodies', 'thoughtful songwriting'],
   supportedLeanings: ['strong melodies'],
+  baselineSupportedLeanings: [],
   flowCloseness: 'close',
 }), { valid: true, basis: 'strong melodies' });
 assert.deepEqual(validateAgenticLeaningsReplacement({
@@ -166,6 +184,7 @@ assert.deepEqual(validateAgenticLeaningsReplacement({
   musicalLeanings,
   allowedLeanings: ['warm voices', 'strong melodies', 'thoughtful songwriting'],
   supportedLeanings: ['strong melodies'],
+  baselineSupportedLeanings: [],
   flowCloseness: 'close',
 }), { valid: false, reason: 'missing-leanings-basis' }, 'a changed id cannot use the no-influence sentinel');
 assert.deepEqual(validateAgenticLeaningsReplacement({
@@ -174,6 +193,7 @@ assert.deepEqual(validateAgenticLeaningsReplacement({
   musicalLeanings,
   allowedLeanings: ['warm voices', 'strong melodies', 'thoughtful songwriting'],
   supportedLeanings: ['strong melodies'],
+  baselineSupportedLeanings: [],
   flowCloseness: 'close',
 }), { valid: false, reason: 'missing-leanings-basis' }, 'a phrase outside the controller options cannot masquerade as evidence');
 assert.deepEqual(validateAgenticLeaningsReplacement({
@@ -182,6 +202,7 @@ assert.deepEqual(validateAgenticLeaningsReplacement({
   musicalLeanings,
   allowedLeanings: ['warm voices', 'strong melodies', 'thoughtful songwriting'],
   supportedLeanings: ['strong melodies'],
+  baselineSupportedLeanings: [],
   flowCloseness: 'close',
 }), { valid: false, reason: 'weak-musical-reason' });
 assert.deepEqual(validateAgenticLeaningsReplacement({
@@ -190,6 +211,7 @@ assert.deepEqual(validateAgenticLeaningsReplacement({
   musicalLeanings,
   allowedLeanings: ['warm voices', 'strong melodies'],
   supportedLeanings: [],
+  baselineSupportedLeanings: [],
   flowCloseness: 'close',
 }), { valid: false, reason: 'basis-not-supported-by-candidate' });
 assert.deepEqual(validateAgenticLeaningsReplacement({
@@ -198,6 +220,7 @@ assert.deepEqual(validateAgenticLeaningsReplacement({
   musicalLeanings,
   allowedLeanings: ['warm voices', 'strong melodies'],
   supportedLeanings: ['strong melodies'],
+  baselineSupportedLeanings: [],
   flowCloseness: 'weak',
 }), { valid: false, reason: 'not-flow-tie' });
 const generatedLeaningsReason = agenticLeaningsSelectionReason({
@@ -332,7 +355,7 @@ const schemaSource = readFileSync(new URL('../src/broadcast/dj-agent/schemas.ts'
 const basisSchemaStart = schemaSource.indexOf('leaningsBasis: z.string');
 const basisSchemaEnd = schemaSource.indexOf("musicalReason: z.string()", basisSchemaStart);
 const basisSchemaSource = schemaSource.slice(basisSchemaStart, basisSchemaEnd);
-assert.match(basisSchemaSource, /copy exactly one supplied leaningsOptions phrase/i);
+assert.match(basisSchemaSource, /copy exactly one of that challenger's leaningsAdvantages/i);
 assert.doesNotMatch(basisSchemaSource, /warm voices|records that reveal themselves gradually/i,
   'profile phrases are supplied dynamically rather than seeded examples');
 const passSource = readFileSync(new URL('../src/broadcast/dj-agent/leanings-pass.ts', import.meta.url), 'utf8');
@@ -357,7 +380,7 @@ assert.match(pickSource, /verifiedAgenticReason\(agenticSelectionReason\(replace
   'an Agentic replacement is worded by the Agentic verifier');
 // The shared pass (pinned on behaviour in leanings-pass.test.ts) is where the
 // compact review set, the review-only system prompt and source ownership live.
-assert.match(passSource, /selectAgenticReviewCandidates\(song, candidates, leaningsOptions\)/,
+assert.match(passSource, /selectAgenticReviewCandidates\(reviewBaseline, candidates, leaningsOptions\)/,
   'the review receives a small deterministic set around the real Leanings-blind baseline');
 assert.match(passSource, /system: agenticLeaningsReviewSystem\(\)/,
   'the review avoids the full on-air persona system prompt');

@@ -101,3 +101,32 @@ test('shortlistPasses is clamped to its shared bounds on load', async () => {
   assert.equal((await coldLoad({ shortlistPasses: 0 })).shortlistPasses, SHORTLIST_PASSES_BOUNDS.min);
   assert.equal((await coldLoad({ shortlistPasses: 99 })).shortlistPasses, SHORTLIST_PASSES_BOUNDS.max);
 });
+
+test('the Candidate Pool upgrade is announced until a save records the route', async () => {
+  const { checkLlm } = await import('../src/doctor/checks-services.js');
+  const trackSelectionHint = async () => (await checkLlm(settings.get(), {
+    candidatePoolMigrated: settings.migratedFromCandidatePool(),
+  })).find((finding) => finding.label === 'track selection')?.hint;
+
+  await coldLoad({ pickerAgent: false });
+  assert.equal(settings.migratedFromCandidatePool(), true);
+  assert.match(String(await trackSelectionHint()), /retired Candidate Pool/);
+  const finding = (await checkLlm(settings.get(), { candidatePoolMigrated: true }))
+    .find((f) => f.label === 'track selection');
+  assert.equal(finding?.status, 'ok', 'Track Shortlist is a supported route, never a warning');
+
+  // Any save writes the derived route down, after which the station simply
+  // has a Shortlist choice like any other.
+  await settings.update({ llm: { shortlistPasses: 3 } });
+  assert.equal(settings.migratedFromCandidatePool(), false);
+  assert.equal(await trackSelectionHint(), undefined);
+  setCache(null);
+  await settings.load();
+  assert.equal(settings.migratedFromCandidatePool(), false, 'and stays retired across a restart');
+  assert.equal(settings.get().llm.trackSelection, 'shortlist');
+
+  for (const llm of [{}, { pickerAgent: true }, { pickerAgent: false, trackSelection: 'shortlist' }, { pickerAgent: false, trackSelection: 'agentic' }]) {
+    await coldLoad(llm);
+    assert.equal(settings.migratedFromCandidatePool(), false, `no notice for ${JSON.stringify(llm)}`);
+  }
+});

@@ -113,14 +113,14 @@ interface LlmCall {
       leaningsOptions?: string[];
       leaningsSources?: Array<{ phrase: string; source: 'host' | 'guest'; ownerName: string | null }>;
       proposedReplacementId?: string | null;
-      rejectionReason?: 'unknown-candidate' | 'missing-leanings-basis' | 'basis-not-in-leanings' | 'basis-not-supported-by-candidate' | 'not-flow-tie' | 'weak-musical-reason' | null;
+      rejectionReason?: 'unknown-candidate' | 'missing-leanings-basis' | 'basis-not-in-leanings' | 'basis-not-supported-by-candidate' | 'basis-already-supported-by-baseline' | 'not-flow-tie' | 'weak-musical-reason' | null;
     };
     guardOutcome?: 'none' | 'artist-repick' | 'album-repick' | 'artist-and-album-repick' | 'pool-rescue';
     final?: { id?: string; title?: string | null; artist?: string | null };
     reason?: string | null;
     queued?: boolean;
     usedMusicalLeanings?: boolean;
-    rejectionReason?: 'unknown-candidate' | 'missing-leanings-basis' | 'basis-not-in-leanings' | 'basis-not-supported-by-candidate' | 'not-flow-tie' | 'weak-musical-reason' | 'queue-collision' | 'pool-rescue' | null;
+    rejectionReason?: 'unknown-candidate' | 'missing-leanings-basis' | 'basis-not-in-leanings' | 'basis-not-supported-by-candidate' | 'basis-already-supported-by-baseline' | 'not-flow-tie' | 'weak-musical-reason' | 'queue-collision' | 'pool-rescue' | null;
   };
   response?: string;
   /** What the model said INSTEAD of the expected structured output on a failed call.
@@ -142,7 +142,7 @@ interface LlmCall {
       leaningsSources?: Array<{ phrase: string; source: 'host' | 'guest'; ownerName: string | null }>;
       leaningsSource?: 'host' | 'guest' | null;
       proposedReplacementId?: string | null;
-      rejectionReason?: 'unknown-candidate' | 'missing-leanings-basis' | 'basis-not-in-leanings' | 'basis-not-supported-by-candidate' | 'not-flow-tie' | 'weak-musical-reason' | null;
+      rejectionReason?: 'unknown-candidate' | 'missing-leanings-basis' | 'basis-not-in-leanings' | 'basis-not-supported-by-candidate' | 'basis-already-supported-by-baseline' | 'not-flow-tie' | 'weak-musical-reason' | null;
     };
     guardOutcome?: 'none' | 'artist-repick' | 'album-repick' | 'artist-and-album-repick' | 'pool-rescue';
     final?: { id?: string; title?: string | null; artist?: string | null };

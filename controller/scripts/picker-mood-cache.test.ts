@@ -62,11 +62,12 @@ test('a new pick reads changed tags instead of inheriting the previous pick cach
   const next = buildPickerTools();
   const tool = next.tools.tracksByMood;
   assert.ok(tool?.execute);
-  const empty = await tool.execute({ mood: 'calm', energy: 'low' }, {
+  const softened = await tool.execute({ mood: 'calm', energy: 'low' }, {
     toolCallId: 'new-mood-cache-test', messages: [], context: undefined,
   });
-  assert.equal(Array.isArray(empty), false);
-  assert.equal(next.seen.size, 0);
+  assert.equal(Array.isArray(softened), true);
+  assert.equal(next.seen.size, 8);
+  assert.ok(candidatesSchema.parse(softened).every(track => track.energy === 'high'));
   const higher = await runMood(next.tools, 'high');
   assert.equal(higher.length, 8);
   assert.ok(higher.every(track => track.energy === 'high'));

@@ -7,6 +7,7 @@ const SOURCE_LABELS: Record<string, string> = {
   topSongsByArtist: 'artist favourites',
   recentByArtist: 'recent artist picks',
   songsByGenre: 'genre matching',
+  songsByEra: 'era matching',
   tracksByMood: 'mood and energy matching',
   tracksByEnergy: 'energy matching',
   tracksLikeThis: 'similar-track exploration',
@@ -20,6 +21,12 @@ const SOURCE_LABELS: Record<string, string> = {
   randomSongs: 'a library wildcard',
   showPlaylistTracks: 'the show’s music selection',
   tracksTowardJourney: 'the station’s sonic journey',
+  sonicSimilarTracks: 'server sound-alike exploration',
+  frequentAlbums: 'frequently played albums',
+  moodPlaylistTracks: 'a mood-matched playlist',
+  similarArtistTracks: 'related-artist tracks',
+  moodWildcard: 'a contrasting mood',
+  episodeArtistTracks: 'the episode’s featured artist',
 };
 
 // A candidate records only the source that FIRST surfaced it (see

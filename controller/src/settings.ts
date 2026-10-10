@@ -337,6 +337,15 @@ const storedTrackSelection = (v: unknown): 'agentic' | 'shortlist' | undefined =
 const storedRuntime = (v: unknown): 'agentic' | 'direct' | undefined =>
   v === 'agentic' || v === 'direct' ? v : undefined;
 
+// The one upgrade that is not byte-identical (#1687): a station still carrying
+// the retired Candidate Pool toggle and no route of its own is moved to Track
+// Shortlist by load(). Remembered so the operator is TOLD — in the booth at boot
+// and in DJ Doc — until a save writes the route down and the note retires.
+let candidatePoolMigrated = false;
+export function migratedFromCandidatePool(): boolean {
+  return candidatePoolMigrated;
+}
+
 export async function load() {
   const cached = peek();
   if (cached) return cached;
@@ -364,6 +373,9 @@ export async function load() {
       }
     } catch {}
   }
+
+  candidatePoolMigrated = stored.llm?.pickerAgent === false
+    && storedTrackSelection(stored.llm?.trackSelection) === undefined;
 
   // ── personas ──────────────────────────────────────────────────────────────
   // No valid persona roster in settings.json (fresh install) → ship the seed
@@ -2661,8 +2673,13 @@ export async function update(patch) {
   // continue to work against one merged view.
   const { shows: _shows, schedule: _schedule, scheduleOverride: _override, ...settingsPersist } = next;
   // Atomic replace — a crash mid-write must not take the operator's whole
-  // config (or show schedule) with it.
-  await writeFileAtomic(SETTINGS_PATH, JSON.stringify(settingsPersist, null, 2));
+  // config (or show schedule) with it. Owner-only: settings.json carries every
+  // inline credential getRedacted() masks, in a state dir other accounts can
+  // list. schedule.json holds none and keeps whatever mode it has.
+  await writeFileAtomic(SETTINGS_PATH, JSON.stringify(settingsPersist, null, 2), { mode: 0o600 });
+  // Every save writes the whole llm block, the derived trackSelection with it,
+  // so the Candidate Pool migration is now on disk as an ordinary choice.
+  candidatePoolMigrated = false;
   await writeFileAtomic(
     SCHEDULE_PATH,
     JSON.stringify(
