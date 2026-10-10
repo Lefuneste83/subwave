@@ -387,6 +387,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   // tracks, in the plan's order, each with its own request flags.
   const planned = new Map<string, WorkRequest>();
   const plannedFacets = new Map<string, Facet[]>();
+  let planStemsOffline = false;
   if (plan) {
     for (const item of plan.items) {
       planned.set(item.id, item.request);
@@ -400,10 +401,19 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     );
     const wantsStems = plan.items.some(i => i.request.stems);
     if (wantsStems) {
-      // The only place a plan sizes the budget (the widening above skips plans),
-      // whether or not the settings toggle is on: an explicit stems plan needs it.
-      stemSlotsLeft = await stemCacheStore.headroomTracks();
-      existingStemDirs = await stemCacheStore.cachedTrackIdSet();
+      // The plan's own root check: the one above only runs with the settings
+      // toggle on, and an unmounted share must not read as an empty cache.
+      const root = await stemCacheStore.stemsRootStatus({ prepare: true });
+      if (!root.online) {
+        planStemsOffline = true;
+        logEvent('warning', root.message ?? 'Stem cache offline: stems skipped this plan');
+      } else {
+        if (root.message) logEvent('warning', root.message);
+        // The only place a plan sizes the budget (the widening above skips plans),
+        // whether or not the settings toggle is on: an explicit stems plan needs it.
+        stemSlotsLeft = await stemCacheStore.headroomTracks();
+        existingStemDirs = await stemCacheStore.cachedTrackIdSet();
+      }
     }
   }
   // A facet plan on a backend that speaks the facet protocol asks for exactly
@@ -428,7 +438,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   const fallbackReasons = new Map<string, number>();
 
   // Pass-wide flags the tail of the pass reports on (sweep, Demucs warning).
-  const passStems = plan ? plan.items.some(i => i.request.stems) : stemCache;
+  const passStems = plan ? !planStemsOffline && plan.items.some(i => i.request.stems) : stemCache;
   const passVocal = plan ? plan.items.some(i => i.request.vocal) : vocalBackfill;
 
   // Say what the scope leaves out: "all tracks current" is also true of a
@@ -511,7 +521,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   const allocateStems = (id: string): string | undefined => {
     const want = planned.get(id);
     // A planned track gets stems only when its plan asks for them.
-    if (plan && !want?.stems) return undefined;
+    if (plan && (!want?.stems || planStemsOffline)) return undefined;
     const trackStemDecision = stemCacheStore.stemWriteDecision({
       cacheOn: plan ? true : stemCache,
       slotsLeft: stemSlotsLeft,

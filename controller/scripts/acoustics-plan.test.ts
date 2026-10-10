@@ -401,6 +401,36 @@ async function main() {
     assert.equal(r.orphans, 0);
   });
 
+  await test('a stems plan on an unmounted stems share sends no stems_dir', async () => {
+    const stemCacheStore = await import('../src/music/stem-cache.js');
+    const { readdirSync } = await import('node:fs');
+    vocalCapable = true;
+    analyzer._resetBackendCacheForTests();
+    try {
+      // The share is gone: the root has no marker and no stem dirs, yet the
+      // library says stems were cached, so the root reads offline.
+      const root = stemCacheStore.stemsRoot();
+      rmSync(root, { recursive: true, force: true });
+      sql().prepare(`UPDATE tracks SET stems_at = 1 WHERE id = 'a'`).run();
+      db.upsertTrackMeta('t9', { title: 't9', artist: 'A', album: 'B', duration: 214 });
+      const p = P.planAcoustics({ ids: ['t9'], facets: ['stems'], where: { kind: 'all' },
+        state: db.loadFacetState(['stems']), capabilities: { clap: true, demucs: true } });
+      assert.equal(p.items.length, 1);
+      assert.ok(p.items[0].request.stems, 'a stems plan asks for stems');
+      requests.length = 0;
+      await runAnalysisPass({ plan: p });
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].stems_dir, undefined, JSON.stringify(requests[0]));
+      let left: string[] = [];
+      try { left = readdirSync(root); } catch { /* not recreated: fine */ }
+      assert.deepEqual(left, [], 'the plan wrote into the unmounted share');
+    } finally {
+      sql().prepare(`UPDATE tracks SET stems_at = NULL WHERE id = 'a'`).run();
+      vocalCapable = false;
+      analyzer._resetBackendCacheForTests();
+    }
+  });
+
   analyzer.shutdown();
   db.close();
   server.close();
