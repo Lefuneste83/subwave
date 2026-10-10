@@ -256,6 +256,23 @@ The additional discovery/energy/similarity guards are pinned by
 `scripts/shortlist-remaining-discovery.test.ts` and
 `scripts/picker-soft-energy-similarity.test.ts`.
 
+## Targeted acoustic analysis
+
+Facet rows describe retained measurements even after a failed retry. Their
+`attempts` mirror the track's consecutive failure count on every status, so
+`needs` and `outdated` stop selecting head-only or older measurements after three
+failures. Explicit `failed` and `all` runs can retry them. Clearing failure
+history resets attempts on retained rows too. The open-time derivation stamp
+upgrades existing rows without promoting their measurement versions.
+
+A vocal row's `head-only` reason comes from its current columns, including on
+upgrade. Tail reasons such as `capped-download` describe the measuring pass and
+survive unrelated writes and resynchronization. Head-only vocal work requires
+confirmed `tailVocalAvailable()` support through the shared capability policy;
+unknown support still allows missing head vocals but never widens tail backfill.
+Targeted runs that disable vocals preserve stored tail vocal ranges, including
+an instrumental `[]`, without marking the carried measurement fresh.
+
 ## Prepared artist episodes
 
 `broadcast/show-preparation.ts` owns `state/show-preparations.json`. Its key is a
