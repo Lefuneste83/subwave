@@ -129,6 +129,7 @@ for (const originalExit of [undefined, { crossSec: 6 }]) {
   const uri = readFileSync(config.liquidsoap.queueFile, 'utf8');
   assert.ok(!uri.includes('liq_cue_out'), 'no unpublished tail is cut off');
   assert.ok(!uri.includes('liq_cross_duration="0.3"'), 'clip timing cannot survive without a clip');
+  assert.ok(!uri.includes('liq_clip_lead'), 'no clip seam alignment without a clip');
   if (originalExit) assert.ok(uri.includes('liq_cross_duration="6"'), 'saved intrinsic timing is restored');
   assert.equal(existsSync(clipPath), false, 'unused recovered render is removed');
   rmSync(config.liquidsoap.queueFile, { force: true });
@@ -192,6 +193,7 @@ for (const scenario of [
       const uri = readFileSync(config.liquidsoap.queueFile, 'utf8');
       assert.ok(!uri.includes('liq_cue_out'), 'cancelled clip cannot shorten the outgoing audio');
       assert.ok(!uri.includes('liq_cross_duration="0.3"'), 'cancelled clip cannot retain its seam timing');
+      assert.ok(!uri.includes('liq_clip_lead'), 'cancelled clip cannot retain its seam alignment');
       if (scenario.originalExit === savedExit) assert.ok(uri.includes('liq_cross_duration="6"'));
       assert.equal(existsSync(oldClip), false, 'superseded unused audio is removed');
       assert.equal(existsSync(newClip), false, 'cancelled replacement audio is removed');
