@@ -284,6 +284,37 @@ async function main() {
     assert.deepEqual(facetRow('t1', 'tail'), { status: 'ok', reason: null, source: 'ranged', version: db.FACET_VERSIONS.tail });
   });
 
+  await test('a stems facet request carries stems_require_marker with its stems_dir', async () => {
+    const stemCacheStore = await import('../src/music/stem-cache.js');
+    const { mkdirSync, writeFileSync } = await import('node:fs');
+    const path = await import('node:path');
+    const root = stemCacheStore.stemsRoot();
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, stemCacheStore.STEMS_MARKER), '');
+    vocalCapable = true;
+    analyzer._resetBackendCacheForTests();
+    try {
+      db.upsertTrackMeta('t10', { title: 't10', artist: 'A', album: 'B', duration: 214 });
+      const p = P.planAcoustics({ ids: ['t10'], facets: ['stems'], where: { kind: 'all' },
+        state: db.loadFacetState(['stems']), capabilities: { clap: true, demucs: true, tailVocal: true } });
+      assert.equal(p.items.length, 1);
+      requests.length = 0;
+      await runAnalysisPass({ plan: p });
+      assert.equal(requests.length, 1);
+      const r = requests[0];
+      assert.deepEqual(r.facets, ['stems']);
+      assert.ok(typeof r.stems_dir === 'string', JSON.stringify(r));
+      assert.equal(r.stems_require_marker, true, 'a remote analyzer must check the share before writing');
+    } finally {
+      // Leave no stems stamp behind: with the root gone it would read offline.
+      sql().prepare(`UPDATE tracks SET stems_at = NULL WHERE id = 't10'`).run();
+      (await import('../src/music/library-db/facets.js')).syncTrackFacets('t10');
+      rmSync(root, { recursive: true, force: true });
+      vocalCapable = false;
+      analyzer._resetBackendCacheForTests();
+    }
+  });
+
   await test('an unmeasurable tail keeps the columns and records the worker\'s reason', async () => {
     db.upsertTrackMeta('t2', { title: 't2', artist: 'A', album: 'B', duration: 214 });
     db.upsertTrackAnalysis('t2', { bpm: 128, musicalKey: 'G', loudnessLufs: -8, source: 'capped' });

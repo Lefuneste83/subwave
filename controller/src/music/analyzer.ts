@@ -1189,17 +1189,17 @@ export async function analyzeFacets(
   const body: Record<string, unknown> = { facets: opts.facets };
   if (opts.ranged) body.ranged = true;
   if (opts.tailVocals) body.tail_vocals = true;
+  // A stems target always travels with stems_require_marker, as on the flat
+  // path, so an unmounted share on the analyzer's machine is never written to.
+  const stems = opts.stems_dir ? { stems_dir: opts.stems_dir, stems_require_marker: true } : {};
   const url = subsonic.getRawStreamUrl(songId);
-  if (opts.ranged || !localPath) {
-    if (opts.stems_dir) body.stems_dir = opts.stems_dir;
-    return facetRequest({ url, ...body });
-  }
+  if (opts.ranged || !localPath) return facetRequest({ url, ...body, ...stems });
   try {
     return await facetRequest({
       path: localPath,
       ...body,
       ...(opts.complete !== undefined ? { complete: opts.complete } : {}),
-      ...(opts.stems_dir ? { stems_dir: opts.stems_dir } : {}),
+      ...stems,
     });
   } catch (err) {
     if (!(err instanceof AnalyzerPathUnavailableError)) throw err;
