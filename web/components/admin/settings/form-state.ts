@@ -214,6 +214,7 @@ export function settingsForm(v: NonNullable<SettingsData['values']>): FormState 
       pickerAgent: !!v.llm?.pickerAgent,
       trackSelection: v.llm?.trackSelection === 'shortlist' ? 'shortlist' : 'agentic',
       shortlistPasses: typeof v.llm?.shortlistPasses === 'number' ? v.llm.shortlistPasses : SHORTLIST_PASSES_DEFAULT,
+      shortlistSearchPreparation: v.llm?.shortlistSearchPreparation === true,
       guestMusicalLeanings: v.llm?.guestMusicalLeanings === true,
       requestMatching: v.llm?.requestMatching === 'direct' ? 'direct' : 'agentic',
       segmentRuntime: v.llm?.segmentRuntime === 'direct' ? 'direct' : 'agentic',

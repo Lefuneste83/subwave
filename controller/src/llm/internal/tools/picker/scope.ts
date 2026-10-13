@@ -55,6 +55,7 @@ export interface PickerScope {
   playlistTracks: any[] | null;
   // Configured pins, including an unresolved playlist anchor.
   hasPlaylistAnchor: boolean;
+  hasPinnedMoods: boolean;
   // Ids from the show's excluded playlists, dropped from every tool's results so
   // the agent never sees a blocklisted track. null = no exclusions.
   excludedIds: Set<string> | null;
@@ -92,6 +93,7 @@ const NO_SCOPE: PickerScope = {
   playlistLock: null,
   playlistTracks: null,
   hasPlaylistAnchor: false,
+  hasPinnedMoods: false,
   excludedIds: null,
   listenerFavourites: null,
   audioWaypoint: null,
@@ -257,19 +259,22 @@ export function buildPickerContext(scope: PickerScope): PickerContext {
   // note steers correctly and describes a different situation.
   const seedSimilarity = (songId: string, primary: 'audio' | 'text') => {
     const K = 60;
+    const seed = library.get(songId);
+    const reference = seed?.title
+      ? `seed track: “${seed.title}”${seed.artist ? ` by ${seed.artist}` : ''}` : 'discovery seed';
     const audioFirst = primary === 'audio';
     const lookup = (which: 'audio' | 'text') =>
       which === 'audio'
         ? library.tracksLikeThisAudio(songId, K, { excludeIds: knnExclude })
         : library.tracksLikeThis(songId, K, { excludeIds: knnExclude });
     const list = lookup(primary);
-    if (list.length) return { tracks: collect(list, 8, { similarity: { kind: primary, reference: songId } }), matched: list.length, fellBack: false };
+    if (list.length) return { tracks: collect(list, 8, { similarity: { kind: primary, reference } }), matched: list.length, fellBack: false };
     const other = audioFirst ? 'text' : 'audio';
     const otherIndexed = audioFirst ? hasTextEmbeddings : hasAudioEmbeddings;
     if (otherIndexed) {
       const alt = lookup(other);
       if (alt.length) {
-        const rescued = collect(alt, 8, { similarity: { kind: other, reference: songId } });
+        const rescued = collect(alt, 8, { similarity: { kind: other, reference } });
         // Only report the rescue if something SURVIVED the recency/lock filters.
         // A raw alt count with empty tracks would render emptyResult's matched>0
         // note about an index the model never asked, glued to a "no embedding

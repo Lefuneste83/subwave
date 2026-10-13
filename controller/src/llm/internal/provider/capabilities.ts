@@ -303,6 +303,15 @@ export function forcedToolChoice(cfg: any): 'required' | 'auto' {
   return 'required';
 }
 
+// tool_choice for step 0 of the native pass, which also carries the output
+// schema. A hosted OpenAI-compatible endpoint stays open: Mistral rejects
+// json_schema with a forced tool (#1693 case D), so that leg keeps the old
+// behaviour.
+export function nativeFirstStepToolChoice(cfg: any): 'required' | 'auto' {
+  if (cfg?.provider === 'openai-compatible' && cfg?.compatibleMode === 'hosted') return 'auto';
+  return forcedToolChoice(cfg);
+}
+
 // Per-call safety thresholds for the native `google` provider, as ai-sdk
 // providerOptions. Model-construction arguments are ignored by the SDK;
 // `safetySettings` is resolved from the per-call providerOptions when the

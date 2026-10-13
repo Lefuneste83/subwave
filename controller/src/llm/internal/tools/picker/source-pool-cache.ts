@@ -24,7 +24,7 @@ export function clearPickerSourceCache(): void {
   pending.clear();
 }
 
-export async function cachedPickerSource(key: string, read: () => Promise<any[]>): Promise<any[]> {
+export async function cachedPickerSource(key: string, read: () => Promise<any[]>, availabilityKey?: string | (() => string | undefined)): Promise<any[]> {
   const hit = sourceCache.get(key);
   if (hit && hit.until > Date.now()) return hit.rows;
   const inflight = pending.get(key);
@@ -32,8 +32,13 @@ export async function cachedPickerSource(key: string, read: () => Promise<any[]>
   const startedGeneration = generation;
   const promise = read().then(rows => {
     if (generation === startedGeneration) {
-      if (sourceCache.size >= 128) sourceCache.delete(sourceCache.keys().next().value!);
-      sourceCache.set(key, { rows, until: Date.now() + (rows.length ? 30 : 5) * 60_000 });
+      const entry = { rows, until: Date.now() + (rows.length ? 30 : 5) * 60_000 };
+      const sourceKey = typeof availabilityKey === 'function' ? availabilityKey() : availabilityKey;
+      for (const cacheKey of sourceKey ? [key, sourceKey] : [key]) {
+        sourceCache.delete(cacheKey);
+        sourceCache.set(cacheKey, entry);
+        while (sourceCache.size > 128) sourceCache.delete(sourceCache.keys().next().value!);
+      }
     }
     return rows;
   }).finally(() => { if (pending.get(key) === promise) pending.delete(key); });

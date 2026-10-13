@@ -130,3 +130,23 @@ test('the Candidate Pool upgrade is announced until a save records the route', a
     assert.equal(settings.migratedFromCandidatePool(), false, `no notice for ${JSON.stringify(llm)}`);
   }
 });
+
+
+test('targeted search preparation stays off for upgrades, malformed values and new stations', async () => {
+  for (const llm of [{}, { pickerAgent: false }, { trackSelection: 'shortlist' },
+    { shortlistSearchPreparation: 'true' }, { shortlistSearchPreparation: 1 }]) {
+    assert.equal((await coldLoad(llm)).shortlistSearchPreparation, false);
+  }
+});
+
+test('explicit targeted preparation opt-in and opt-out survive saving and cold loading', async () => {
+  await coldLoad({ trackSelection: 'shortlist' });
+  for (const enabled of [true, false]) {
+    await settings.update({ llm: { shortlistSearchPreparation: enabled } });
+    setCache(null);
+    await settings.load();
+    assert.equal(settings.get().llm.shortlistSearchPreparation, enabled);
+    await settings.update({ llm: { shortlistSearchPreparation: 'bad' } });
+    assert.equal(settings.get().llm.shortlistSearchPreparation, enabled, 'invalid writes retain the saved value');
+  }
+});

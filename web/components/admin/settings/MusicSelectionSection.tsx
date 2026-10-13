@@ -1,11 +1,13 @@
 'use client';
 
 import type { ChangeEvent } from 'react';
+import { fieldAria } from '@/lib/form';
+import { FieldDescription } from '../../ui/field';
 import { Label } from '../../ui/label';
 import { Input } from '../../ui/input';
 import { Card, Pill, Seg } from '../ui';
 import { Advanced } from './section-chrome';
-import { SectionHeader, SaveBar, NowBanner, type SectionProps } from './shared';
+import { SectionHeader, SaveBar, NowBanner, SettingsFieldError, type SectionProps } from './shared';
 import { sectionById } from './registry';
 import { PICKER_MIN_TRACK_LENGTH_BOUNDS, SHORTLIST_PASSES_BOUNDS, settingsAgentRoutes } from '@/lib/schemas.generated';
 
@@ -24,10 +26,14 @@ const ROUTE_LABEL = { agentic: 'Agentic Tools', shortlist: 'Track Shortlist' } a
  * repeat rules both routes share. What the DJ SAYS lives in DJ behaviour.
  */
 export function MusicSelectionSection({ data, form, setForm, busy, saveSettings, fieldErrors }: SectionProps) {
+  const preparationError = fieldErrors['llm.shortlistSearchPreparation'];
+  const preparationAria = fieldAria('shortlist-search-preparation',
+    preparationError ? { message: preparationError } : undefined, { hasDescription: true });
   const savedLlm = data.values?.llm || {};
   const savedRoute = savedLlm.trackSelection === 'shortlist' ? 'shortlist' : 'agentic';
   const routeDirty = form.llm.trackSelection !== savedRoute
-    || (form.llm.trackSelection === 'shortlist' && form.llm.shortlistPasses !== savedLlm.shortlistPasses)
+    || (form.llm.trackSelection === 'shortlist' && (form.llm.shortlistPasses !== savedLlm.shortlistPasses
+      || form.llm.shortlistSearchPreparation !== (savedLlm.shortlistSearchPreparation === true)))
     || (form.llm.trackSelection === 'agentic' && form.llm.discoverySteps !== savedLlm.discoverySteps);
   // The deadline governs every agent run, not only Agentic Tools picks: a
   // Shortlist station with agent-assisted requests or agentic segments still
@@ -43,6 +49,7 @@ export function MusicSelectionSection({ data, form, setForm, busy, saveSettings,
       llm: {
         trackSelection: form.llm.trackSelection,
         shortlistPasses: form.llm.shortlistPasses,
+        shortlistSearchPreparation: form.llm.shortlistSearchPreparation,
         guestMusicalLeanings: form.llm.guestMusicalLeanings,
         requestMatching: form.llm.requestMatching,
         requestWebResolve: form.llm.requestWebResolve,
@@ -105,18 +112,36 @@ export function MusicSelectionSection({ data, form, setForm, busy, saveSettings,
           </div>
 
           {form.llm.trackSelection === 'shortlist' ? (
-            <div className="field">
-              <Label>Shortlist passes</Label>
-              <Seg
-                value={String(form.llm.shortlistPasses)}
-                options={passes.map(n => ({ id: String(n), label: String(n), title: PASS_TITLES[n] }))}
-                onChange={v => setForm(f => ({ ...f, llm: { ...f.llm, shortlistPasses: Number(v) } }))}
-              />
-              <div className="field-hint">
-                Each pass gathers candidates from one suitable part of your library, balancing the
-                show&apos;s mood and genre, continuity with the current track, and wider discovery; strict
-                playlists and sonic journeys stay on their own direction. <strong>3 is a good start.</strong>{' '}
-                More passes widen the shortlist without adding LLM calls. {SHORTLIST_PASSES_BOUNDS.min}&ndash;{SHORTLIST_PASSES_BOUNDS.max}.
+            <div className="grid gap-[18px]">
+              <div className="field">
+                <Label>Shortlist passes</Label>
+                <Seg
+                  value={String(form.llm.shortlistPasses)}
+                  options={passes.map(n => ({ id: String(n), label: String(n), title: PASS_TITLES[n] }))}
+                  onChange={v => setForm(f => ({ ...f, llm: { ...f.llm, shortlistPasses: Number(v) } }))}
+                />
+                <div className="field-hint">
+                  Each pass gathers candidates from one suitable part of your library, balancing the
+                  show&apos;s mood and genre, continuity with the current track, and wider discovery; strict
+                  playlists and sonic journeys stay on their own direction. <strong>3 is a good start.</strong>{' '}
+                  More passes widen the shortlist without adding LLM calls. {SHORTLIST_PASSES_BOUNDS.min}&ndash;{SHORTLIST_PASSES_BOUNDS.max}.
+                </div>
+              </div>
+              <div className="field" data-invalid={preparationAria.invalid || undefined}>
+                <Label {...preparationAria.labelledByProps}>Prepare targeted searches</Label>
+                <Seg
+                  {...preparationAria.groupProps}
+                  accent
+                  value={form.llm.shortlistSearchPreparation ? 'on' : 'off'}
+                  options={[{ id: 'off', label: 'Off' }, { id: 'on', label: 'On' }]}
+                  onChange={v => setForm(f => ({ ...f, llm: { ...f.llm, shortlistSearchPreparation: v === 'on' } }))}
+                />
+                <FieldDescription className="field-hint" {...preparationAria.descriptionProps}>
+                  Off by default. When enabled, an extra model call reads explicit music requests in the
+                  show brief once per airing and prepares searches within your existing pass budget.
+                  It can add time to the first pick; ordinary discovery continues if preparation fails.
+                </FieldDescription>
+                <SettingsFieldError path="llm.shortlistSearchPreparation" errors={fieldErrors} {...preparationAria.errorProps} />
               </div>
             </div>
           ) : (

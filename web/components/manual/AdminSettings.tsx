@@ -152,7 +152,9 @@ export default function AdminSettings() {
             <strong>Music Selection</strong> — choose how tracks are selected (Agentic
             Tools or Track Shortlist), and independently whether listener requests use
             direct matching or agent assistance. Repeat rules, the track-length floor and
-            the agent deadline sit under its Advanced.
+            the agent deadline sit under its Advanced. Shortlist also offers Prepare targeted
+            searches: off by default, it adds one bounded model preparation per show airing
+            for explicit musical requests in the brief.
           </li>
           <li>
             <strong>Skin &amp; themes</strong> — the player's default face (skin) and the

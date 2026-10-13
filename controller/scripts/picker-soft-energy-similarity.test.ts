@@ -61,7 +61,7 @@ test('cosine evidence retains kind, reference and zero; invalid or unlabelled sc
 
 test('an audio seed rescued by the text index labels its actual evidence as text', () => {
   for (const [id, text, audio] of [['text-seed', true, false], ['both', true, true], ['text-neighbour', true, false]] as const) {
-    db.upsertTrackMeta(id, { title: id, artist: id });
+    db.upsertTrackMeta(id, { title: id === 'text-seed' ? 'Seed Title' : 'Neighbour Title', artist: 'Seed Artist' });
     db.upsertTrackTags(id, { moods: ['calm'], energy: 'low', source: 'manual' });
     if (text) { const vector = new Float32Array(db.getEmbeddingDim()!); vector[0] = 1; db.upsertTrackVector(id, vector, null); }
     if (audio) { const vector = new Float32Array(512); vector[0] = 1; db.upsertTrackAudioVector(id, vector); }
@@ -70,6 +70,34 @@ test('an audio seed rescued by the text index labels its actual evidence as text
   const ctx = buildPickerContext(pickerScope());
   const rescued = ctx.seedSimilarity('text-seed', 'audio');
   assert.equal(rescued.fellBack, true);
+  assert.doesNotMatch(JSON.stringify(rescued.tracks.map(s => s.similarity)), /text-seed/);
   assert.ok(rescued.tracks.length > 0);
-  assert.ok(rescued.tracks.every(s => s.similarity.kind === 'text' && s.similarity.reference === 'text-seed'));
+  assert.ok(rescued.tracks.every(s => s.similarity.kind === 'text' && s.similarity.reference === 'seed track: “Seed Title” by Seed Artist'));
+});
+
+
+test('both routes receive intro measurements on the silence-trimmed playback timeline', async () => {
+  const settings = await import('../src/settings.js');
+  const { slim } = await import('../src/llm/internal/tools/picker/slim.js');
+  const track = { id: 'trim-me', title: 'Trimmed', artist: 'Trim Artist', duration: 240, introMs: 8000, leadSilenceMs: 3000 };
+  await settings.load();
+  await settings.update({ silenceTrim: { enabled: false, minGapMs: 500 } });
+  assert.equal(slim(track).intro_ms, 8000);
+  await settings.update({ silenceTrim: { enabled: true, minGapMs: 500 } });
+  assert.equal(slim(track).intro_ms, 5250, 'shared shift preserves the 250ms trim margin');
+  assert.equal(slim({ ...track, introMs: 0 }).intro_ms, 0);
+  assert.equal(slim({ ...track, introMs: undefined }).intro_ms, undefined);
+  for (const invalid of [-1, NaN, Infinity, '8000']) {
+    assert.equal(slim({ ...track, introMs: invalid }).intro_ms, undefined, 'invalid measurements never become a measured zero');
+  }
+  await settings.update({ silenceTrim: { enabled: false } });
+});
+
+test('the shared Agentic picker and request prompts explain labelled cosine evidence', async () => {
+  const { pickSystem, requestSystem } = await import('../src/broadcast/dj-agent/schemas.js');
+  for (const prompt of [pickSystem(), requestSystem()]) {
+    assert.match(prompt, /Compare scores only within the same kind and reference/);
+    assert.match(prompt, /Neither is BPM\/key compatibility/);
+    assert.match(prompt, /A seed reference names context only/);
+  }
 });

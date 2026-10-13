@@ -570,27 +570,27 @@ export async function getScanStatus(): Promise<boolean | null> {
   }
 }
 
-export async function getRecentlyAddedAlbums({ size = 20 } = {}) {
-  const r = await call('getAlbumList2', { type: 'newest', size }, RETRY_FAST_TRANSPORT);
+export async function getRecentlyAddedAlbums({ size = 20, signal }: { size?: number; signal?: AbortSignal } = {}) {
+  const r = await call('getAlbumList2', { type: 'newest', size }, { ...RETRY_FAST_TRANSPORT, signal });
   return r.albumList2?.album || [];
 }
 
 // Albums by play count. `offset` rotates the window — the top-N list barely
 // moves, so an offset-less read pins the same albums forever.
-export async function getFrequentAlbums({ size = 20, offset = 0 } = {}) {
-  const r = await call('getAlbumList2', { type: 'frequent', size, offset }, RETRY_FAST_TRANSPORT);
+export async function getFrequentAlbums({ size = 20, offset = 0, signal }: { size?: number; offset?: number; signal?: AbortSignal } = {}) {
+  const r = await call('getAlbumList2', { type: 'frequent', size, offset }, { ...RETRY_FAST_TRANSPORT, signal });
   return r.albumList2?.album || [];
 }
 
-export async function getArtistInfo(id, { count = 10 } = {}) {
-  const r = await call('getArtistInfo2', { id, count }, RETRY_FAST_TRANSPORT);
+export async function getArtistInfo(id, { count = 10, signal }: { count?: number; signal?: AbortSignal } = {}) {
+  const r = await call('getArtistInfo2', { id, count }, { ...RETRY_FAST_TRANSPORT, signal });
   return r.artistInfo2 || null;
 }
 
 // Last.fm "top songs" for an artist, intersected with the library. Keyed by
 // artist NAME, not id.
-export async function getTopSongs(artistName, { count = 10 } = {}) {
-  const r = await call('getTopSongs', { artist: artistName, count }, RETRY_FAST_TRANSPORT);
+export async function getTopSongs(artistName, { count = 10, signal }: { count?: number; signal?: AbortSignal } = {}) {
+  const r = await call('getTopSongs', { artist: artistName, count }, { ...RETRY_FAST_TRANSPORT, signal });
   return rejectArchive(r.topSongs?.song || []);
 }
 
@@ -632,8 +632,8 @@ export async function getRecentSongsByArtist(
   return songs.slice(0, count);
 }
 
-export async function getAlbum(id) {
-  const r = await call('getAlbum', { id }, RETRY_FAST_TRANSPORT);
+export async function getAlbum(id, { signal }: { signal?: AbortSignal } = {}) {
+  const r = await call('getAlbum', { id }, { ...RETRY_FAST_TRANSPORT, signal });
   return rejectArchive(r.album?.song || []);
 }
 
@@ -790,13 +790,13 @@ export async function* iterateAllSongs({ requireComplete = false } = {}) {
   }
 }
 
-export async function getPlaylists() {
-  const r = await call('getPlaylists', {}, RETRY_FAST_TRANSPORT);
+export async function getPlaylists({ signal }: { signal?: AbortSignal } = {}) {
+  const r = await call('getPlaylists', {}, { ...RETRY_FAST_TRANSPORT, signal });
   return r.playlists?.playlist || [];
 }
 
-export async function getPlaylist(id) {
-  const r = await call('getPlaylist', { id }, RETRY_FAST_TRANSPORT);
+export async function getPlaylist(id, { signal }: { signal?: AbortSignal } = {}) {
+  const r = await call('getPlaylist', { id }, { ...RETRY_FAST_TRANSPORT, signal });
   return rejectArchive(r.playlist?.entry || []);
 }
 

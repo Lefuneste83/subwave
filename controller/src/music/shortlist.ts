@@ -3,6 +3,7 @@
 // identical show, recency and policy guards. Nothing here calls an LLM, chooses
 // a track, or writes queue state.
 
+import { PICKER_TOOL_TIMEOUT_MS } from '../llm/internal/tools/picker/defs.js';
 import { buildPickerTools, type PickerScope } from '../llm/tools.js';
 import { SHORTLIST_PASSES_BOUNDS } from '../schemas/settings.js';
 import * as library from './library.js';
@@ -108,9 +109,7 @@ export function planShortlistSources(
   for (const mood of moods) {
     for (const energy of energies.length ? energies : [null]) add('context', 'tracksByMood', { mood, energy });
   }
-  if (!context.scope.hasPlaylistAnchor && !context.scope.playlistTracks?.length && !context.scope.playlistLock) {
-    for (const mood of moods) add('context', 'moodPlaylistTracks', { mood });
-  }
+  for (const mood of moods) add('context', 'moodPlaylistTracks', { mood });
   if (!moods.length) for (const energy of energies) add('context', 'tracksByEnergy', { energy });
   for (const genre of genres) add('context', 'songsByGenre', { genre });
   for (const era of context.eras ?? context.scope.eraLock ?? []) {
@@ -166,10 +165,13 @@ export function planShortlistSources(
   // Reserve at most one existing pass for the show's targeted intent when
   // there is room for another source. A one-pass station rotates it normally;
   // episodes, strict playlists and journeys retain their precedence.
-  if (!ownsDirection && budget >= 2 && targeted.length && calls.length < budget) {
+  if (!ownsDirection && budget - calls.length >= 2 && targeted.length) {
     const target = rotated(targeted, Math.floor(offset / 3))[0];
     calls.push(target);
     lanes.context = lanes.context.filter(call => !targeted.includes(call));
+  } else if (!ownsDirection && targeted.length && calls.length) {
+    const ordinary = lanes.context.filter(call => !targeted.includes(call));
+    lanes.context = rotated([...targeted, ...ordinary], Math.floor(offset / 3));
   }
   const cycle = () => ({
     context: [...lanes.context],
@@ -249,7 +251,7 @@ export async function executeShortlistPlan(
   tools: PickerToolSet,
   seen: Map<string, any>,
   plan: ShortlistSourceCall[],
-  options: { topUps?: ShortlistSourceCall[]; minimumCandidates?: number; maxPerArtist?: number; offers?: CandidateOffers } = {},
+  options: { topUps?: ShortlistSourceCall[]; minimumCandidates?: number; maxPerArtist?: number; offers?: CandidateOffers; sourceTimeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<ShortlistResult> {
   const started = performance.now();
   const sourceRuns: ShortlistSourceRun[] = [];
@@ -264,6 +266,7 @@ export async function executeShortlistPlan(
   }
   for (let index = 0; index < calls.length; index++) {
     if (index >= plan.length && balanced().length >= (options.minimumCandidates ?? 4)) break;
+    if (options.signal?.aborted) break;
     const call = calls[index];
     const tool = tools[call.source];
     if (!tool?.execute) {
@@ -290,6 +293,9 @@ export async function executeShortlistPlan(
       const result = await tool.execute(parsed?.data ?? call.args, {
         toolCallId: `shortlist:${call.source}`,
         messages: [],
+        abortSignal: options.signal
+          ? AbortSignal.any([options.signal, AbortSignal.timeout(options.sourceTimeoutMs ?? PICKER_TOOL_TIMEOUT_MS)])
+          : AbortSignal.timeout(options.sourceTimeoutMs ?? PICKER_TOOL_TIMEOUT_MS),
       });
       const added = [...seen.keys()].filter((id) => !before.has(id));
       for (const id of added) sourcesById.set(id, [call.source]);

@@ -13,83 +13,78 @@ const { pickerScope } = await import('../src/llm/tools.js');
 after(() => rm(root, { recursive: true, force: true }));
 const base = Date.now();
 const brief = { occurrenceId: 'show:one', expiresAt: base + 3600_000, topic: 'Songs about coming home' };
-const response = '```json\n{"searches":[{"kind":"theme","query":"songs about coming home","evidence":"Songs about coming home"}]}\n```';
-const chrisBrief = await readFile(new URL('./fixtures/shortlist-search/chris-show-brief.md', import.meta.url), 'utf8');
+const response = { searches: [{ kind: 'theme', intent: 'theme', query: 'coming home', evidence: brief.topic }] };
+const presenterBrief = await readFile(new URL('./fixtures/shortlist-search/presenter-show-brief.md', import.meta.url), 'utf8');
 const bobBrief = await readFile(new URL('./fixtures/shortlist-search/bob-show-brief.md', import.meta.url), 'utf8');
+const sentence = (text: string, subject: string) => [...new Intl.Segmenter(undefined, { granularity: 'sentence' }).segment(text)]
+  .find(part => part.segment.includes(subject))!.segment.trim();
 
-test('the reported presenter biography rejects all three invented searches and caches the empty result', async () => {
+test('a presenter biography rejects invented subjects and caches the successful empty classification', async () => {
   let calls = 0;
-  const file = join(root, 'chris.json');
+  const file = join(root, 'presenter.json');
   const deps = { file, now: () => base, generate: async () => {
     calls++;
-    return JSON.stringify({ searches: [
-      { kind: 'theme', query: 'songs about everyday life' },
-      { kind: 'artist', query: 'Chris Sittins songs' },
-      { kind: 'library', query: 'forgotten album tracks' },
-    ] });
+    return { searches: [
+      { kind: 'theme', intent: 'theme', query: 'everyday life', evidence: sentence(presenterBrief, 'working day') },
+      { kind: 'artist', intent: 'presenter', query: 'Taylor Example', evidence: sentence(presenterBrief, 'Taylor Example') },
+      { kind: 'library', intent: 'general', query: 'overlooked album track', evidence: sentence(presenterBrief, 'overlooked') },
+    ] };
   } };
-  const input = { ...brief, topic: chrisBrief, presenterNames: ['Chris Sittins'] };
+  const input = { ...brief, topic: presenterBrief, presenterNames: ['Taylor Example'] };
   assert.deepEqual(await createShortlistSearchPreparation(deps).ensure(input), []);
   assert.deepEqual(await createShortlistSearchPreparation(deps).ensure(input), []);
   assert.equal(calls, 1);
   assert.equal(JSON.parse(await readFile(file, 'utf8')).records[0].status, 'ready');
 });
 
-test('evidence cannot fabricate a theme or turn biography and generic discovery prose into search terms', () => {
+test('grounding rejects invented subjects, partial prohibition quotes and presenter names regardless of intent', () => {
   assert.deepEqual(groundShortlistSearches([
-    { kind: 'theme', query: 'songs about everyday life', evidence: "The working day has settled in, the kettle's probably been on once already" },
-    { kind: 'artist', query: 'Chris Sittins', evidence: 'Chris Sittins is here to keep you company with two hours of great music and good conversation.' },
-    { kind: 'library', query: 'overlooked album track', evidence: "the next he'll quietly champion an overlooked album track" },
-    { kind: 'theme', query: 'songs about everyday life', evidence: 'Songs about everyday life' },
-  ], [chrisBrief], ['Chris Sittins']), []);
-  // Even a recording credit in the supplied text cannot search for a known host.
+    { kind: 'theme', intent: 'theme', query: 'everyday life', evidence: 'Songs about coming home' },
+    { kind: 'library', intent: 'artist', query: 'Radiohead', evidence: 'Radiohead tracks' },
+    { kind: 'artist', intent: 'artist', query: 'Taylor', evidence: 'Music from Taylor Example' },
+  ], [brief.topic, 'Avoid Radiohead tracks.', 'Music from Taylor Example'], ['Taylor Example']), []);
   assert.deepEqual(groundShortlistSearches([
-    { kind: 'artist', query: 'Chris', evidence: 'Music from Chris Sittins' },
-  ], ['Music from Chris Sittins'], ['Chris Sittins']), []);
-  assert.deepEqual(groundShortlistSearches([
-    { kind: 'theme', query: 'songs about everyday life', evidence: 'Songs about coming home' },
-  ], [brief.topic]), []);
-  // Live Carrie preparation copied the old prompt example and attached a
-  // real, unrelated excerpt. A genuine quote alone must not validate a theme.
-  assert.deepEqual(groundShortlistSearches([
-    { kind: 'theme', query: 'songs about coming home', evidence: 'She has a knack for making old favourites feel fresh' },
-  ], ['She has a knack for making old favourites feel fresh and introducing newer artists and the legends that inspired them.'], ['Carrie Marshall']), []);
-  assert.deepEqual(groundShortlistSearches([
-    { kind: 'artist', query: 'Bob Dylan', evidence: 'Play songs by Bob Dylan' },
+    { kind: 'artist', intent: 'artist', query: 'Bob Dylan', evidence: 'Play songs by Bob Dylan' },
   ], ['Play songs by Bob Dylan'], ['Bob']), [{ kind: 'artist', query: 'Bob Dylan' }],
-  'sharing a first name with a host must not exclude an explicitly named artist');
+  'a shared first name does not make an explicitly named recording artist a host');
 });
 
-test('the supplied Bob show brief retains explicit artist, genre and instrumentation requests', async () => {
+test('explicit music subjects in the supplied brief survive without fixture-specific word lists', async () => {
   const searches = [
-    { kind: 'artist' as const, query: 'R.E.M.', evidence: "Play plenty of Bob's favourite artists such as R.E.M., The Cure, The Smiths, Radiohead, Oasis, Blur and The Stone Roses" },
-    { kind: 'library' as const, query: 'Britpop', evidence: "Bob's Alternative Afternoon is packed with great guitar music from the 80s, 90s and 2000s, mixing alternative rock, indie, Britpop and classic rock." },
-    { kind: 'sound' as const, query: 'melodic guitars, acoustic tracks, strong basslines', evidence: 'Bob loves melodic guitars, acoustic tracks, strong basslines and interesting production, so favour songs with those qualities.' },
+    { kind: 'artist' as const, intent: 'artist' as const, query: 'R.E.M.', evidence: sentence(bobBrief, 'R.E.M.') },
+    { kind: 'library' as const, intent: 'genre' as const, query: 'Britpop', evidence: sentence(bobBrief, 'Britpop') },
+    { kind: 'sound' as const, intent: 'sound' as const, query: 'melodic guitars, acoustic tracks, strong basslines', evidence: sentence(bobBrief, 'melodic guitars') },
   ];
   const expected = searches.map(({ kind, query }) => ({ kind, query }));
   const owner = createShortlistSearchPreparation({ file: join(root, 'bob.json'), now: () => base,
     generate: async prompt => {
       assert.equal(JSON.parse(prompt).topic, bobBrief.trim());
-      return JSON.stringify({ searches });
+      return { searches };
     } });
   assert.deepEqual(await owner.ensure({ ...brief, topic: bobBrief, presenterNames: ['Bob'] }), expected);
   assert.deepEqual(shortlistSearchCalls(expected, new Set(['topSongsByArtist', 'searchLibrary', 'searchBySound']))
     .map(call => call.source), ['topSongsByArtist', 'searchLibrary', 'searchBySound']);
   assert.deepEqual(groundShortlistSearches([
-    { kind: 'library', query: 'forgotten favourites', evidence: 'find forgotten favourites, overlooked gems and tracks listeners might not have heard for years.' },
-    { kind: 'theme', query: 'songs about the afternoon', evidence: 'with a thoughtful, knowledgeable feel and enough energy for the afternoon.' },
-    { kind: 'library', query: 'manufactured pop', evidence: 'Avoid manufactured pop, repetitive dance music and novelty records.' },
-    { kind: 'library', query: 'novelty records', evidence: 'repetitive dance music and novelty records' },
+    { kind: 'library', intent: 'general', query: 'forgotten favourites', evidence: sentence(bobBrief, 'forgotten favourites') },
+    { kind: 'library', intent: 'exclude', query: 'manufactured pop', evidence: sentence(bobBrief, 'manufactured pop') },
   ], [bobBrief], ['Bob']), []);
 });
 
-test('literal titles and explicit recent releases work, while a general artist request does not invent recency', () => {
-  const fields = ['Play the track "Everyday Life"', 'Explore Portishead tracks', 'Latest releases from Portishead'];
+test('grounding works in the brief language rather than matching English musical cues', () => {
+  for (const [kind, intent, query, evidence] of [
+    ['artist', 'artist', 'Björk', 'Spiele Musik von Björk.'],
+    ['theme', 'theme', 'retour à la maison', 'Des chansons sur le retour à la maison.'],
+    ['sound', 'sound', 'گیتار آکوستیک', 'موسیقی با گیتار آکوستیک پخش کن.'],
+    ['theme', 'theme', '回家', '播放关于回家的歌曲。'],
+    ['library', 'title', 'Everyday Life', 'Play the track “Everyday Life”.'],
+    ['recentArtist', 'recentArtist', 'Portishead', 'Spiele die neuesten Veröffentlichungen von Portishead.'],
+  ] as const) {
+    assert.deepEqual(groundShortlistSearches([{ kind, intent, query, evidence }], [evidence]), [{ kind, query }]);
+  }
   assert.deepEqual(groundShortlistSearches([
-    { kind: 'library', query: 'Everyday Life', evidence: fields[0] },
-    { kind: 'recentArtist', query: 'Portishead', evidence: fields[2] },
-    { kind: 'recentArtist', query: 'Portishead', evidence: fields[1] },
-  ], fields), [ { kind: 'library', query: 'Everyday Life' }, { kind: 'recentArtist', query: 'Portishead' } ]);
+    { kind: 'recentArtist', intent: 'artist', query: 'Portishead', evidence: 'Explore Portishead tracks.' },
+    { kind: 'library', intent: 'exclude', query: 'Radiohead', evidence: 'Ne joue pas Radiohead.' },
+  ], ['Explore Portishead tracks.', 'Ne joue pas Radiohead.']), []);
 });
 
 test('pre-grounding cache records are discarded even when their identity matches', async () => {
@@ -98,14 +93,14 @@ test('pre-grounding cache records are discarded even when their identity matches
   await createShortlistSearchPreparation(deps).ensure(brief);
   const previous = JSON.parse(await readFile(file, 'utf8'));
   previous.version = 1;
-  previous.records[0].searches = [{ kind: 'artist', query: 'Chris Sittins' }];
+  previous.records[0].searches = [{ kind: 'artist', query: 'Taylor Example' }];
   await writeFile(file, JSON.stringify(previous));
   let calls = 0;
   assert.deepEqual(await createShortlistSearchPreparation({ ...deps,
-    generate: async () => { calls++; return '{"searches":[]}'; },
+    generate: async () => { calls++; return { searches: [] }; },
   }).ensure(brief), []);
   assert.equal(calls, 1);
-  assert.equal(JSON.parse(await readFile(file, 'utf8')).version, 2);
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).version, 3);
 });
 
 test('concurrent calls, later picks and a restarted owner reuse one durable preparation', async () => {
@@ -114,7 +109,7 @@ test('concurrent calls, later picks and a restarted owner reuse one durable prep
   const owner = createShortlistSearchPreparation(deps);
   const results = await Promise.all(Array.from({ length: 8 }, () => owner.ensure(brief)));
   assert.equal(calls, 1);
-  assert.ok(results.every(searches => searches[0]?.query === 'songs about coming home'));
+  assert.ok(results.every(searches => searches[0]?.query === 'coming home'));
   await owner.ensure(brief);
   await createShortlistSearchPreparation(deps).ensure(brief);
   assert.equal(calls, 1, 'restart must not repeat the model call');
@@ -123,7 +118,7 @@ test('concurrent calls, later picks and a restarted owner reuse one durable prep
 test('a new airing or edited brief prepares independently, while an empty result is cached', async () => {
   let calls = 0;
   const owner = createShortlistSearchPreparation({ file: join(root, 'identity.json'), now: () => base,
-    generate: async () => { calls++; return '{"searches":[]}'; } });
+    generate: async () => { calls++; return { searches: [] }; } });
   await owner.ensure(brief); await owner.ensure(brief);
   assert.equal(calls, 1);
   await owner.ensure({ ...brief, topic: 'Songs about leaving home' });
@@ -134,7 +129,7 @@ test('a new airing or edited brief prepares independently, while an empty result
 test('unusable output falls back immediately with a durable cooldown and at most two attempts', async () => {
   let clock = base; let calls = 0;
   const deps = { file: join(root, 'failure.json'), now: () => clock,
-    generate: async () => { calls++; return '{"searches":[{"kind":"executeShell","query":"bad"}]}'; } };
+    generate: async () => { calls++; return { searches: [{ kind: 'executeShell', query: 'bad' }] }; } };
   const owner = createShortlistSearchPreparation(deps);
   assert.deepEqual(await owner.ensure(brief), []);
   await owner.ensure(brief);
@@ -218,4 +213,36 @@ test('directed sources keep priority and unavailable searches preserve the ordin
     assert.equal(plan[0].source, scope.audioWaypoint ? 'tracksTowardJourney' : 'showPlaylistTracks');
   }
   assert.equal(planShortlistSources({ scope: pickerScope(), currentTrackId: null, searches, discoveryPasses: 1 }, new Set(['randomSongs']))[0].source, 'randomSongs');
+});
+
+
+test('two passes with a soft playlist retain the playlist and rotate targeted intent with ordinary discovery', () => {
+  const scope = pickerScope({ hasPlaylistAnchor: true, playlistTracks: [{ id: 'curated' }] });
+  const available = new Set(['showPlaylistTracks', 'searchLibrary', 'randomSongs']);
+  const seen = new Set<string>();
+  for (let rotationSeed = 0; rotationSeed < 36; rotationSeed++) {
+    const plan = planShortlistSources({ scope, currentTrackId: null, discoveryPasses: 2, rotationSeed,
+      searches: [{ kind: 'library', query: 'Portishead' }] }, available);
+    assert.equal(plan.length, 2);
+    assert.equal(plan[0].source, 'showPlaylistTracks');
+    seen.add(plan[1].source);
+  }
+  assert.ok(seen.has('searchLibrary') && seen.has('randomSongs'));
+});
+
+
+test('grounding and cache identity use the exact input snapshot sent to the model', async () => {
+  let finish!: (value: unknown) => void;
+  let begin!: () => void;
+  const started = new Promise<void>(resolve => { begin = resolve; });
+  const owner = createShortlistSearchPreparation({ file: join(root, 'snapshot.json'), now: () => base,
+    generate: async () => { begin(); return new Promise(resolve => { finish = resolve; }); } });
+  const input = { ...brief };
+  const running = owner.ensure(input);
+  await started;
+  input.topic = 'A different request';
+  input.expiresAt = base;
+  finish(response);
+  assert.deepEqual(await running, [{ kind: 'theme', query: 'coming home' }]);
+  assert.deepEqual(await owner.ensure(brief), [{ kind: 'theme', query: 'coming home' }]);
 });

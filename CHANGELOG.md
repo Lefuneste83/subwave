@@ -12,6 +12,32 @@
   independent. Operators who already reconfigured profiles under #1777 must
   mark those profiles before upgrading. See [upgrade and recovery steps](docs/multi-station.md#upgrading-existing-profiles).
 
+## [1.22.0](https://github.com/perminder-klair/subwave/compare/v1.21.0...v1.22.0) (2026-10-11)
+
+
+### Features
+
+* **analyze:** per-facet analysis status and targeted runs ([#1840](https://github.com/perminder-klair/subwave/issues/1840)) ([7dbc57c](https://github.com/perminder-klair/subwave/commit/7dbc57ce8d60b435a302465c6db457d883a55908))
+* **analyzer:** per-facet requests and a file AudioSource in the worker ([#1841](https://github.com/perminder-klair/subwave/issues/1841)) ([5d06d37](https://github.com/perminder-klair/subwave/commit/5d06d37b53945da9e5ad62949473dc17dd2ac07a))
+
+
+### Bug Fixes
+
+* **analyzer:** recycle idle lean worker ([#1874](https://github.com/perminder-klair/subwave/issues/1874)) ([9132a32](https://github.com/perminder-klair/subwave/commit/9132a32baaa1abbe34478818978bc46100f562a6))
+* **app:** publish listener track progress to media sessions ([#1880](https://github.com/perminder-klair/subwave/issues/1880)) ([77377f4](https://github.com/perminder-klair/subwave/commit/77377f4e92645cee2cf80b3682a010aef7708dd3)), closes [#857](https://github.com/perminder-klair/subwave/issues/857)
+* **broadcast:** let listeners share a username ([#1877](https://github.com/perminder-klair/subwave/issues/1877)) ([13271e2](https://github.com/perminder-klair/subwave/commit/13271e275a3ee07bc1152f5e16cfd5ab2ba15f91))
+* **controller:** measure cloud mp3 clips instead of guessing ([#1871](https://github.com/perminder-klair/subwave/issues/1871)) ([3d335f7](https://github.com/perminder-klair/subwave/commit/3d335f788d53574164d2a030fc3b1d0ce497ffd1))
+* **dj:** ground spoken place names in on-air location ([#1885](https://github.com/perminder-klair/subwave/issues/1885)) ([d95deee](https://github.com/perminder-klair/subwave/commit/d95deee8f9ff955a29a8f674beadc1afc6333ebc))
+* **docker:** support Blackwell GPUs with cu128 analyzer wheels ([#1878](https://github.com/perminder-klair/subwave/issues/1878)) ([7334185](https://github.com/perminder-klair/subwave/commit/73341853c60631400d55ee3d23e87f2d06eb532a)), closes [#1340](https://github.com/perminder-klair/subwave/issues/1340) [#1738](https://github.com/perminder-klair/subwave/issues/1738)
+* **doctor:** make markdown code legible and clarify settings ([#1883](https://github.com/perminder-klair/subwave/issues/1883)) ([9d1e568](https://github.com/perminder-klair/subwave/commit/9d1e568f7973022a970899f07ef5bae859b9893e)), closes [#1704](https://github.com/perminder-klair/subwave/issues/1704)
+* **jingles:** pin uploaded audio to mixer sample rate ([#1882](https://github.com/perminder-klair/subwave/issues/1882)) ([1350cd4](https://github.com/perminder-klair/subwave/commit/1350cd4f1c16fa4e06326f0fb8a17a3a50ccffcc)), closes [#1688](https://github.com/perminder-klair/subwave/issues/1688)
+* **loudness:** no boost for a track whose peak is unknown ([#1844](https://github.com/perminder-klair/subwave/issues/1844)) ([adcb609](https://github.com/perminder-klair/subwave/commit/adcb609308ae8f6420c5488064371c5b4fe32a46))
+* **mcp:** publish tool output schemas without a $schema dialect ([#1838](https://github.com/perminder-klair/subwave/issues/1838)) ([992c98b](https://github.com/perminder-klair/subwave/commit/992c98bd087f49899673f40d4f90be90ebf839f1))
+* **picker:** preserve predecessor flow context in agent re-picks ([#1884](https://github.com/perminder-klair/subwave/issues/1884)) ([b3e3957](https://github.com/perminder-klair/subwave/commit/b3e3957f5d57782c4b702ffa8ef48940b7908775)), closes [#1820](https://github.com/perminder-klair/subwave/issues/1820)
+* **selection:** artist spacing sees an act inside a multi-artist credit ([#1847](https://github.com/perminder-klair/subwave/issues/1847)) ([2f804b6](https://github.com/perminder-klair/subwave/commit/2f804b6576631040832928255104ce4f69cdbc3b))
+* **skills:** subwave-worktree-dev reads the root .env, not controller/.env ([#1845](https://github.com/perminder-klair/subwave/issues/1845)) ([b934c39](https://github.com/perminder-klair/subwave/commit/b934c398435d2c530dcc96382c4bcfc4e72a5b13))
+* **tools:** audiomuse-import writes genres, not the generated genre column ([#1879](https://github.com/perminder-klair/subwave/issues/1879)) ([eed3613](https://github.com/perminder-klair/subwave/commit/eed3613a9a0f08db0104b49edebbfcf2e4916b94)), closes [#707](https://github.com/perminder-klair/subwave/issues/707)
+
 ## [1.21.0](https://github.com/perminder-klair/subwave/compare/v1.20.0...v1.21.0) (2026-10-09)
 
 

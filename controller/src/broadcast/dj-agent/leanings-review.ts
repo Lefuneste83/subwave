@@ -27,7 +27,8 @@ export type AgenticLeaningsReviewRejection =
   | 'basis-not-supported-by-candidate'
   | 'basis-already-supported-by-baseline'
   | 'not-flow-tie'
-  | 'weak-musical-reason';
+  | 'weak-musical-reason'
+  | 'invalid-editorial-evidence';
 
 // One settled record of a pick for Debug and the event log, shared by both
 // selection routes so a field added for one cannot silently go missing from
@@ -48,6 +49,8 @@ export type PickResolution = {
     leaningsSource?: 'host' | 'guest' | null;
     proposedReplacementId?: string | null;
     rejectionReason?: AgenticLeaningsReviewRejection | null;
+    evidenceKind?: 'metadata-match' | 'editorial-comparison';
+    editorialEvidence?: EditorialLeaningsEvidence;
   };
   guardOutcome?: 'none' | 'artist-repick' | 'album-repick' | 'artist-and-album-repick' | 'pool-rescue';
   final?: AgenticTrackRef;
@@ -332,6 +335,7 @@ export function compactAgenticReviewCandidate(track: any, leaningsOptions: strin
     artist: track?.artist,
     year: track?.year,
     genre: track?.genre,
+    lastfm_tags: stringList(track?.lastfm_tags).length ? stringList(track?.lastfm_tags).slice(0, 24) : undefined,
     moods: track?.moods,
     energy: track?.energy,
     instrumental: track?.instrumental,
@@ -346,6 +350,46 @@ export function compactAgenticReviewCandidate(track: any, leaningsOptions: strin
   }).filter(([, value]) => value !== undefined && value !== null));
 }
 
+// Subjective interpretation belongs to the reviewer. The controller verifies
+// supplied facts and a difference, not the truth of a musical taste judgement.
+export const EDITORIAL_LEANINGS_FIELDS = ['genre', 'moods', 'lastfm_tags', 'year', 'instrumental', 'unaired', 'play_count', 'last_played_days_ago'] as const;
+export type EditorialLeaningsFact = { field: typeof EDITORIAL_LEANINGS_FIELDS[number]; value: string };
+export type EditorialLeaningsEvidence = {
+  baselineFacts: EditorialLeaningsFact[];
+  challengerFacts: EditorialLeaningsFact[];
+  comparison: string;
+};
+
+function quotedFacts(track: any, facts: unknown): EditorialLeaningsFact[] | null {
+  if (!Array.isArray(facts) || facts.length < 1 || facts.length > 4) return null;
+  for (const fact of facts) {
+    if (!fact || !EDITORIAL_LEANINGS_FIELDS.includes(fact.field) || typeof fact.value !== 'string') return null;
+    const raw = track?.[fact.field];
+    const values = Array.isArray(raw) ? raw : raw == null ? [] : [raw];
+    if (!values.some(value => String(value) === fact.value)) return null;
+  }
+  return facts;
+}
+
+function groundedEditorialComparison(evidence: unknown, baseline: any, challenger: any, basis: string): evidence is EditorialLeaningsEvidence {
+  if (!evidence || typeof evidence !== 'object') return false;
+  const e = evidence as EditorialLeaningsEvidence;
+  const left = quotedFacts(baseline, e.baselineFacts);
+  const right = quotedFacts(challenger, e.challengerFacts);
+  if (!left || !right || typeof e.comparison !== 'string' || e.comparison.trim().length < 32 || e.comparison.length > 480) return false;
+  const comparison = comparable(e.comparison);
+  const mentions = (value: string) => {
+    const phrase = comparable(value);
+    return !!phrase && ` ${comparison} `.includes(` ${phrase} `);
+  };
+  if (!mentions(basis) || !left.some(fact => mentions(fact.value)) || !right.some(fact => mentions(fact.value))) return false;
+  return right.some(fact => {
+    const raw = baseline?.[fact.field];
+    const values = Array.isArray(raw) ? raw : raw == null ? [] : [raw];
+    return !values.some(value => comparable(String(value)) === comparable(fact.value));
+  });
+}
+
 export function validateAgenticLeaningsReplacement({
   musicalReason,
   leaningsBasis,
@@ -354,6 +398,7 @@ export function validateAgenticLeaningsReplacement({
   supportedLeanings,
   baselineSupportedLeanings,
   flowCloseness,
+  editorialEvidence, baseline, challenger,
 }: {
   musicalReason: unknown;
   leaningsBasis: unknown;
@@ -362,7 +407,8 @@ export function validateAgenticLeaningsReplacement({
   supportedLeanings: string[];
   baselineSupportedLeanings: string[];
   flowCloseness: unknown;
-}): { valid: true; basis: string } | { valid: false; reason: AgenticLeaningsReviewRejection } {
+  editorialEvidence?: unknown; baseline?: any; challenger?: any;
+}): { valid: true; basis: string; evidenceKind: 'metadata-match' | 'editorial-comparison' } | { valid: false; reason: AgenticLeaningsReviewRejection } {
   const rawBasis = typeof leaningsBasis === 'string' ? leaningsBasis.trim().replace(/\s+/g, ' ') : '';
   const basis = comparable(rawBasis);
   const allowedBasis = allowedLeanings.find((option) => comparable(option) === basis);
@@ -372,8 +418,9 @@ export function validateAgenticLeaningsReplacement({
   if (!comparable(musicalLeanings).includes(basis)) {
     return { valid: false, reason: 'basis-not-in-leanings' };
   }
-  if (!supportedLeanings.some((option) => comparable(option) === basis)) {
-    return { valid: false, reason: 'basis-not-supported-by-candidate' };
+  const exact = supportedLeanings.some((option) => comparable(option) === basis);
+  if (!exact && !groundedEditorialComparison(editorialEvidence, baseline, challenger, basis)) {
+    return { valid: false, reason: editorialEvidence ? 'invalid-editorial-evidence' : 'basis-not-supported-by-candidate' };
   }
   // A shared match proves compatibility, not that a preference changed the
   // choice. Enforce this independently of the model's prompt and answer.
@@ -385,7 +432,7 @@ export function validateAgenticLeaningsReplacement({
   }
   const reason = typeof musicalReason === 'string' ? musicalReason.replace(/\s+/g, ' ').trim() : '';
   if (reason.length < 16) return { valid: false, reason: 'weak-musical-reason' };
-  return { valid: true, basis: allowedBasis };
+  return { valid: true, basis: allowedBasis, evidenceKind: exact ? 'metadata-match' : 'editorial-comparison' };
 }
 
 export function agenticLeaningsSelectionReason({

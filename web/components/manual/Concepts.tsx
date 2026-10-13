@@ -118,6 +118,25 @@ export default function Concepts() {
           of the model and may use more time and tokens. The setting is a choice of
           workflow, not a claim that one path has better taste or less variety.
         </p>
+        <p>
+          The shared discovery tools now include frequently played albums, mood-named
+          playlists, neighbouring artists and an autonomous mood detour. These are available
+          to Agentic Tools and agent-assisted requests as well as Shortlist, so existing
+          Agentic stations can discover different tracks after upgrading. Energy requested
+          within a mood is a preference; strict show restrictions still apply. A show&rsquo;s
+          pinned moods suppress the mood detour on both routes. Similarity scores describe
+          resemblance, while measured tempo and key help judge the transition.
+        </p>
+        <p>
+          Shortlist&rsquo;s <strong>Prepare targeted searches</strong> setting is off by default,
+          including for stations migrated from Candidate Pool. Enable it under Music selection
+          to have an extra, bounded model call extract explicit musical requests from the show
+          brief once per airing. It uses the existing discovery pass budget. With two passes
+          and a soft playlist, the playlist keeps its pass and targeted searches rotate with
+          other sources in the remaining pass. Preparation can add time to the first pick;
+          ordinary discovery continues if it fails. Prompt memory follows your live DJ behaviour
+          settings for the number, age and length of already-aired remarks.
+        </p>
         <div className="bs-callout">
           <div className="bs-eyebrow">WHICH ONE</div>
           <p>

@@ -90,19 +90,19 @@ test('journeys and exploration have brief choice guidance, without competing dur
   assert.ok(journey.length - ordinary.length < 200, 'guidance stays small');
 });
 
-test('conversation is distinct, recent, bounded and excludes routine announcements', () => {
+test('Shortlist recap obeys live DJ behaviour controls and the shared voice-kind policy', async () => {
   const now = Date.now();
-  const remark = (message: string, kind = 'banter', age = 0) => ({ t: new Date(now - age).toISOString(), kind, message });
-  const context = shortlistConversation([
-    remark('routine link', 'link'), remark('routine ident', 'station-id'), remark('clock', 'hourly'),
-    remark('handoff', 'handoff'), remark('too old', 'banter', 121 * 60_000),
-    remark('future', 'banter', -1), remark('  Coastal\n guitars  '), remark('Coastal guitars'),
-    remark('Guest: ' + 'a'.repeat(200)), remark('Third thread'), remark('Fourth thread'),
-  ], now);
-  assert.deepEqual(context.conversation?.map(text => text.length), [15, 140, 12]);
-  assert.equal(context.conversation?.[0], 'Coastal guitars');
-  assert.equal(context.conversation?.[1].startsWith('Guest: '), true);
+  const remark = (message: string, kind = 'banter', age = 0) => ({ message, kind, t: new Date(now - age).toISOString() });
+  const entries = [remark('future', 'banter', -1), remark('routine link', 'link'),
+    remark('Guest: ' + 'a'.repeat(200)), remark('Third thread'), remark('older thread', 'banter', 6 * 60_000)];
+  await settings.update({ djBehaviour: { recapLimit: 2, recapMinutes: 5, recapChars: 40 } });
+  assert.deepEqual(shortlistConversation(entries, now).conversation, ['routine link', 'Guest: ' + 'a'.repeat(32) + '…']);
+  await settings.update({ djBehaviour: { recapLimit: 10, recapMinutes: 5, recapChars: 60 } });
+  assert.deepEqual(shortlistConversation(entries, now).conversation?.map(text => text.length), [12, 60, 12]);
+  await settings.update({ djBehaviour: { recapLimit: 10, recapMinutes: 10, recapChars: 60 } });
+  assert.equal(shortlistConversation(entries, now).conversation?.at(-1), 'older thread');
   assert.deepEqual(shortlistConversation([], now), {});
+  await settings.update({ djBehaviour: { recapLimit: 10, recapMinutes: 120, recapChars: 140 } });
 });
 
 test('only current-session aired remarks enter selection memory, not private or listener turns', () => {
@@ -126,7 +126,8 @@ test('Shortlist system describes compact input while Agentic retains its session
   assert.doesNotMatch(shortlist, /messages above are the live session|Listener requests appear in the session above/);
   const agentic = pickSystem(null, true, false, { host: null, guest: null, promptValue: null });
   assert.match(agentic, /messages above are the live session/);
-  assert.doesNotMatch(agentic, /intro_ms is measured intro length in milliseconds/);
+  assert.match(agentic, /intro_ms is measured intro length in milliseconds/);
+  assert.match(agentic, /Compare scores only within the same kind and reference/);
 });
 
 test('every discovery tool has a readable source label; request resolution is excluded', () => {

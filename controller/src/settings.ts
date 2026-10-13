@@ -264,6 +264,7 @@ export {
   resolveActiveShow,
   resolveOnAirLocation,
   resolvePersonaById,
+  resolveShowById,
   spokenProperNounDirective,
 } from './settings/persona.js';
 export { writeLiquidsoapSettings } from './settings/liquidsoap.js';
@@ -1027,6 +1028,7 @@ export async function load() {
         storedTrackSelection(stored.llm?.trackSelection)
           ?? (stored.llm?.pickerAgent === false ? 'shortlist' : DEFAULTS.llm.trackSelection),
       shortlistPasses: clampShortlistPasses(stored.llm?.shortlistPasses, DEFAULTS.llm.shortlistPasses),
+      shortlistSearchPreparation: stored.llm?.shortlistSearchPreparation === true,
       // A new explicit opt-in. Older settings files and malformed values remain
       // off, so guests never become an invisible source of editorial influence.
       guestMusicalLeanings:
@@ -2099,6 +2101,9 @@ export async function prepareUpdate(patch, { themeIds }: { themeIds?: ReadonlySe
     if (l.trackSelection !== undefined) {
       next.llm.trackSelection = l.trackSelection === 'shortlist' ? 'shortlist' : 'agentic';
       next.llm.pickerAgent = next.llm.trackSelection === 'agentic';
+    }
+    if (typeof l.shortlistSearchPreparation === 'boolean') {
+      next.llm.shortlistSearchPreparation = l.shortlistSearchPreparation;
     }
     if (l.shortlistPasses !== undefined) {
       next.llm.shortlistPasses = clampShortlistPasses(Number(l.shortlistPasses), next.llm.shortlistPasses);

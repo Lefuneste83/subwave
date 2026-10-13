@@ -12,7 +12,7 @@ import { modelTolerant } from '../../llm/sdk.js';
 import { autoVoiceAllowed } from '../voice-policy.js';
 import { SEED_NOT_A_PICK_CLAUSE } from '../../util/pick-seed.js';
 import { instruction } from '../../llm/dj.js';
-import { agenticReasonMentionsLeanings, MUSICAL_REASON_UNAVAILABLE, type AgenticLeaningsOption } from './leanings-review.js';
+import { agenticReasonMentionsLeanings, MUSICAL_REASON_UNAVAILABLE, EDITORIAL_LEANINGS_FIELDS, type AgenticLeaningsOption } from './leanings-review.js';
 
 // Plain .nullable() fields, deliberately — GLM's malformed spellings of
 // "nothing" (the string "null", an omitted key, a double-JSON-encoded object)
@@ -133,14 +133,19 @@ export function agenticLeaningsReviewSchema(ids: string[], leaningsOptions: stri
     // the previous independent-rerank bias. The controller still validates
     // both fields against these closed lists before a replacement can count.
     selectedId: z.string().trim().min(1).max(160).describe(`copy the final exact id from baseline or challengers. Keep ${baselineId} by default. Change only when a supported Leanings advantage genuinely settles an otherwise comparable choice. Never invent an id.`),
-    leaningsBasis: z.string().trim().min(1).max(100).describe(`write ${NO_AGENTIC_LEANINGS_INFLUENCE} when selectedId is ${baselineId}. When changing selectedId, copy exactly one of that challenger's leaningsAdvantages that materially caused the change; a preference also matched by the baseline is not an advantage. Never invent or paraphrase evidence.`),
+    leaningsBasis: z.string().trim().min(1).max(100).describe(`write ${NO_AGENTIC_LEANINGS_INFLUENCE} when selectedId is ${baselineId}. When changing selectedId, copy exactly one supplied leaningsOptions phrase that materially caused the change. Use a leaningsAdvantage or a grounded editorialEvidence comparison; a shared match alone is not an advantage. Never invent or paraphrase the preference.`),
     musicalReason: z.string().trim().min(16).max(180).describe('one natural, specific clause about the selected track, beginning with "its" or "it". Describe sound, texture, melody, rhythm, production or songwriting like a music lover, not a metadata report. Do not name the DJ, artist, title, preferences, Leanings, baseline, challenger, preliminary choice, current flow, queue position, BPM, key, energy level or mood tag; the controller adds verified identity and evidence.'),
+    editorialEvidence: z.object({
+      baselineFacts: z.array(z.object({ field: z.enum(EDITORIAL_LEANINGS_FIELDS), value: z.string().min(1).max(160) })).min(1).max(4),
+      challengerFacts: z.array(z.object({ field: z.enum(EDITORIAL_LEANINGS_FIELDS), value: z.string().min(1).max(160) })).min(1).max(4),
+      comparison: z.string().trim().min(32).max(480),
+    }).nullable().describe('For an interpreted preference without an exact tag match, quote supplied facts for BOTH tracks and explain why the challenger better serves the exact preference. Copy field/value pairs literally and mention the exact preference and quoted facts from both tracks in comparison. A genre label does not prove a specific vocal or instrumental technique. Null when keeping the baseline or using an exact leaningsAdvantage.'),
     transition: pickSchemaBase().shape.transition,
-  }), { objectFallbacks: { leaningsBasis: NO_AGENTIC_LEANINGS_INFLUENCE, musicalReason: MUSICAL_REASON_UNAVAILABLE } });
+  }), { objectFallbacks: { editorialEvidence: null, leaningsBasis: NO_AGENTIC_LEANINGS_INFLUENCE, musicalReason: MUSICAL_REASON_UNAVAILABLE } });
 }
 
 export function agenticLeaningsReviewSystem(): string {
-  return 'You are performing one private music-editor review. Keep the eligible baseline by default. Musical Leanings are a soft tie-breaker: change only when a controller-supported preference advantage genuinely settles an otherwise comparable choice. A preference shared with the baseline does not justify a replacement. Prefer close ordinary-flow choices; consider possible-flow choices only when their musical fit is convincingly comparable. Having a matching challenger never obliges a swap. Never invent tracks, preference evidence or facts beyond the supplied data.';
+  return 'Perform one private music-editor review. Keep the baseline by default. Musical Leanings are a soft tie-breaker: swap only for a supported preference advantage and comparable flow. Interpret descriptive preferences using supplied facts about BOTH tracks; literal tag matches are not required. A shared preference alone never justifies a swap. Host preferences are primary. A matching challenger never obliges a change. Never invent tracks, evidence or musical traits. Record interpreted comparisons as editorial judgement, not proven musical quality.';
 }
 
 export function agenticLeaningsReviewPrompt({
@@ -163,9 +168,9 @@ export function agenticLeaningsReviewPrompt({
     leaningsOptions,
     leaningsSources,
   }, null, 2)
-    + '\n\nleaningsSources identifies the owner of each preference. Host preferences are primary; guest preferences are secondary. Only leaningsOptions are eligible: the controller excludes guest evidence whenever a viable host-supported choice exists.'
-    + '\n\nUse this decision order: (1) keep the baseline by default. (2) Consider a challenger with flowCloseness="close" and non-empty leaningsAdvantages only when that preference genuinely distinguishes it; a flowCloseness="possible" choice also needs convincingly comparable musical continuation. (3) Change only if that supported advantage materially settles the close choice, copying its exact phrase into leaningsBasis. Otherwise keep the baseline and write leaningsBasis=NO_LEANINGS_INFLUENCE. A matching challenger never obliges a swap. Do not independently rerank tracks that have no distinguishing preference.'
-    + '\n\nflowCloseness is a Leanings-blind controller comparison using energy, mood, tempo, key and genre. A candidate’s leaningsMatches contains exact active-profile phrases supported by its genre/mood tags. leaningsAdvantages contains only those matches absent from the baseline: a shared genre such as rock is compatibility, not evidence that Leanings changed the choice. The controller independently verifies flow and this difference, so copy ids and phrases exactly.'
+    + '\n\nleaningsSources identifies the owner of each preference. Host preferences are primary; guest preferences are secondary. Only leaningsOptions are eligible. Consider host preferences first, including descriptive preferences; guest preferences may settle only a choice the host preferences do not distinguish. The controller also excludes guest evidence whenever a viable exact host-supported choice exists.'
+    + '\n\nUse this decision order: (1) keep the baseline by default. (2) Consider a challenger with flowCloseness="close" only when an exact leaningsAdvantage OR a grounded interpretation of a supplied preference genuinely distinguishes it; a flowCloseness="possible" choice also needs convincingly comparable musical continuation. (3) Change only if that supported advantage materially settles the close choice, copying the exact preference phrase into leaningsBasis. For an interpreted preference, supply editorialEvidence with exact baselineFacts and challengerFacts and a comparison explaining the advantage; different tags alone do not justify a swap. Otherwise keep the baseline and write leaningsBasis=NO_LEANINGS_INFLUENCE. A matching challenger never obliges a swap. Do not independently rerank tracks that have no distinguishing preference.'
+    + '\n\nflowCloseness is a Leanings-blind controller comparison using energy, mood, tempo, key and genre. A candidate’s leaningsMatches contains exact active-profile phrases supported by its genre/mood tags. leaningsAdvantages contains only those matches absent from the baseline: a shared genre such as rock is compatibility, not evidence that Leanings changed the choice. Exact matches are hints, not the full meaning of descriptive Leanings. For interpretation, the controller verifies flow, quoted facts and a real metadata difference; your comparison remains an editorial judgement, not independently proven musical quality. Never infer a specific technique from a broad genre tag. Copy ids, facts and phrases exactly.'
     + '\n\nAlways write musicalReason for selectedId as one natural, specific musical clause of roughly 12–28 words, beginning with "its" or "it". Write like a music lover: describe an audible texture, melody, rhythm, production choice or songwriting quality. Do not repeat the DJ, artist or title. Do not mention preferences, Leanings, baseline, challenger, preliminary choice, current flow, queue position, BPM, key, energy levels or mood tags. Avoid stock evaluator wording such as "complements the current flow". The controller adds the verified names and exact evidence. Set transition for selectedId.'
     + transitionChoiceNudge(context.recentTransitions);
 }
@@ -395,10 +400,11 @@ export function pickSystem(
       ? instruction('picker', 'finding-candidates-multi', { rounds })
       : instruction('picker', 'finding-candidates');
   return `${settings.agentPersonaPreamble(persona)}
+${dj.onAirLocationGrounding()}
 
 ${instruction('picker', nativeShortlist ? 'shortlist-frame' : 'frame')}${djModeLine}${showLine}${musicLean}${playlistLean}
 
-${dj.PICKER_CRITERIA}
+${dj.PICKER_CRITERIA}${nativeShortlist ? '' : `\n\n${instruction('picker', 'similarity-evidence')}`}
 
 ${instruction('picker', nativeShortlist ? 'shortlist-listener-text' : 'listener-requests', { listenerText: LISTENER_TEXT_CLAUSE })}${dj.REQUESTER_NAME_CLAUSE}
 
@@ -419,10 +425,13 @@ export function requestSystem(persona = session.onAirPersona()) {
     ? `${instruction('request', 'current-track-with-intro')}${dj.AIR_TIME_CLAUSE}`
     : instruction('request', 'current-track-no-intro');
   return `${settings.agentPersonaPreamble(persona)}
+${dj.onAirLocationGrounding()}
 
 ${frame}${settings.agentLanguageReminder(persona, wantIntro ? 'the "ack" and "intro" lines' : 'the "ack" line')}
 
 ${LISTENER_TEXT_CLAUSE}${dj.REQUESTER_GREETING_CLAUSE}${dj.REQUESTER_NAME_CLAUSE} ${instruction('request', 'classification')}
 
-${currentTrack}`;
+${currentTrack}
+
+${instruction('picker', 'similarity-evidence')}`;
 }

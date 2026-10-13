@@ -92,7 +92,7 @@ test('a failed Shortlist model call queues its own top track with no second mode
   assert.equal(q.upcoming.length, 1, 'the slot is filled');
   assert.ok(songs.some((song) => song.id === q.upcoming[0].track.id), 'from the shortlist');
   assert.equal(modelCalls, 2, 'only djObject\'s own two attempts; the pool is never asked');
-  assert.ok(logs.some((line) => line.includes('Track Shortlist model pick failed')));
+  assert.ok(logs.some((line) => line.includes('Track Shortlist pick fallback')));
   assert.ok(!logs.some((line) => line.includes('falling back to pool')));
   assert.equal(q.upcoming[0].sweep ?? false, false, 'no model judged the seam, so no transition gesture');
 });

@@ -9,7 +9,8 @@ import { djObject, modelTolerant } from '../../llm/sdk.js';
 import { pickSchemaBase, pickSystem, transitionChoiceNudge } from './schemas.js';
 import { MUSICAL_REASON_UNAVAILABLE, type PickResolution } from './leanings-review.js';
 import type { PickerCandidate, ShortlistCandidate, ShortlistSourceRun } from '../../music/shortlist.js';
-import type { PromptMemoryEntry } from '../prompt-memory.js';
+import { promptRecapEntries, type PromptMemoryEntry } from '../prompt-memory.js';
+import * as settings from '../../settings.js';
 
 export type ShortlistPick = z.infer<ReturnType<typeof shortlistPickSchema>> & { selectionReason: string };
 
@@ -24,6 +25,7 @@ export type ShortlistSelectionContext = {
     album?: string | null;
     bpm?: number | null;
     key?: string | null;
+    energy?: string | null;
     pace?: number | null;
   } | null;
   journeyActive?: boolean;
@@ -185,20 +187,11 @@ export function shortlistSituation(context: any): Pick<ShortlistSelectionContext
   return Object.keys(situation).length ? { situation } : {};
 }
 
-// Input comes from session.promptMemory(), which already enforces the current
-// show and speaker boundaries. Keep only three short editorial remarks so a
-// small picking model need not follow a full conversation or summarize it.
+// The same current-session recap policy Queue uses for speech prompts. Read
+// live settings for every pick, including corrective choices and bench runs.
 export function shortlistConversation(entries: readonly PromptMemoryEntry[], now = Date.now()): Pick<ShortlistSelectionContext, 'conversation'> {
-  const conversation: string[] = [];
-  for (const entry of entries) {
-    if (['link', 'station-id', 'hourly', 'handoff'].includes(entry.kind)) continue;
-    const at = Date.parse(entry.t);
-    if (!Number.isFinite(at) || at > now || now - at > 120 * 60_000) continue;
-    const text = typeof entry.message === 'string' ? entry.message.replace(/\s+/g, ' ').trim().slice(0, 140) : '';
-    if (!text || conversation.includes(text)) continue;
-    conversation.push(text);
-    if (conversation.length === 3) break;
-  }
+  const { recapLimit: limit, recapMinutes: withinMinutes, recapChars: maxChars } = settings.get().djBehaviour;
+  const conversation = promptRecapEntries(entries, { limit, withinMinutes, maxChars }, now).map(entry => entry.message);
   return conversation.length ? { conversation } : {};
 }
 
@@ -215,7 +208,10 @@ export function shortlistPickPrompt(candidates: PickerCandidate[], context: Shor
   // Each signal is described only when it is present, so a station without it
   // keeps the prompt it had.
   const recentPlaysInstruction = context.recentPlays?.length
-    ? ' recentPlays holds tracks that have already aired, newest first; let the arc of the set decide whether this pick holds its mood and energy or turns them. currentTrack is the expected predecessor and may not be on air yet.'
+    ? ' recentPlays holds tracks that have already aired, newest first; let the arc of the set decide whether this pick holds its mood and energy or turns them.'
+    : '';
+  const predecessorInstruction = context.currentTrack
+    ? ' currentTrack is the expected predecessor and may not be on air yet; it is context, not a candidate. Use only supplied tempo, key and energy as soft flow cues; missing measurements are unknown.'
     : '';
   const favouritesInstruction = context.listenerFavourites?.length
     ? ' listenerFavourites are the tracks listeners have liked most on this station recently: when one in the shortlist fits the moment, treat it as a strong preference, but keep variety and never loop the same favourites back to back.'
@@ -236,7 +232,7 @@ export function shortlistPickPrompt(candidates: PickerCandidate[], context: Shor
     ? ' similarity is a cosine score against its named reference: audio measures sonic resemblance, text measures metadata/lyric resemblance. Compare scores only within the same kind and reference. Neither is BPM/key compatibility or evidence of a good transition; use the measured tempo/key and set context for that.'
     : '';
   return JSON.stringify({ context, shortlist: candidates.map(shortlistCandidateForPick) })
-    + `\n\nChoose one id from this Track Shortlist using ordinary musical flow${episodeInstruction ? ' and the active episode brief' : ' only'}.${episodeInstruction}${situationInstruction}${recentPlaysInstruction}${mixRunInstruction}${journeyInstruction}${explorationInstruction}${conversationInstruction}${favouritesInstruction}${similarityInstruction}${transitionInstruction} Write musicalReason as one natural, specific musical clause of roughly 12–28 words, beginning with "its" or "it". Do not repeat the artist or title. Do not mention the DJ, Musical Leanings, shortlist, candidates, sources, controller, metadata, queue position, BPM, key, energy level or mood tags. The controller adds verified identity and handles any separate Musical Leanings review.`;
+    + `\n\nChoose one id from this Track Shortlist using ordinary musical flow${episodeInstruction ? ' and the active episode brief' : ' only'}.${episodeInstruction}${situationInstruction}${recentPlaysInstruction}${predecessorInstruction}${mixRunInstruction}${journeyInstruction}${explorationInstruction}${conversationInstruction}${favouritesInstruction}${similarityInstruction}${transitionInstruction} Write musicalReason as one natural, specific musical clause of roughly 12–28 words, beginning with "its" or "it". Do not repeat the artist or title. Do not mention the DJ, Musical Leanings, shortlist, candidates, sources, controller, metadata, queue position, BPM, key, energy level or mood tags. The controller adds verified identity and handles any separate Musical Leanings review.`;
 }
 
 export async function djPick({

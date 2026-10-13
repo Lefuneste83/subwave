@@ -68,7 +68,7 @@ export const SECTIONS = [
   {
     id: 'selection', group: 'the station', label: 'Music selection',
     hint: 'agentic · shortlist · requests', icon: ListMusic,
-    formKeys: ['llm.trackSelection', 'llm.shortlistPasses', 'llm.guestMusicalLeanings', 'llm.requestMatching', 'llm.requestWebResolve', 'llm.noRepeatWindow', 'llm.artistVarietyWindow', 'llm.discoverySteps', 'llm.agentTimeoutMs', 'picker'],
+    formKeys: ['llm.trackSelection', 'llm.shortlistPasses', 'llm.shortlistSearchPreparation', 'llm.guestMusicalLeanings', 'llm.requestMatching', 'llm.requestWebResolve', 'llm.noRepeatWindow', 'llm.artistVarietyWindow', 'llm.discoverySteps', 'llm.agentTimeoutMs', 'picker'],
   },
   {
     id: 'theme', group: 'the station', label: 'Skin & Themes',
@@ -249,6 +249,7 @@ export const SETTINGS_INDEX: readonly IndexEntry[] = [
   { label: 'Backup provider', section: 'llm', card: 'Fallback', keywords: 'fallback secondary offline' },
   { label: 'Backup model', section: 'llm', card: 'Fallback', keywords: 'fallback secondary model id' },
   { label: 'Track selection', section: 'selection', card: 'Track selection', keywords: 'route agentic tools shortlist local model picker' },
+  { label: 'Prepare targeted searches', section: 'selection', card: 'Track selection', keywords: 'optional opt in show brief search preparation' },
   { label: 'Shortlist passes', section: 'selection', card: 'Track selection', keywords: 'controller discovery candidates' },
   { label: 'Discovery rounds per pick', section: 'selection', card: 'Track selection', keywords: 'steps tool loops agent' },
   { label: 'Request matching', section: 'selection', card: 'Request matching', keywords: 'direct agentic compound listener request' },

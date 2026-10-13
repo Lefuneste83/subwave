@@ -39,7 +39,7 @@ import * as bedPolicy from './bed-policy.js';
 import { vocalRunwayMs, segmentFitsRunway } from './vocal-runway.js';
 import * as session from './session.js';
 import type { HostSpeechStamp, TurnMeta } from './session.js';
-import type { PromptMemoryEntry } from './prompt-memory.js';
+import { promptRecapEntries } from './prompt-memory.js';
 import { getFullContext, getClockContext, energyForDaypart } from '../context.js';
 import * as settings from '../settings.js';
 import { TRANSITION_EFFECTS, type TransitionEffect } from '../settings/vocab.js';
@@ -130,7 +130,6 @@ import {
   repickAfterFailure,
 } from './resolve-probe.js';
 import {
-  DEDUPE_KINDS,
   KIND_LABEL,
   TRACK_TIED_KINDS,
   VOICE_KINDS,
@@ -816,25 +815,13 @@ class Queue {
     maxChars = settings.get().djBehaviour.recapChars,
     prior = false,
   }: { limit?: number; withinMinutes?: number; maxChars?: number; prior?: boolean } = {}) {
-    const cutoff = Date.now() - withinMinutes * 60_000;
-    const seenDedupe = new Set<string>();
-    const picked: PromptMemoryEntry[] = [];
-    for (const entry of prior ? session.priorPromptMemory() : session.promptMemory()) {
-      if (!VOICE_KINDS.has(entry.kind)) continue;
-      if (new Date(entry.t).getTime() < cutoff) break;
-      if (DEDUPE_KINDS.has(entry.kind)) {
-        if (seenDedupe.has(entry.kind)) continue;
-        seenDedupe.add(entry.kind);
-      }
-      picked.push(entry);
-      if (picked.length >= limit) break;
-    }
+    const now = Date.now();
+    const picked = promptRecapEntries(prior ? session.priorPromptMemory() : session.promptMemory(),
+      { limit, withinMinutes, maxChars }, now);
     if (picked.length === 0) return null;
-    return picked.map((e) => {
-      const ago = formatAgo(Date.now() - new Date(e.t).getTime());
-      const msg = (e.message || '').replace(/\s+/g, ' ').trim();
-      const truncated = msg.length > maxChars ? msg.slice(0, maxChars - 1) + '…' : msg;
-      return `- ${ago} ago [${KIND_LABEL[e.kind] || e.kind}]: "${truncated}"`;
+    return picked.map(e => {
+      const ago = formatAgo(now - Date.parse(e.t));
+      return `- ${ago} ago [${KIND_LABEL[e.kind] || e.kind}]: "${e.message}"`;
     }).join('\n');
   }
 

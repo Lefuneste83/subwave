@@ -149,18 +149,18 @@ for (const kind of ['djAgentLeaningsReview', 'djShortlistLeaningsReview'] as con
   const punk = { ...synth, genre: 'Rock, Punk' };
   const preferences = { host: 'Favour rock and punk.', guest: null, promptValue: 'Host: Favour rock and punk.' };
 
-  test(`${kind}: an equally supported rock challenger keeps the baseline without a model call`, async () => {
+  test(`${kind}: a shared rock match still cannot justify a replacement after review`, async () => {
     const { result, resolution, prompts } = await run(
       { selectedId: peer.id, leaningsBasis: 'rock', musicalReason: goodReason, transition: 'blend' },
       kind,
       { song: rock, seen: new Map([rock, peer].map(track => [track.id, track])), editorialLeanings: preferences },
     );
-    assert.equal(prompts.length, 0);
+    assert.equal(prompts.length, 1);
     assert.equal(result.song, rock);
     assert.equal(result.object.reason, 'baseline reason');
     assert.equal(result.object.transition, 'normal');
-    assert.equal(result.reviewed, false);
-    assert.equal(resolution.leaningsReview?.outcome, 'not-run');
+    assert.equal(result.reviewed, true);
+    assert.equal(resolution.leaningsReview?.outcome, 'invalid');
     assert.equal(resolution.leaningsReview?.replacementId, null);
   });
 
@@ -242,17 +242,17 @@ for (const kind of ['djAgentLeaningsReview', 'djShortlistLeaningsReview'] as con
     assert.ok(lookups.includes(base.id) && lookups.includes(trance.id));
     const payload = JSON.parse(prompts[0].split('\n\n')[0]);
     assert.deepEqual(payload.challengers[0].leaningsAdvantages, ['techno']);
-    assert.equal(payload.challengers[0].lastfm_tags, undefined, 'raw tags do not inflate the model prompt');
+    assert.deepEqual(payload.challengers[0].lastfm_tags, ['trance', 'techno'], 'bounded private tags support descriptive interpretation');
   });
 
   test(`${kind}: stored baseline tags prevent a false preference advantage`, async () => {
-    const { result, resolution, prompts } = await run(null, kind, {
+    const { result, resolution, prompts } = await run({ selectedId: trance.id, leaningsBasis: 'techno', musicalReason: goodReason, transition: null }, kind, {
       song: base, seen: new Map([base, trance].map(track => [track.id, track])), editorialLeanings: preferences,
       lastfmTagsFor: () => ['techno'],
     });
-    assert.equal(prompts.length, 0);
+    assert.equal(prompts.length, 1);
     assert.equal(result.song, base);
-    assert.equal(resolution.leaningsReview?.outcome, 'not-run');
+    assert.equal(resolution.leaningsReview?.outcome, 'invalid');
   });
 
   test(`${kind}: shared stored tags are rejected when another advantage opens review`, async () => {
@@ -287,5 +287,54 @@ for (const kind of ['djAgentLeaningsReview', 'djShortlistLeaningsReview'] as con
     assert.ok(evidence);
     assert.ok(['close', 'possible'].includes(evidence.flowCloseness));
     assert.deepEqual(evidence.leaningsAdvantages, ['techno']);
+  });
+}
+
+for (const kind of ['djAgentLeaningsReview', 'djShortlistLeaningsReview'] as const) {
+  for (const [preference, tag] of [['strong musicianship', 'virtuoso'], ['distinctive voices', 'soulful vocals'], ['unexpected cross-genre connections', 'jazz fusion']]) {
+    const challenger = { ...synth, lastfm_tags: [tag] };
+    const preferences = { host: `Favour ${preference}.`, guest: null, promptValue: `Host: Favour ${preference}.` };
+    const evidence = {
+      baselineFacts: [{ field: 'genre', value: 'Electronic' }],
+      challengerFacts: [{ field: 'lastfm_tags', value: tag }],
+      comparison: `${preference}: ${tag} offers a more specific basis for this preference than the baseline's broad Electronic description.`,
+    };
+    test(`${kind}: descriptive ${preference} receives a grounded review without a literal preference tag`, async () => {
+      const { result, resolution, prompts } = await run({
+        selectedId: challenger.id, leaningsBasis: preference, musicalReason: goodReason, transition: 'normal', editorialEvidence: evidence,
+      }, kind, { seen: new Map([baseline, challenger].map(track => [track.id, track])), editorialLeanings: preferences });
+      assert.equal(prompts.length, 1);
+      assert.equal(result.song, challenger);
+      assert.equal(resolution.leaningsReview?.outcome, 'replaced');
+      assert.equal(resolution.leaningsReview?.evidenceKind, 'editorial-comparison');
+      assert.deepEqual(resolution.leaningsReview?.editorialEvidence, evidence);
+      const payload = JSON.parse(prompts[0].split('\n\n')[0]);
+      assert.equal(payload.challengers[0].leaningsAdvantages, undefined);
+      assert.deepEqual(payload.challengers[0].lastfm_tags, [tag]);
+    });
+    for (const corruption of ['baseline', 'challenger', 'unrelated', 'identical', 'equivalent']) {
+      test(`${kind}: descriptive evidence rejects ${corruption} comparisons`, async () => {
+        const invalid = structuredClone(evidence);
+        if (corruption === 'baseline') invalid.baselineFacts[0].value = 'invented';
+        if (corruption === 'challenger') invalid.challengerFacts[0].value = 'invented';
+        if (corruption === 'unrelated') invalid.comparison = 'These two tracks are different so choose the alternative without considering any particular preference.';
+        if (corruption === 'equivalent') invalid.challengerFacts = [{ field: 'genre', value: 'electronic' }];
+        if (corruption === 'identical') invalid.challengerFacts = [{ field: 'genre', value: 'Electronic' }];
+        const peer = corruption === 'identical' ? { ...challenger, genre: 'Electronic' } : corruption === 'equivalent' ? { ...challenger, genre: 'electronic' } : challenger;
+        const { result, resolution } = await run({ selectedId: peer.id, leaningsBasis: preference, musicalReason: goodReason, transition: null, editorialEvidence: invalid }, kind, {
+          seen: new Map([baseline, peer].map(track => [track.id, track])), editorialLeanings: preferences,
+        });
+        assert.equal(result.song, baseline);
+        assert.equal(resolution.leaningsReview?.rejectionReason, 'invalid-editorial-evidence');
+      });
+    }
+  }
+  test(`${kind}: a descriptive review may keep the baseline without any evidence claim`, async () => {
+    const { result, prompts, resolution } = await run({ selectedId: baseline.id, leaningsBasis: NO_AGENTIC_LEANINGS_INFLUENCE, musicalReason: goodReason, transition: null }, kind, {
+      editorialLeanings: { host: 'Favour strong musicianship.', guest: null, promptValue: 'Host: Favour strong musicianship.' },
+    });
+    assert.equal(prompts.length, 1);
+    assert.equal(result.song, baseline);
+    assert.equal(resolution.leaningsReview?.outcome, 'kept');
   });
 }

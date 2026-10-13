@@ -75,6 +75,7 @@ async function pick(cause: 'artist' | 'album' | 'invalid') {
   assert.equal(q.upcoming[0].track.id, offered[1][0].id, 'first eligible candidate retains fit order');
   assert.equal(q.upcoming[0].sweep ?? false, false);
   assert.ok(!logs.some(line => line.includes('falling back to pool')));
+  assert.ok(logs.some(line => line.includes('Track Shortlist repick fallback')), 'corrective controller choices are visible in Booth');
   return q.upcoming[0].track;
 }
 test('failed artist correction queues an eligible different artist without a pool model call', async () => {

@@ -65,6 +65,22 @@ assert.equal(schema.safeParse({
   transition: null,
 }).success, false, 'the final reviewed id remains mandatory');
 
+assert.deepEqual(schema.parse({ selectedId: 'preliminary', leaningsBasis: NO_AGENTIC_LEANINGS_INFLUENCE,
+  musicalReason: 'its reflective texture leaves room for the next musical step', transition: null }).editorialEvidence,
+null, 'older/exact-match answers safely omit the new comparison field');
+const editorialEvidence = {
+  baselineFacts: [{ field: 'genre', value: 'Electronic' }],
+  challengerFacts: [{ field: 'lastfm_tags', value: 'virtuoso' }],
+  comparison: 'strong musicianship: virtuoso is more specific evidence for this preference than Electronic alone.',
+};
+assert.deepEqual(schema.parse({ selectedId: 'alternative', leaningsBasis: 'strong melodies',
+  musicalReason: 'its reflective texture leaves room for the next musical step', transition: null, editorialEvidence }).editorialEvidence,
+editorialEvidence, 'the standard structured schema preserves the bounded comparison');
+assert.equal(schema.safeParse({ selectedId: 'alternative', leaningsBasis: 'strong melodies',
+  musicalReason: 'its reflective texture leaves room for the next musical step', transition: null,
+  editorialEvidence: { ...editorialEvidence, challengerFacts: [{ field: 'invented', value: 'made up' }] } }).success, true,
+'malformed optional evidence falls back to null; the replacement validator still requires support');
+
 const prompt = agenticLeaningsReviewPrompt({
   baseline: { id: 'preliminary', artist: 'First Artist', title: 'First Track' },
   challengers: [{ id: 'alternative', artist: 'Second Artist', title: 'Second Track' }],
@@ -177,7 +193,7 @@ assert.deepEqual(validateAgenticLeaningsReplacement({
   supportedLeanings: ['strong melodies'],
   baselineSupportedLeanings: [],
   flowCloseness: 'close',
-}), { valid: true, basis: 'strong melodies' });
+}), { valid: true, basis: 'strong melodies', evidenceKind: 'metadata-match' });
 assert.deepEqual(validateAgenticLeaningsReplacement({
   musicalReason: 'its bright melodic momentum lifts the current flow without an abrupt change',
   leaningsBasis: NO_AGENTIC_LEANINGS_INFLUENCE,
@@ -355,7 +371,7 @@ const schemaSource = readFileSync(new URL('../src/broadcast/dj-agent/schemas.ts'
 const basisSchemaStart = schemaSource.indexOf('leaningsBasis: z.string');
 const basisSchemaEnd = schemaSource.indexOf("musicalReason: z.string()", basisSchemaStart);
 const basisSchemaSource = schemaSource.slice(basisSchemaStart, basisSchemaEnd);
-assert.match(basisSchemaSource, /copy exactly one of that challenger's leaningsAdvantages/i);
+assert.match(basisSchemaSource, /copy exactly one supplied leaningsOptions phrase/i);
 assert.doesNotMatch(basisSchemaSource, /warm voices|records that reveal themselves gradually/i,
   'profile phrases are supplied dynamically rather than seeded examples');
 const passSource = readFileSync(new URL('../src/broadcast/dj-agent/leanings-pass.ts', import.meta.url), 'utf8');

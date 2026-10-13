@@ -43,7 +43,11 @@ test('Shortlist shares its resolution, context and Leanings-blind corrections', 
     'initial, review and corrective calls share the controller resolution object');
   assert.match(picker, /library\.bpmKeyFor\(pickAnchor\)/,
     'Shortlist resolves the predecessor audio facts used to judge transition effects');
-  assert.match(picker, /queue\.recentTransitionChoices\(\)/,
+  assert.match(picker, /selectionContextForPick\(queue, ctx/, 'the shared selection context reaches both routes');
+  const start = agentSource.indexOf('export function selectionContextForPick');
+  const end = agentSource.indexOf('\nexport function shouldExplore', start);
+  assert.ok(start >= 0 && end > start, 'the shared context slice must exist');
+  assert.match(agentSource.slice(start, end), /queue\.recentTransitionChoices\(\)/,
     'Shortlist and its Leanings review receive the recent transition ledger');
   assert.match(agentSource, /pickSystem\(showAt, playlistResolved, true, \{ host: null, guest: null, promptValue: null \}\)/,
     'Shortlist corrective choices remain Leanings-blind');

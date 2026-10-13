@@ -6,11 +6,12 @@
 import { Output, isStepCount, hasToolCall, ToolLoopAgent, ToolChoiceViolationError, tool } from 'ai';
 import type { ModelMessage, ToolSet, ToolLoopAgentSettings } from 'ai';
 import { z } from 'zod';
+import { PICKER_TOOL_TIMEOUT_MS as TOOL_TIMEOUT_MS } from '../tools/picker/defs.js';
 import { withFailover } from '../core/failover.js';
 import { withTransientRetry, withDeadline } from '../core/retry.js';
 import { stripThinking, extractJson, usageOf, perfOf, warningsOf, flattenToolCalls, failureDiagnostics, renderTerminalPrompt, isModelUnavailable, isGenerationControlError, createUsageMeter } from '../core/pure.js';
 import type { StepLike, ToolCallLike, ToolCallSummary, TokenUsage, UsageMeter } from '../core/pure.js';
-import { needsToolCallObject, reasoningFor, samplingWithLocalKnobs, forcedToolChoice, runDiscoverySteps, googleSafetyOptions } from '../provider/capabilities.js';
+import { needsToolCallObject, reasoningFor, samplingWithLocalKnobs, forcedToolChoice, nativeFirstStepToolChoice, runDiscoverySteps, googleSafetyOptions } from '../provider/capabilities.js';
 import type { Leg } from '../provider/legs.js';
 import { objectViaToolCall } from './object-via-tool.js';
 import { agentPlan } from './plan.js';
@@ -103,7 +104,6 @@ const MAX_TOKENS_AGENT = 8000;
 // the model a tool-error result, so the loop keeps moving and no throw reaches
 // the transient/failover classifiers. Segment tools keep their own 8s internal
 // timeout; this is the backstop above it.
-const TOOL_TIMEOUT_MS = 10_000;
 
 // prepareStep pins activeTools so every step is a cornered single-purpose
 // request: below the commit point discovery only, at or past it `done` only.
@@ -293,6 +293,12 @@ export async function djAgent({
               // free text still reasons.
               reasoning: reasoningFor(leg.cfg, { forceNoThink: true }),
               output: Output.object({ schema: schema! }),
+              // The schema rides every step, so an open step 0 lets the model
+              // answer before it has explored; that run is discarded below and
+              // the pick repeats in done-tool mode. Force discovery first, then
+              // leave later steps open to emit the object.
+              prepareStep: async ({ stepNumber }: { stepNumber: number }) =>
+                (stepNumber === 0 ? { toolChoice: nativeFirstStepToolChoice(leg.cfg) } : {}),
               // A run that ends on its step cap mid-exploration makes `output`
               // throw after every step was billed; count each call as it ends.
               onLanguageModelCallEnd: meter.onLanguageModelCallEnd,

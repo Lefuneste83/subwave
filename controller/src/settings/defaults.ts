@@ -455,16 +455,19 @@ export const DEFAULTS = {
     // block that category; unchecked/absent = allow (BLOCK_NONE). Only the
     // google leg reads them — every other provider ignores the field.
     geminiSafety: normalizeGeminiSafety(undefined),
-    // On: the session DJ agent drives picks, links and requests as a tool-loop
-    // over the session chat history. Off: the stateless pool picker runs instead,
-    // still inside a session and still logged.
+    // Compatibility flag for older clients, derived from trackSelection on
+    // load. A legacy-only update also moves request/segment runtimes; modern
+    // selection paths use their independent settings.
     pickerAgent: true,
-    // Agentic Tools remains the upgrade-safe default. Track Shortlist performs
+    // Agentic Tools remains the default route; shared discovery upgrades are
+    // declared in the operator manual. Track Shortlist performs
     // controller-led discovery followed by one bounded structured selection.
     trackSelection: 'agentic',
     // Native discovery passes. Kept separate from agent discoverySteps: the
     // latter is a tool-loop budget, while this is a controller source budget.
     shortlistPasses: SHORTLIST_PASSES_DEFAULT,
+    // An extra bounded model call for explicit show search requests is opt-in.
+    shortlistSearchPreparation: false,
     // Guest preferences are a deliberately optional, secondary programming
     // input. Keep them off for upgrades and new stations: a blank host field
     // must mean no Musical Leanings are sent to either picker.

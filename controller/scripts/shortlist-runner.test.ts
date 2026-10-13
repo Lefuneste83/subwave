@@ -420,9 +420,15 @@ test('the shortlist is ordered by transition fit, stably, and untouched without 
 
 test('the Shortlist prompt describes each selection signal only when it is present', () => {
   const bare = shortlistPickPrompt([{ id: 'a', title: 'One' }], {});
-  for (const pattern of [/recentPlays/, /listenerFavourites/, /mix run/]) assert.doesNotMatch(bare, pattern);
+  for (const pattern of [/recentPlays/, /currentTrack/, /listenerFavourites/, /mix run/]) assert.doesNotMatch(bare, pattern);
+  // The predecessor sentence follows currentTrack, not the set's arc (#1884).
+  assert.doesNotMatch(
+    shortlistPickPrompt([{ id: 'a', title: 'One' }], { recentPlays: [{ title: 'Before', artist: 'Act' }] }),
+    /currentTrack/,
+  );
 
   const context = {
+    currentTrack: { title: 'Spaces', artist: 'King Britt', bpm: 99.4, key: '8A', energy: 'low' },
     recentPlays: [{ title: 'Before', artist: 'Act', moods: ['calm'], energy: 'low' }],
     listenerFavourites: [{ title: 'Loved', artist: 'Crowd', likes: 3 }],
     mixRun: { bpm: 124, key: '8A' },

@@ -9,6 +9,7 @@ import * as library from '../../../../music/library.js';
 import { durationSeconds } from '../../../../music/recency.js';
 import { unairedFlag } from '../../../../music/airing.js';
 import { resolveEraYear } from '../../../../music/show-filter.js';
+import { shiftOnsetMs } from '../../../../music/silence-trim.js';
 
 export function slim(s: any) {
   // Surface the editorial tags + measured acoustic facts when known — merged
@@ -60,7 +61,9 @@ export function slim(s: any) {
   // to mask the analyzed value.
   const bpm = library.realBpm(rec?.bpm) ?? library.realBpm(s.bpm);
   const key = rec?.musicalKey ?? s.musicalKey ?? null;
-  const introMs = rec?.introMs ?? s.introMs ?? null;
+  const rawIntroMs = rec?.introMs ?? s.introMs;
+  const introMs = typeof rawIntroMs === 'number' && rawIntroMs >= 0
+    ? shiftOnsetMs(s, rawIntroMs) : null;
   const pace = rec?.paceMean ?? s.paceMean ?? null;
   const sections = library.sectionCount(rec) ?? library.sectionCount(s);
   // Airing memory (music/airing.ts): true when the station has provably never

@@ -56,7 +56,7 @@ function response(text: string, toolName?: string): Awaited<ReturnType<MockLangu
   };
 }
 
-function mockGeneration(t: TestContext, leg: ReturnType<typeof primaryLeg>, generate: () => Promise<ReturnType<typeof response>>) {
+function mockGeneration(t: TestContext, leg: ReturnType<typeof primaryLeg>, generate: (options?: { toolChoice?: { type?: string } }) => Promise<ReturnType<typeof response>>) {
   for (const model of new Set([leg.model, leg.noThinkModel])) {
     t.mock.method(model, 'doGenerate', generate);
   }
@@ -155,6 +155,21 @@ test('native-first djAgent still recovers from malformed output through the prim
   // accepts the next response, preserving the existing recovery cascade.
   assert.equal(calls, 3);
   assert.equal(recentCalls[0].model, 'openai:strategy-primary');
+});
+
+const explorable = { sample: { inputSchema: z.object({}), execute: async () => ({ found: 1 }) } };
+
+test('the native pass forces a discovery call on its first step only, and finishes in two calls', async (t) => {
+  const { primary } = configure(t, 'openai');
+  const choices: unknown[] = [];
+  mockGeneration(t, primary, async (options) => {
+    choices.push(options?.toolChoice?.type);
+    return choices.length === 1 ? response('{}', 'sample') : response(JSON.stringify(answer));
+  });
+  const result = await djAgent({ system: 'Choose a name', messages: [{ role: 'user', content: 'Choose' }], tools: explorable, schema });
+  assert.deepEqual(result.object, answer);
+  assert.deepEqual(choices, ['required', 'auto'], 'step 0 must explore; later steps may answer');
+  assert.equal(recentCalls[0].via, 'ai-sdk:agent:native', 'native pass should have answered; the done-tool fallback ran');
 });
 
 test('a permanent error during agent terminal recovery reaches the backup without text salvage masking it', async (t) => {

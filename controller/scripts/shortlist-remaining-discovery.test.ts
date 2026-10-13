@@ -22,18 +22,22 @@ for (const song of songs) {
 }
 const realFetch = globalThis.fetch;
 const requests: URL[] = [];
+let graphUnavailable = false;
+let unknownArtist = false;
+let topSongsFail = false;
 globalThis.fetch = async input => {
   const url = new URL(String(input));
   assert.equal(url.hostname, 'remaining-library.invalid');
   requests.push(url);
   const endpoint = url.pathname.split('/').at(-1);
+  if (endpoint === 'getTopSongs' && topSongsFail) return Response.json({ error: 'synthetic server failure' }, { status: 400 });
   const data = endpoint === 'getAlbumList2'
     ? { albumList2: { album: Number(url.searchParams.get('offset')) > 0 ? [] : Array.from({ length: 12 }, (_, i) => ({ id: String(i) })) } }
     : endpoint === 'getAlbum' ? { album: { song: songs.filter(s => s.album === `Album ${url.searchParams.get('id')}`) } }
       : endpoint === 'getPlaylists' ? { playlists: { playlist: [{ id: 'calm', name: 'Calm evening' }, { id: 'other', name: 'Rock hour' }] } }
         : endpoint === 'getPlaylist' ? { playlist: { entry: songs } }
-          : endpoint === 'search3' ? { searchResult3: { artist: [{ id: 'seed-artist', name: 'Anchor' }] } }
-            : endpoint === 'getArtistInfo2' ? { artistInfo2: { similarArtist: [{ name: 'Neighbour One' }, { name: 'Neighbour Two' }] } }
+          : endpoint === 'search3' ? { searchResult3: { artist: unknownArtist ? [] : [{ id: 'seed-artist', name: 'Anchor' }] } }
+            : endpoint === 'getArtistInfo2' ? { artistInfo2: { similarArtist: graphUnavailable ? [] : [{ name: 'Neighbour One' }, { name: 'Neighbour Two' }] } }
               : endpoint === 'getTopSongs' ? { topSongs: { song: songs } } : {};
   return Response.json({ 'subsonic-response': { status: 'ok', version: '1.16.1', ...data } });
 };
@@ -128,7 +132,9 @@ test('all added sources rotate within the existing budget; pinned moods suppress
     // alias with the six-source autonomous diversity lane.
     planShortlistSources({ ...context, discoveryPasses: 1 }, available).forEach(call => found.add(call.source));
     assert.ok(!planShortlistSources({ ...context, moods: ['calm'] }, available).some(call => call.source === 'moodWildcard'));
-    assert.ok(!planShortlistSources({ ...context, scope: pickerScope({ hasPlaylistAnchor: true }) }, available).some(call => call.source === 'moodPlaylistTracks'));
+    const scope = pickerScope({ hasPlaylistAnchor: true });
+    const gated = new Set([...available].filter(source => source in buildPickerTools(scope).tools));
+    assert.ok(!planShortlistSources({ ...context, scope }, gated).some(call => call.source === 'moodPlaylistTracks'));
   }
   assert.deepEqual(found, available);
 });
@@ -151,4 +157,41 @@ test('empty server pools hide unavailable sources temporarily and cache invalida
   await old;
   assert.equal(pickerSourceAvailable('old-server'), true, 'an old server response cannot refill the cleared cache');
   assert.equal('recentlyAdded' in buildPickerTools().tools, true);
+});
+
+
+test('pinned show moods hide the wildcard from the shared Agentic/Shortlist registry', () => {
+  assert.equal('moodWildcard' in buildPickerTools({ hasPinnedMoods: true }).tools, false);
+  assert.equal('moodWildcard' in buildPickerTools({ moodLock: ['calm'] }).tools, false);
+  assert.equal('moodWildcard' in buildPickerTools({ audioWaypoint: [1] }).tools, false);
+});
+
+test('empty artist-graph data gates the source across seed artists until retry or cache invalidation', async () => {
+  clearPickerSourceCache();
+  graphUnavailable = true;
+  try {
+    const result = await buildPickerTools().tools.similarArtistTracks.execute!({ artist: 'Anchor' }, { toolCallId: 'empty-graph', messages: [], context: undefined });
+    assert.deepEqual((result as any).tracks, []);
+  } finally { graphUnavailable = false; }
+  assert.equal('similarArtistTracks' in buildPickerTools().tools, false);
+  const realNow = Date.now;
+  Date.now = () => realNow() + 5 * 60_000 + 1;
+  try { assert.equal('similarArtistTracks' in buildPickerTools().tools, true); }
+  finally { Date.now = realNow; }
+  clearPickerSourceCache();
+  assert.equal('similarArtistTracks' in buildPickerTools().tools, true);
+});
+
+
+test('an unknown seed artist or failed top-song requests never declares the whole source unavailable', async () => {
+  for (const failure of ['unknown', 'server'] as const) {
+    clearPickerSourceCache();
+    unknownArtist = failure === 'unknown'; topSongsFail = failure === 'server';
+    try {
+      const result = await buildPickerTools().tools.similarArtistTracks.execute!({ artist: 'Anchor' }, { toolCallId: failure, messages: [], context: undefined });
+      if (failure === 'server') assert.match((result as any).error, /could not read similar-artist songs/);
+      else assert.deepEqual((result as any).tracks, []);
+      assert.equal('similarArtistTracks' in buildPickerTools().tools, true);
+    } finally { unknownArtist = false; topSongsFail = false; clearPickerSourceCache(); }
+  }
 });

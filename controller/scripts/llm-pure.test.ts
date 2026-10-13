@@ -7,9 +7,9 @@ import test from 'node:test';
 import { z } from 'zod';
 import { generateText, APICallError, ToolChoiceViolationError } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
-import { stripThinking, truncationError, extractJson, usageOf, perfOf, warningsOf, budgetMode, isGenerationControlError, isProviderRequestTimeout, isUnreachable, isTransient, isQuotaOrAuthError, isUpstreamOverloaded, isRateLimited, isModelUnavailable, errReason, nearestId, isElevenLabsV3, isFishS21Model, cloudExpressionCueFamily, snapV3Stability, modelTolerant, schemaHint, clipText, soulBrief, SOUL_BRIEF_MAX, renderTerminalPrompt, messageText } from '../src/llm/internal/core/pure.js';
+import { stripThinking, truncationError, extractJson, usageOf, perfOf, warningsOf, budgetMode, isGenerationControlError, isProviderRequestTimeout, isUnreachable, isTransient, isQuotaOrAuthError, isUpstreamOverloaded, isRateLimited, isModelUnavailable, errReason, nearestId, isElevenLabsV3, isFishS21Model, cloudExpressionCueFamily, elevenLabsTtsModelIds, snapV3Stability, modelTolerant, schemaHint, clipText, soulBrief, SOUL_BRIEF_MAX, renderTerminalPrompt, messageText } from '../src/llm/internal/core/pure.js';
 import { withDeadline, withTransientRetry, retryAfterMs } from '../src/llm/internal/core/retry.js';
-import { reasoningFor, needsToolCallObject, repeatPenaltyApplies, appliedNumCtx, appliedRepeatPenalty, forcedToolChoice, thinkingMandatoryModel, discoveryStepsFor, gatedMaxStepsFor, runDiscoverySteps, DISCOVERY_STEPS_MIN, DISCOVERY_STEPS_MAX } from '../src/llm/internal/provider/capabilities.js';
+import { reasoningFor, needsToolCallObject, repeatPenaltyApplies, appliedNumCtx, appliedRepeatPenalty, forcedToolChoice, nativeFirstStepToolChoice, thinkingMandatoryModel, discoveryStepsFor, gatedMaxStepsFor, runDiscoverySteps, DISCOVERY_STEPS_MIN, DISCOVERY_STEPS_MAX } from '../src/llm/internal/provider/capabilities.js';
 import { agentPlan } from '../src/llm/internal/strategy/plan.js';
 import { objectViaToolCall, emitInstructions, EMIT_ANSWER_INSTRUCTION } from '../src/llm/internal/strategy/object-via-tool.js';
 import { NATIVE_JSON_INSTRUCTION } from '../src/llm/internal/strategy/object.js';
@@ -645,6 +645,13 @@ async function main() {
     // Garbage / missing cfg never accidentally weakens the default.
     assert.equal(forcedToolChoice({ toolChoice: 'whatever' }), 'required');
     assert.equal(forcedToolChoice(undefined), 'required');
+  });
+  await test('nativeFirstStepToolChoice: hosted openai-compatible stays auto, every other leg follows forcedToolChoice (#1693 case D)', () => {
+    // Mistral: json_schema with tools is only compatible with tool_choice auto.
+    assert.equal(nativeFirstStepToolChoice({ provider: 'openai-compatible', compatibleMode: 'hosted' }), 'auto');
+    assert.equal(nativeFirstStepToolChoice({ provider: 'openai' }), 'required');
+    assert.equal(nativeFirstStepToolChoice({ provider: 'openai', toolChoice: 'auto' }), 'auto');
+    assert.equal(nativeFirstStepToolChoice({ provider: 'anthropic', model: 'claude-opus-5-5' }), 'auto');
   });
   await test('forcedToolChoice: thinking-mandatory Claude models are always auto — they 400 on tool_choice any/tool', () => {
     // The live failure: openai-compatible proxy → claude-sonnet-5-5, required → any → 400.
@@ -1477,9 +1484,25 @@ async function main() {
   await test('cue families require both the matching provider and model family', () => {
     assert.equal(cloudExpressionCueFamily('fish-audio', 's2.1-pro'), 'fish-s21');
     assert.equal(cloudExpressionCueFamily('elevenlabs', 'eleven_v3'), 'elevenlabs-v3');
+    assert.equal(cloudExpressionCueFamily('elevenlabs', 'eleven_v3_conversational'), 'elevenlabs-v3');
+    assert.equal(cloudExpressionCueFamily('elevenlabs', 'eleven_v4'), 'elevenlabs-v3');
+    assert.equal(cloudExpressionCueFamily('elevenlabs', 'eleven_v4_turbo'), 'elevenlabs-v3');
+    assert.equal(cloudExpressionCueFamily('elevenlabs', 'eleven_flash_v2_5'), null);
+    assert.equal(cloudExpressionCueFamily('elevenlabs', 'eleven_v5'), null, 'an unchecked family stays out');
+    assert.equal(cloudExpressionCueFamily('elevenlabs', 'eleven_v40'), null);
     assert.equal(cloudExpressionCueFamily('fish-audio', 'eleven_v3_custom'), null);
     assert.equal(cloudExpressionCueFamily('elevenlabs', 's2.1-pro'), null);
     assert.equal(cloudExpressionCueFamily('openai', 'eleven_v3'), null);
+  });
+
+  await test('elevenLabsTtsModelIds keeps speech models in provider order and drops the rest', () => {
+    assert.deepEqual(elevenLabsTtsModelIds([
+      { model_id: 'eleven_v4_turbo', can_do_text_to_speech: true },
+      { model_id: 'eleven_english_sts_v2', can_do_text_to_speech: false },
+      { model_id: 'eleven_flash_v2_5', can_do_text_to_speech: true },
+      { can_do_text_to_speech: true },
+    ]), ['eleven_v4_turbo', 'eleven_flash_v2_5']);
+    assert.deepEqual(elevenLabsTtsModelIds({ detail: 'unauthorized' }), []);
   });
 
   console.log('isElevenLabsV3 (model-family gate):');
@@ -1493,6 +1516,8 @@ async function main() {
     assert.equal(isElevenLabsV3('eleven_flash_v2_5'), false);
     assert.equal(isElevenLabsV3('eleven_multilingual_v2'), false);
     assert.equal(isElevenLabsV3('eleven_ttv_v3'), false);
+    assert.equal(isElevenLabsV3('eleven_v4'), false, 'v4 takes a continuous stability: no snap');
+    assert.equal(isElevenLabsV3('eleven_v4_turbo'), false);
     assert.equal(isElevenLabsV3('gpt-4o-mini-tts'), false);
     assert.equal(isElevenLabsV3(''), false);
   });

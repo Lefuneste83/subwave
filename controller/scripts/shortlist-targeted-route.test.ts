@@ -28,7 +28,7 @@ const prohibited = [
   { id: 'recent', title: 'Recent', artist: 'Recent', genre: 'Rock', duration: 240 },
 ];
 let preparations = 0;
-let preparedAnswer = '{"searches":[{"kind":"library","query":"Portishead","evidence":"Explore Portishead tracks"}]}';
+let preparedAnswer = '{"searches":[{"kind":"library","query":"Portishead","intent":"artist","evidence":"Explore Portishead tracks"}]}';
 const preparationInputs: any[] = [];
 const selectionInputs: any[] = [];
 const linkInputs: any[] = [];
@@ -40,7 +40,7 @@ before(async () => {
   await settings.update({ shows: [show], scheduleOverride: { showId: show.id, startedAt: at - 60_000, expiresAt: at + 3600_000 },
     tts: { enabled: true }, llm: { provider: 'openai-compatible', model: 'targeted-test',
       baseUrl: 'http://targeted-model.invalid/v1', apiKey: 'test', fallback: { enabled: false },
-      noRepeatWindow: 0, artistVarietyWindow: 0, trackSelection: 'shortlist', shortlistPasses: 2 } });
+      noRepeatWindow: 0, artistVarietyWindow: 0, trackSelection: 'shortlist', shortlistPasses: 2, shortlistSearchPreparation: true } });
   await library.load();
   globalThis.fetch = async (input, init) => {
     const url = new URL(String(input));
@@ -60,9 +60,12 @@ before(async () => {
     assert.equal(url.hostname, 'targeted-model.invalid', 'no live network requests');
     const body = JSON.parse(String(init?.body));
     const user = body.messages.find((message: any) => message.role === 'user')?.content;
-    if (!body.tools?.length && String(user).startsWith('{"topic"')) {
+    if (String(user).startsWith('{"topic"')) {
       preparations++; preparationInputs.push(body);
-      return completion(preparedAnswer);
+      return Response.json({ id: 'preparation', object: 'chat.completion', created: 0, model: 'targeted-test',
+        choices: [{ index: 0, finish_reason: 'tool_calls', message: { role: 'assistant', content: null,
+          tool_calls: [{ id: 'prepare', type: 'function', function: { name: body.tools[0].function.name, arguments: preparedAnswer } }],
+        } }], usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } });
     }
     if (body.tools?.length) {
       selectionInputs.push(body);
@@ -100,10 +103,21 @@ async function pick() {
   assert.equal(q.upcoming.length, 1);
 }
 
+test('default-off preparation makes no extra model call for a show with a topic', async () => {
+  await settings.update({ llm: { shortlistSearchPreparation: false } });
+  await pick();
+  assert.equal(preparations, 0);
+  assert.equal(selectionInputs.length, 1);
+  assert.ok(!selectionInputs[0].messages.some((message: any) => String(message.content).startsWith('{"topic"')));
+  await settings.update({ llm: { shortlistSearchPreparation: true } });
+  selectionInputs.length = 0; linkInputs.length = 0; queries.length = 0;
+});
+
 test('one tool-free preparation supplies controller searches across picks without altering speech input', async () => {
   await pick(); await pick();
   assert.equal(preparations, 1);
-  assert.equal(preparationInputs[0].tools, undefined, 'preparation sends no tools to the LLM');
+  assert.equal(preparationInputs[0].tools.length, 1, 'the provider gets only its structured formatting tool');
+  assert.equal(preparationInputs[0].tools[0].function.name, 'emit');
   assert.equal(selectionInputs.length, 2);
   assert.ok(queries.length >= 2 && queries.every(query => query === 'Portishead'), 'controller actually executes the prepared query');
   const discoveryNames = new Set(PICKER_TOOLS.map(tool => tool.name));
@@ -134,19 +148,19 @@ test('real targeted discovery preserves strict locks, recency, exclusions and du
 });
 
 test('a generic presenter biography keeps ordinary discovery even if preparation invents searches', async () => {
-  show.topic = readFileSync(new URL('./fixtures/shortlist-search/chris-show-brief.md', import.meta.url), 'utf8');
+  show.topic = readFileSync(new URL('./fixtures/shortlist-search/presenter-show-brief.md', import.meta.url), 'utf8');
   await settings.update({ shows: [show] });
   preparedAnswer = JSON.stringify({ searches: [
-    { kind: 'theme', query: 'songs about everyday life', evidence: "The working day has settled in, the kettle's probably been on once already" },
-    { kind: 'artist', query: 'Chris Sittins', evidence: 'Chris Sittins is here to keep you company with two hours of great music and good conversation.' },
-    { kind: 'library', query: 'overlooked album track', evidence: "the next he'll quietly champion an overlooked album track" },
+    { kind: 'theme', intent: 'theme', query: 'everyday life', evidence: "The working day has settled in, the kettle's probably been on once already" },
+    { kind: 'artist', intent: 'presenter', query: 'Taylor Example', evidence: 'Taylor Example is here to keep you company with two hours of great music and good conversation.' },
+    { kind: 'library', intent: 'general', query: 'overlooked album track', evidence: "the next he'll quietly champion an overlooked album track" },
   ] });
   const before = preparations;
   const queryStart = queries.length;
   const pickStart = selectionInputs.length;
   await pick(); await pick();
   assert.equal(preparations, before + 1, 'empty grounded results are reused for the airing');
-  assert.ok(queries.slice(queryStart).every(query => !/Chris|everyday life|overlooked/i.test(query)));
+  assert.ok(queries.slice(queryStart).every(query => !/Taylor|everyday life|overlooked/i.test(query)));
   for (const body of selectionInputs.slice(pickStart)) {
     const user = body.messages.find((message: any) => message.role === 'user').content;
     const offered = JSON.parse(user.split('\n')[0]).shortlist;

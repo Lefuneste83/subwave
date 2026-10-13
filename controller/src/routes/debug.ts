@@ -39,11 +39,13 @@ import { publicOrigin } from './public.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { BadStatePathError, listStateDir } from '../util/state-tree.js';
 import { buildPickerTools, PICKER_TOOLS } from '../llm/tools.js';
-import { livePickerScope, shortlistSignals } from '../broadcast/dj-agent.js';
+import { livePickerScope, selectionContextForPick, shouldExplore, runActive } from '../broadcast/dj-agent.js';
 import { nearestId } from '../llm/sdk.js';
 import { pickerAgent } from '../broadcast/dj-agent/agents.js';
 import { buildShortlist } from '../music/shortlist.js';
-import { djPick, shortlistSituation } from '../broadcast/dj-agent/shortlist-pick.js';
+import { prepareShortlistSearches } from '../broadcast/shortlist-search-preparation.js';
+import { predecessorContext } from '../broadcast/dj-agent/pick-context.js';
+import { djPick } from '../broadcast/dj-agent/shortlist-pick.js';
 import { SHORTLIST_PASSES_DEFAULT } from '../schemas/settings.js';
 import { icecastDebugSnapshot, type IcecastSource, type IcecastStats } from './debug-icecast.js';
 import { createSessionArchiveReader } from '../util/session-archives.js';
@@ -53,10 +55,11 @@ export const router = express.Router();
 
 // ---------------------------------------------------------------------------
 // Discovery bench — maintainer-only (SUBWAVE_DISCOVERY_BENCH), never queues
-// a track or writes station state. The listing and per-tool routes run the
+// a track or changes live pick/run state. The listing and per-tool routes run the
 // exact picker-tool registry with no model call. /compare is different: it
 // runs BOTH configured routes for real, so its calls spend tokens, count
-// against the daily budget and feed the context-window stats.
+// against the daily budget and feed the context-window stats. Opt-in search
+// preparation uses the live airing cache; comparisons never record offers.
 // ---------------------------------------------------------------------------
 const REQUEST_ONLY_PICKER_TOOL = 'identifyRequestedTrack';
 const DISCOVERY_BENCH_ENABLED = /^(1|true|yes|on)$/i.test(process.env.SUBWAVE_DISCOVERY_BENCH || '');
@@ -107,7 +110,7 @@ router.post('/debug/discovery/tool/:tool', requireAdmin, async (req, res) => {
     const parsed = tool.inputSchema?.safeParse?.(args);
     if (parsed && !parsed.success) return res.status(400).json({ error: parsed.error.issues?.[0]?.message || 'invalid tool input' });
     const started = performance.now();
-    const result = await tool.execute(parsed?.data ?? args, { toolCallId: `discovery-bench:${name}`, messages: [] });
+    const result = await tool.execute(parsed?.data ?? args, { toolCallId: `discovery-bench:${name}`, messages: [], abortSignal: AbortSignal.timeout(10_000) });
     res.json({ name, elapsedMs: Math.round(performance.now() - started), result });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || String(err) });
@@ -119,12 +122,14 @@ router.post('/debug/discovery/tool/:tool', requireAdmin, async (req, res) => {
 router.post('/debug/discovery/compare', requireAdmin, async (_req, res) => {
   if (discoveryBenchDisabled(res)) return;
   try {
-    const { scope, activeShow, playlistTracks, context: pickContext } = await livePickerScope(queue, { context: await getFullContext() });
+    const { scope, activeShow, playlistTracks, episodeSource, context: pickContext } = await livePickerScope(queue, { context: await getFullContext() });
     const current = queue.current?.track ?? null;
     const agentStarted = performance.now();
     const agent = await pickerAgent.run({ messages: session.windowMessages(), scope });
     const agentElapsedMs = Math.round(performance.now() - agentStarted);
     const shortlistStarted = performance.now();
+    const explore = shouldExplore({ inRun: runActive(), audioWaypoint: scope.audioWaypoint, strictPlaylist: activeShow?.playlistStrict });
+    const searches = await prepareShortlistSearches({ activeShow, context: pickContext, episodeSource });
     const shortlist = await buildShortlist({
       scope,
       currentTrackId: current?.id ?? null,
@@ -135,18 +140,17 @@ router.post('/debug/discovery/compare', requireAdmin, async (_req, res) => {
       genres: activeShow?.genres ?? scope.genreLock,
       eras: activeShow?.eras,
       dominantMood: pickContext?.dominantMood,
+      searches, explore,
       transitionTarget: current ? library.bpmKeyFor(current) : null,
     });
     const shortlistSelection = shortlist.candidates.length
       ? await djPick({
         candidates: shortlist.candidates,
         playlistResolved: !!playlistTracks?.length,
-        context: {
-          currentTrack: current ? { id: current.id ?? null, title: current.title ?? null, artist: current.artist ?? null, album: current.album ?? null } : null,
-          link: 'No link airs for this diagnostic pick.',
-          ...shortlistSignals(queue, scope),
-          ...shortlistSituation(pickContext),
-        },
+        context: selectionContextForPick(queue, pickContext, {
+          scope, pickAnchor: current, predecessor: predecessorContext(current),
+          audioWaypoint: scope.audioWaypoint, explore,
+        }),
       })
       : null;
     // The live route repairs a near-miss id before judging the pick (#939).

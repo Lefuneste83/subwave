@@ -20,6 +20,7 @@ test('cold hydration preserves defaults and independent primary/fallback fields'
   assert.equal(form.llm.discoverySteps, 0);
   assert.equal(form.llm.trackSelection, 'agentic');
   assert.equal(form.llm.shortlistPasses, 3);
+  assert.equal(form.llm.shortlistSearchPreparation, false);
   assert.equal(form.llm.guestMusicalLeanings, false);
   assert.equal(form.llm.requestMatching, 'agentic');
   assert.equal(form.llm.segmentRuntime, 'agentic');
@@ -28,11 +29,12 @@ test('cold hydration preserves defaults and independent primary/fallback fields'
   assert.deepEqual(form.llm.fallback.headers, [{ name: 'X-Other', value: 'set' }]);
 
   const shortlist = settingsForm({ llm: {
-    trackSelection: 'shortlist', shortlistPasses: 5, guestMusicalLeanings: true,
+    trackSelection: 'shortlist', shortlistPasses: 5, shortlistSearchPreparation: true, guestMusicalLeanings: true,
     requestMatching: 'direct', segmentRuntime: 'direct',
   } });
   assert.equal(shortlist.llm.trackSelection, 'shortlist');
   assert.equal(shortlist.llm.shortlistPasses, 5);
+  assert.equal(shortlist.llm.shortlistSearchPreparation, true);
   assert.equal(shortlist.llm.guestMusicalLeanings, true);
   assert.equal(shortlist.llm.requestMatching, 'direct');
   assert.equal(shortlist.llm.segmentRuntime, 'direct');

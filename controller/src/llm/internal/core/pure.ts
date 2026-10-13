@@ -666,11 +666,20 @@ export function nearestId(id: string, candidateIds: Iterable<string>): string | 
   return secondDist - bestDist >= NEAREST_ID_MARGIN ? best : null;
 }
 
-// ElevenLabs eleven_v3* family: bracketed audio tags render as expressive cues,
-// and `stability` is discrete (snapV3Stability). Lives here so djSystem's tag
-// hint and cloud-speech's snap share one rule without an import cycle.
+// ElevenLabs eleven_v3* family: `stability` is discrete (snapV3Stability).
+// Lives here so cloud-speech's snap and the cue gate below share one place
+// without an import cycle.
 export function isElevenLabsV3(model: string): boolean {
   return /^eleven[_-]?v3/i.test(model || '');
+}
+
+// ElevenLabs families that render bracketed audio tags as expressive cues:
+// eleven_v3* and eleven_v4* (v4 takes a continuous stability, so it is not a
+// v3 for the snap). The family id below predates v4 and covers both. Named
+// families only: a model that cannot render tags reads them aloud, so an
+// unknown future id stays out until it is checked.
+export function isElevenLabsAudioTagModel(model: string): boolean {
+  return /^eleven[_-]?v[34](?:[._-]|$)/i.test(model || '');
 }
 
 // Fish's natural-language bracket cues are an S2.1 capability. Custom model
@@ -679,9 +688,20 @@ export function isFishS21Model(model: string): boolean {
   return /^s2[._-]?1(?:[._-]|$)/i.test(model || '');
 }
 
+// Speech model ids from ElevenLabs' GET /v1/models, which also lists
+// voice-changer and other non-speech models. Provider order is kept: it leads
+// with the current generation.
+export function elevenLabsTtsModelIds(data: unknown): string[] {
+  if (!Array.isArray(data)) return [];
+  return (data as { model_id?: unknown; can_do_text_to_speech?: unknown }[])
+    .filter((m) => m?.can_do_text_to_speech === true)
+    .map((m) => m.model_id)
+    .filter((id): id is string => typeof id === 'string' && !!id);
+}
+
 export function cloudExpressionCueFamily(provider: string, model: string): 'fish-s21' | 'elevenlabs-v3' | null {
   if (provider === 'fish-audio' && isFishS21Model(model)) return 'fish-s21';
-  if (provider === 'elevenlabs' && isElevenLabsV3(model)) return 'elevenlabs-v3';
+  if (provider === 'elevenlabs' && isElevenLabsAudioTagModel(model)) return 'elevenlabs-v3';
   return null;
 }
 

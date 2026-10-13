@@ -1,25 +1,28 @@
 import { tool } from 'ai';
+import { allowsMoodPlaylistDiscovery } from '../../../../../music/show-playlist.js';
 import { z } from 'zod';
 import * as subsonic from '../../../../../music/subsonic.js';
 import { shuffle } from '../../../../../util/shuffle.js';
 import { cachedPickerSource, pickerSourceAvailable } from '../source-pool-cache.js';
-import { definePickerTool } from '../defs.js';
+import { definePickerTool, toolDeadlineResult } from '../defs.js';
 
 export default definePickerTool({
   name: 'moodPlaylistTracks',
   // A pinned show playlist owns this lane, even if its IDs failed to resolve.
-  available: ({ scope }) => !scope.hasPlaylistAnchor && !scope.playlistTracks?.length && !scope.playlistLock && pickerSourceAvailable('mood-playlists'),
+  available: ({ scope }) => allowsMoodPlaylistDiscovery(scope) && pickerSourceAvailable('mood-playlists'),
   build: ({ collect, emptyResult }) => tool({
     description: 'Tracks from up to two Navidrome playlists whose names contain the supplied mood. A curated mood source, distinct from library mood tags. Unavailable when the show pins its own playlists; never substitutes another show’s playlist for that anchor.',
     inputSchema: z.object({ mood: z.string().min(1) }),
-    execute: async ({ mood }) => {
+    execute: async ({ mood }, { abortSignal }: { abortSignal?: AbortSignal }) => {
       try {
-        const playlists = await cachedPickerSource('mood-playlists', () => subsonic.getPlaylists());
+        const playlists = await cachedPickerSource('mood-playlists', () => subsonic.getPlaylists({ signal: abortSignal }));
         const matched = shuffle(playlists.filter(p => p.name?.toLowerCase().includes(mood.toLowerCase()))).slice(0, 2);
         const rows: any[] = [];
         for (const playlist of matched) {
-          try { rows.push(...await cachedPickerSource(`mood-playlist:${playlist.id}`, () => subsonic.getPlaylist(playlist.id))); } catch { /* Try the other playlist. */ }
+          abortSignal?.throwIfAborted();
+          try { rows.push(...await cachedPickerSource(`mood-playlist:${playlist.id}`, () => subsonic.getPlaylist(playlist.id, { signal: abortSignal }))); } catch { /* Try the other playlist. */ }
         }
+        if (abortSignal?.aborted) return toolDeadlineResult('moodPlaylistTracks');
         const out = collect(rows);
         return out.length ? out : emptyResult(rows.length, 'no fresh tracks in mood-named playlists — choose another discovery source');
       } catch (err) { return { error: (err as Error).message }; }

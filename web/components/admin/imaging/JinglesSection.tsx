@@ -21,7 +21,10 @@ import {
   jingleCreateSchema,
   jingleImportSchema,
   jingleRatioSchema,
+  resolvePersonaVoiceSlot,
 } from '@/lib/schemas.generated';
+import { EngineVoiceFields, ENGINE_UNAVAILABLE, type VoiceSlot } from '../tts/EngineVoiceFields';
+import { INHERIT_ENGINE } from '../tts/engineMeta';
 import { useZodForm, applyServerFieldErrors } from '@/lib/form';
 import { TextField, TextareaField } from '@/lib/form-fields';
 import {
@@ -34,7 +37,7 @@ interface JinglesSectionProps {
   saveSettings: SaveSettings;
   jingleRatio: string;
   setJingleRatio: (v: string) => void;
-  createJingle: (values: { text: string }) => Promise<ImagingSubmitResult>;
+  createJingle: (values: { text: string; tts?: VoiceSlot }) => Promise<ImagingSubmitResult>;
   uploadJingle: (
     files: File[],
     label: string | undefined,
@@ -45,19 +48,24 @@ interface JinglesSectionProps {
 }
 
 function JingleCreateModal({
-  busy, createJingle, onClose,
+  busy, createJingle, onClose, data, adminFetch,
 }: {
   busy: boolean;
   createJingle: JinglesSectionProps['createJingle'];
   onClose: () => void;
+  data: SettingsData;
+  adminFetch: JinglesSectionProps['adminFetch'];
 }) {
   const form = useZodForm(jingleCreateSchema, { text: '' });
+  const [tts, setTts] = useState<VoiceSlot>({ engine: INHERIT_ENGINE.id, voice: '', cloudProvider: 'openai' });
   // text is a plain z.string(), so its z.input is a real string and
   // form.control needs no cast -- unlike every other field in this file.
   const textValue = useWatch({ control: form.control, name: 'text' }) || '';
 
   const onSubmit = form.handleSubmit(async (values) => {
-    const res = await createJingle(values);
+    // Station default with no voice of its own is the plain request.
+    const picked = tts.engine !== INHERIT_ENGINE.id || tts.voice;
+    const res = await createJingle(picked ? { ...values, tts } : values);
     if (res.ok) onClose();
     else applyServerFieldErrors(form, res.fieldErrors);
   });
@@ -67,7 +75,7 @@ function JingleCreateModal({
       open
       onOpenChange={(o) => { if (!o) onClose(); }}
       title="create jingle"
-      sub="we’ll voice it in your station’s configured TTS voice"
+      sub="read in the station voice, or pick another"
       footer={
         <>
           <Button variant="ghost" size="sm" className="min-h-9 sm:min-h-0" onClick={onClose}>Cancel</Button>
@@ -92,6 +100,19 @@ function JingleCreateModal({
           placeholder="You’re tuned to SUB/WAVE…"
         />
         <div className="text-right font-mono text-[11px] text-muted">{textValue.length} / {JINGLE_TEXT_MAX}</div>
+        <EngineVoiceFields
+          value={tts}
+          onChange={patch => setTts(t => ({ ...t, ...patch }))}
+          data={data}
+          adminFetch={adminFetch}
+          allowInherit
+          inheritResolvesTo={resolvePersonaVoiceSlot(tts, data?.values?.tts ?? null) ?? null}
+          inheritNote={<>This jingle follows <strong>Settings → TTS voice</strong>.</>}
+          unavailableNote={engine => (
+            <>{ENGINE_UNAVAILABLE[engine]} The jingle would be read by the station’s
+              fallback or default engine instead, and saved that way.</>
+          )}
+        />
       </div>
     </Modal>
   );
@@ -430,7 +451,7 @@ export function JinglesSection({
       </PanelBox>
 
       {modal === 'create' && (
-        <JingleCreateModal busy={busy} createJingle={createJingle} onClose={closeModal} />
+        <JingleCreateModal busy={busy} createJingle={createJingle} onClose={closeModal} data={data} adminFetch={adminFetch} />
       )}
       {modal === 'import' && (
         <JingleImportModal

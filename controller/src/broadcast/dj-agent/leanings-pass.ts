@@ -120,11 +120,11 @@ export async function runLeaningsReview({
   };
   const compactCandidates = reviewCandidates.map((candidate) => compactAgenticReviewCandidate(candidate, leaningsOptions, reviewBaseline));
   const baselineSupportedLeanings = (compactCandidates[0].leaningsMatches ?? []) as string[];
-  // No distinguishing preference among viable challengers means there is no
-  // tie for Leanings to settle. Keep the original pick without a model call.
+  // A descriptive preference need not occur literally in tags. Let the model
+  // interpret it whenever a viable challenger exists; matches remain hints,
+  // not a condition for making the review call.
   if (!compactCandidates.slice(1).some(candidate =>
-    (candidate.flowCloseness === 'close' || candidate.flowCloseness === 'possible')
-    && Array.isArray(candidate.leaningsAdvantages) && candidate.leaningsAdvantages.length > 0)) {
+    candidate.flowCloseness === 'close' || candidate.flowCloseness === 'possible')) {
     resolution.leaningsReview = { outcome: 'not-run', replacementId: null, ...common };
     return { song, object, reviewed: false };
   }
@@ -175,6 +175,8 @@ export async function runLeaningsReview({
       supportedLeanings: Array.isArray(compactReplacement?.leaningsMatches) ? compactReplacement.leaningsMatches as string[] : [],
       baselineSupportedLeanings,
       flowCloseness: compactReplacement?.flowCloseness,
+      editorialEvidence: answer.editorialEvidence,
+      baseline: compactCandidates[0], challenger: compactReplacement,
     });
     if (!validation.valid) {
       resolution.leaningsReview = {
@@ -196,6 +198,8 @@ export async function runLeaningsReview({
     });
     resolution.leaningsReview = {
       outcome: 'replaced', replacementId: String(replacement.id), track: agenticTrackRef(replacement),
+      evidenceKind: validation.evidenceKind,
+      ...(validation.evidenceKind === 'editorial-comparison' ? { editorialEvidence: answer.editorialEvidence } : {}),
       leaningsBasis: validation.basis, leaningsSource: owner?.source ?? null, reviewedSelectedId, ...common,
     };
     return {

@@ -6,9 +6,11 @@ import { definePickerTool } from '../defs.js';
 
 export default definePickerTool({
   name: 'moodWildcard',
-  available: ({ stats }) => Object.values(stats.byMood ?? {}).some(count => Number(count) > 0),
+  available: ({ scope, stats }) => !scope.hasPinnedMoods && !scope.moodLock?.length
+    && !scope.episodeSource && !scope.audioWaypoint?.length && !scope.playlistLock
+    && Object.values(stats.byMood ?? {}).some(count => Number(count) > 0),
   build: ({ collect, emptyResult, stats }) => tool({
-    description: 'A small discovery detour into another covered library mood, excluding the current mood choices. For autonomous programming that has earned a change of mood; the Shortlist does not plan this detour when a show explicitly pins its moods. All show restrictions still apply.',
+    description: 'A small discovery detour into another covered library mood, excluding the current mood choices. For autonomous programming that has earned a change of mood; unavailable on both routes when a show explicitly pins its moods or another source owns the direction. All show restrictions still apply.',
     inputSchema: z.object({ excludeMoods: z.array(z.string()) }),
     execute: async ({ excludeMoods }) => {
       try {

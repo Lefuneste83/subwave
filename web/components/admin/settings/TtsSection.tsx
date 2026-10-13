@@ -1378,20 +1378,27 @@ export function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch
                         value={form.tts.cloud.model}
                         onChange={v => setForm(f => ({ ...f, tts: { ...f.tts, cloud: { ...f.tts.cloud, model: v } } }))}
                         placeholder="Select a model"
+                        allowCustom
                       />
                     ) : (
-                      <Input
-                        value={form.tts.cloud.model}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                          setForm(f => ({ ...f, tts: { ...f.tts, cloud: { ...f.tts.cloud, model: e.target.value } } }))
-                        }
-                        placeholder={
-                          isCompat
-                            ? 'chatterbox'
-                            : (CLOUD_MODELS[form.tts.cloud.provider as keyof typeof CLOUD_MODELS]?.[0] || 'gpt-4o-mini-tts')
-                        }
-                        className="max-w-[360px]"
-                      />
+                      <>
+                        <Input
+                          list="cloud-tts-models"
+                          value={form.tts.cloud.model}
+                          onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                            setForm(f => ({ ...f, tts: { ...f.tts, cloud: { ...f.tts.cloud, model: e.target.value } } }))
+                          }
+                          placeholder={
+                            isCompat
+                              ? 'chatterbox'
+                              : (CLOUD_MODELS[form.tts.cloud.provider as keyof typeof CLOUD_MODELS]?.[0] || 'gpt-4o-mini-tts')
+                          }
+                          className="max-w-[360px]"
+                        />
+                        <datalist id="cloud-tts-models">
+                          {(CLOUD_MODELS[form.tts.cloud.provider as keyof typeof CLOUD_MODELS] || []).map(model => <option key={model} value={model} />)}
+                        </datalist>
+                      </>
                     )}
                     {ttsDiscovery.loading
                       ? <span className="animate-pulse text-[11px] whitespace-nowrap text-muted">discovering…</span>
