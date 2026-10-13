@@ -19,6 +19,7 @@ const { djObject, djAgent } = await import('../src/llm/sdk.js');
 const { recentCalls } = await import('../src/llm/log.js');
 const { agenticPickerContextWindow } = await import('../src/llm/internal/telemetry/context-window.js');
 const { GenerationCancelledError } = await import('../src/llm/internal/core/generation.js');
+const { resetFailoverStickyForTest } = await import('../src/llm/internal/core/failover.js');
 const previousCache = store.peek();
 const schema = z.object({ name: z.string() });
 const answer = { name: 'backup' };
@@ -32,6 +33,8 @@ after(() => {
 });
 
 function configure(t: TestContext, provider: string, backup = true) {
+  resetFailoverStickyForTest();
+  t.after(() => resetFailoverStickyForTest());
   const defaults = settings.getDefaults();
   store.setCache({ ...defaults, llm: {
     ...defaults.llm, provider, model: 'strategy-primary',
