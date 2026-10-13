@@ -7,7 +7,7 @@ import test from 'node:test';
 import { z } from 'zod';
 import { generateText, APICallError, ToolChoiceViolationError } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
-import { stripThinking, truncationError, extractJson, usageOf, perfOf, warningsOf, budgetMode, isGenerationControlError, isProviderRequestTimeout, isUnreachable, isTransient, isQuotaOrAuthError, isUpstreamOverloaded, isRateLimited, isModelUnavailable, errReason, nearestId, isElevenLabsV3, isFishS21Model, cloudExpressionCueFamily, elevenLabsTtsModelIds, snapV3Stability, modelTolerant, schemaHint, clipText, soulBrief, SOUL_BRIEF_MAX, renderTerminalPrompt, messageText } from '../src/llm/internal/core/pure.js';
+import { stripThinking, truncationError, extractJson, usageOf, perfOf, warningsOf, budgetMode, isGenerationControlError, isProviderRequestTimeout, isUnreachable, isTransient, isQuotaOrAuthError, isUpstreamOverloaded, isRateLimited, isModelUnavailable, isServerExhausted, isConnectionRefused, errReason, nearestId, isElevenLabsV3, isFishS21Model, cloudExpressionCueFamily, elevenLabsTtsModelIds, snapV3Stability, modelTolerant, schemaHint, clipText, soulBrief, SOUL_BRIEF_MAX, renderTerminalPrompt, messageText } from '../src/llm/internal/core/pure.js';
 import { withDeadline, withTransientRetry, retryAfterMs } from '../src/llm/internal/core/retry.js';
 import { reasoningFor, needsToolCallObject, repeatPenaltyApplies, appliedNumCtx, appliedRepeatPenalty, forcedToolChoice, nativeFirstStepToolChoice, thinkingMandatoryModel, discoveryStepsFor, gatedMaxStepsFor, runDiscoverySteps, DISCOVERY_STEPS_MIN, DISCOVERY_STEPS_MAX } from '../src/llm/internal/provider/capabilities.js';
 import { agentPlan } from '../src/llm/internal/strategy/plan.js';
@@ -196,6 +196,67 @@ async function main() {
   await test('a bare 429 with a Retry-After header but no wording → rate-limited', () => {
     assert.equal(isRateLimited({ statusCode: 429, responseHeaders: { 'retry-after': '20' } }), true);
     assert.equal(isRateLimited({ statusCode: 429, responseHeaders: { 'retry-after-ms': '500' } }), true);
+  });
+
+  console.log('isServerExhausted (a 5xx that survived same-leg retries → fail over, no wording needed):');
+  await test('a bare 500 with no wording classifies by status alone (the locca model-off case)', () => {
+    const e: any = { statusCode: 500, message: 'Internal Server Error' };
+    assert.equal(isServerExhausted(e), true);
+    assert.equal(isUnreachable(e), false);        // the host answered — not a network outage
+    assert.equal(isModelUnavailable(e), false);   // no wording to match — which is why this exists
+    assert.equal(isQuotaOrAuthError(e), false);
+    assert.equal(isTransient(e), true);           // still retried on the same leg first
+  });
+  await test('the exhausted statuses are exactly the 5xx subset that same-leg retry burns', () => {
+    for (const status of [500, 502, 503, 504]) assert.equal(isServerExhausted({ statusCode: status }), true);
+    for (const status of [408, 425, 429, 501, 529]) assert.equal(isServerExhausted({ statusCode: status }), false);
+  });
+  await test('a wording-only 5xx in the message classifies when the SDK flattened the status', () => {
+    assert.equal(isServerExhausted({ message: 'HTTP 503: Service Unavailable' }), true);
+    assert.equal(isServerExhausted({ message: 'request failed with 502' }), true);
+    // …but a 4xx mention or a number inside prose does not.
+    assert.equal(isServerExhausted({ message: 'HTTP 429: too many requests' }), false);
+    assert.equal(isServerExhausted({ message: 'processed 5001 tokens in 5 seconds' }), false);
+  });
+  await test('a status code is the whole answer: a 4xx that mentions 500 is a bad request, not an exhausted server', () => {
+    assert.equal(isServerExhausted({ statusCode: 400, message: 'max_tokens must be at most 500' }), false);
+    assert.equal(isServerExhausted({ statusCode: 422, message: 'upstream said 503' }), false);
+    assert.equal(isServerExhausted({ cause: { statusCode: 404 }, message: 'route /v1/502 not found' }), false);
+  });
+  await test('cause.statusCode is unwrapped and SDK retry wrappers survive', () => {
+    assert.equal(isServerExhausted({ cause: { statusCode: 502 } }), true);
+    const inner = { statusCode: 500, message: 'Internal Server Error' };
+    for (const wrapped of [{ lastError: inner }, { errors: [inner] }]) {
+      assert.equal(isServerExhausted(wrapped), true);
+    }
+  });
+  await test('generation control errors and local parse failures never exhaust', () => {
+    const deadline: any = new Error('pick exceeded 45000ms deadline');
+    deadline.name = 'AgentDeadlineError';
+    assert.equal(isServerExhausted(deadline), false);
+    // A model reply that happens to contain "500" is quoted in a SyntaxError's
+    // message — providerMessage blanks it, so neither status nor wording matches.
+    const parse: any = new SyntaxError('Unexpected token \'I\', "Internal Server Error (500)" is not valid JSON');
+    assert.equal(isServerExhausted(parse), false);
+  });
+
+  console.log('isConnectionRefused (a refused/unresolvable host → skip same-leg retries):');
+  await test('ECONNREFUSED and ENOTFOUND classify by code, cause, or message', () => {
+    assert.equal(isConnectionRefused({ code: 'ECONNREFUSED' }), true);
+    assert.equal(isConnectionRefused({ code: 'ENOTFOUND' }), true);
+    assert.equal(isConnectionRefused({ cause: { code: 'ECONNREFUSED' } }), true);
+    assert.equal(isConnectionRefused(new Error('connect ECONNREFUSED 127.0.0.1:11434') as any), true);
+    assert.equal(isConnectionRefused({ lastError: { code: 'ENOTFOUND' } }), true);
+  });
+  await test('temporary failures stay retryable (EAI_AGAIN can clear in a second)', () => {
+    assert.equal(isConnectionRefused({ code: 'EAI_AGAIN' }), false);
+    assert.equal(isConnectionRefused({ code: 'ETIMEDOUT' }), false);
+    assert.equal(isConnectionRefused({ code: 'ECONNRESET' }), false);
+  });
+  await test('a refused host is still transient+unreachable for the failover gate', () => {
+    const e: any = { code: 'ECONNREFUSED', message: 'connect ECONNREFUSED 127.0.0.1:11434' };
+    assert.equal(isTransient(e), true);
+    assert.equal(isUnreachable(e), true);
   });
 
   console.log('isModelUnavailable (model gone for good → fail over, never retry):');
