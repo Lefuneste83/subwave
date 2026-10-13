@@ -24,6 +24,7 @@ import {
 } from './analyze-capability.js';
 import { probeListenerCount } from '../broadcast/listeners.js';
 import type { AcousticsPlan, WorkRequest } from './acoustics-plan.js';
+import type { Facet } from './library-db/facets.js';
 
 // Status events for the panel, mirrored to the `[analyze] …` console line.
 const logEvent = makeEventLogger('analyze');
@@ -371,8 +372,12 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   // tracks, in the plan's order, each with its own request flags.
   const planned = new Map<string, WorkRequest>();
   let planStemsOffline = false;
+  const plannedFacets = new Map<string, Facet[]>();
   if (plan) {
-    for (const item of plan.items) planned.set(item.id, item.request);
+    for (const item of plan.items) {
+      planned.set(item.id, item.request);
+      plannedFacets.set(item.id, item.facets);
+    }
     ids = plan.items.map(i => i.id);
     logEvent(
       'info',
@@ -396,6 +401,18 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
       }
     }
   }
+  // A facet plan on a backend that speaks the facet protocol asks for exactly
+  // the planned facets; an older backend gets the flat request (flags above).
+  const useFacets = !!plan && analyzer.facetsAvailable() === true;
+  if (plan) {
+    logEvent(
+      'info',
+      useFacets
+        ? 'Analyzer speaks the facet protocol'
+        : 'Analyzer predates the facet protocol — planned tracks get a flat analysis',
+    );
+  }
+
   // Pass-wide flags the tail of the pass reports on (sweep, Demucs warning).
   const passStems = plan ? !planStemsOffline && plan.items.some(i => i.request.stems) : stemCache;
   const passVocal = plan ? plan.items.some(i => i.request.vocal) : vocalBackfill;
@@ -494,6 +511,79 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     return trackStemDecision.want ? stemCacheStore.dirFor(id) : undefined;
   };
 
+  // One planned track over the facet protocol: ask for exactly its facets,
+  // write each answer to its own columns + facet row (writeFacetResults).
+  const runFacetTrack = async (
+    id: string,
+    localPath: string | null,
+    localComplete: boolean | undefined,
+    admittedStems?: { dir: string | undefined },
+  ): Promise<TrackWorkResult> => {
+    const facets = plannedFacets.get(id)!;
+    const stems_dir = facets.includes('stems')
+      ? (admittedStems ? admittedStems.dir : allocateStems(id))
+      : undefined;
+    // A tail measured on its own also brings the outro's vocal ranges when the
+    // station uses vocal activity — otherwise the vocal facet turns head-only
+    // and the regular vocal backfill would chase these tracks forever.
+    const tailVocals = facets.includes('tail') && !facets.includes('vocal') && vocalBackfill;
+    const res = await analyzer.analyzeFacets(
+      id,
+      { facets: facets as analyzer.FacetName[], tailVocals, stems_dir, complete: localComplete },
+      localPath ?? undefined,
+    );
+    const source: db.FacetSource =
+      res.source.kind === 'capped-download' ? (res.source.complete === false ? 'capped' : 'url')
+        : localComplete === true ? 'full' : localComplete === false ? 'capped' : 'unknown';
+
+    const w: db.FacetWrite = { source };
+    const failures: string[] = [];
+    let wroteClap = false;
+    for (const f of facets) {
+      const a = res.facets[f as analyzer.FacetName];
+      if (!a) continue;
+      if (a.status === 'failed') { failures.push(db.facetFailure(f, a.reason)); continue; }
+      if (a.status === 'unavailable') continue;
+      const r = a.result;
+      if (f === 'head' && a.status === 'ok') {
+        w.head = {
+          bpm: r.bpm, musicalKey: r.musicalKey, introMs: r.introMs, confidence: r.confidence,
+          sections: r.sections, pace: r.paceCurve, beats: r.beats, bars: r.bars, keyRanges: r.keyRanges,
+          leadSilenceMs: r.leadSilenceMs,
+        };
+      } else if (f === 'loudness') {
+        w.loudness = a.status === 'ok'
+          ? { loudnessLufs: r.loudnessLufs, peakDb: r.peakDb }
+          : { unmeasurable: a.reason ?? 'not-measured' };
+      } else if (f === 'tail') {
+        w.tail = a.status === 'ok'
+          ? { outro: r.outro, tailSilenceMs: r.tailSilenceMs, tailStartMs: r.tailStartMs }
+          : { unmeasurable: a.reason ?? 'tail-not-measured' };
+      } else if (f === 'clap' && a.status === 'ok' && r.audioEmbedding?.length === db.AUDIO_EMBEDDING_DIM) {
+        w.clap = r.audioEmbedding;
+        wroteClap = true;
+      } else if (f === 'vocal' && a.status === 'ok') {
+        w.vocal = { vocalRanges: r.vocalRanges ?? [], tailVocalRanges: a.tailVocalRanges };
+      } else if (f === 'stems' && a.status === 'ok') {
+        w.stems = { attempted: true };
+      }
+    }
+    const answered = facets.filter((f) => {
+      const a = res.facets[f as analyzer.FacetName];
+      return a && a.status !== 'failed' && a.status !== 'unavailable';
+    });
+    // Nothing usable came back: fail the track like a flat analysis would, so
+    // the pass's systemic-failure guard sees it.
+    if (failures.length > 0 && answered.length === 0) throw new Error(failures.join('; '));
+    if (failures.length > 0) w.failed = failures.join('; ');
+    if (wroteClap && !audioMetaStamped) {
+      db.setAudioEmbeddingMeta(audioModelLabel, db.AUDIO_EMBEDDING_DIM);
+      audioMetaStamped = true;
+    }
+    db.writeFacetResults(id, w);
+    return { audioEmbedded: wroteClap, vocalAnalyzed: !!w.vocal };
+  };
+
   const runTrack = async (
     id: string,
     downloadPromise?: Prefetch,
@@ -517,6 +607,9 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
       } else {
         localPath = settled.path;
         localComplete = settled.complete;
+      }
+      if (useFacets && plannedFacets.has(id)) {
+        return await runFacetTrack(id, localPath, localComplete, admittedStems);
       }
       // embed:true lazy-loads CLAP on the backend; omitted when audio is off so
       // it keeps its env-driven default.
