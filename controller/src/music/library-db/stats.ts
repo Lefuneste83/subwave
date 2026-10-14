@@ -182,7 +182,8 @@ function computePickStats(): PickStats {
     byMood[r.mood] = r.n;
   }
   const hasMoodCoverage = Object.keys(byMood).length > 0;
-  const hasEnergyCoverage = !!d.prepare('SELECT 1 FROM tracks WHERE energy IS NOT NULL LIMIT 1').get();
+  // stats().byEnergy counts tagged rows only (#1732); coverage must agree.
+  const hasEnergyCoverage = !!d.prepare(`SELECT 1 FROM tracks WHERE energy IS NOT NULL AND ${SQL_HAS_MOODS} LIMIT 1`).get();
   return { total, mirrorTotal, distinctArtists, withEmbedding, withAudioEmbedding, hasMoodCoverage, hasEnergyCoverage, byMood };
 }
 

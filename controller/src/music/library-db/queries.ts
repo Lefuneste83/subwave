@@ -69,7 +69,9 @@ export function allTaggedIds(): string[] {
 // Ids of one energy bucket, in table order (the same order songsByEnergy uses).
 export function idsByEnergy(energy: EnergyValue): string[] {
   if (!energy) return [];
-  return (requireDb().prepare('SELECT id FROM tracks WHERE energy = ? ORDER BY rowid').all(energy) as Array<{ id: string }>)
+  // Same population as songsByEnergy (tagged rows only, #1732): the ids-only
+  // read must not widen the bucket it replaces on the pick path.
+  return (requireDb().prepare(`SELECT id FROM tracks WHERE energy = ? AND ${SQL_HAS_MOODS} ORDER BY rowid`).all(energy) as Array<{ id: string }>)
     .map((r) => r.id);
 }
 

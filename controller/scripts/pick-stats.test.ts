@@ -145,6 +145,28 @@ test('idsByEnergy matches songsByEnergy, in order', () => {
   assert.equal(library.isBlockedId('t001'), false);
 });
 
+test('an energy on an untagged row counts nowhere, as in stats() (#1732)', async () => {
+  // A row with an energy but no moods is outside the tagged population:
+  // songsByEnergy and stats().byEnergy skip it, so idsByEnergy and
+  // hasEnergyCoverage must skip it too.
+  const d = db.requireDb();
+  d.exec('SAVEPOINT untagged');
+  d.prepare(`UPDATE tracks SET energy = NULL`).run();
+  d.prepare(`UPDATE tracks SET energy = 'high', moods = NULL WHERE id = 't000'`).run();
+  db.invalidateStats();
+  await library.load();
+  assert.deepEqual(library.idsByEnergy('high'), []);
+  assert.deepEqual(library.songsByEnergy('high').map((s: any) => s.id), []);
+  const full = db.stats();
+  db.invalidateStats();
+  assert.equal(db.pickStats().hasEnergyCoverage, Object.keys(full.byEnergy).length > 0);
+  assert.equal(db.pickStats().hasEnergyCoverage, false);
+  d.exec('ROLLBACK TO untagged');
+  d.exec('RELEASE untagged');
+  db.invalidateStats();
+  await library.load();
+});
+
 test.after(() => {
   db.close();
   rmSync(stateDir, { recursive: true, force: true });
