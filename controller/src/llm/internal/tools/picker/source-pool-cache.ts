@@ -16,7 +16,9 @@ export function cacheSourcePool<T extends object>(read: (key: string) => T): (ke
 // Expensive server sources share a wide raw pool across picks, never the eight
 // collected candidates. Short empty TTLs let newly available data recover.
 const sourceCache = new Map<string, { until: number; rows: any[] }>();
-const pending = new Map<string, Promise<any[]>>();
+// Only callers with the same cancellation lifetime may share unfinished I/O.
+// Completed pools remain shared across every caller.
+const pending = new Map<string, Map<AbortSignal | undefined, Promise<any[]>>>();
 let generation = 0;
 export function clearPickerSourceCache(): void {
   generation++;
@@ -24,13 +26,16 @@ export function clearPickerSourceCache(): void {
   pending.clear();
 }
 
-export async function cachedPickerSource(key: string, read: () => Promise<any[]>, availabilityKey?: string | (() => string | undefined)): Promise<any[]> {
+export async function cachedPickerSource(key: string, read: () => Promise<any[]>, availabilityKey?: string | (() => string | undefined), signal?: AbortSignal): Promise<any[]> {
+  signal?.throwIfAborted();
   const hit = sourceCache.get(key);
   if (hit && hit.until > Date.now()) return hit.rows;
-  const inflight = pending.get(key);
+  const callers = pending.get(key) ?? new Map<AbortSignal | undefined, Promise<any[]>>();
+  const inflight = callers.get(signal);
   if (inflight) return inflight;
   const startedGeneration = generation;
   const promise = read().then(rows => {
+    signal?.throwIfAborted();
     if (generation === startedGeneration) {
       const entry = { rows, until: Date.now() + (rows.length ? 30 : 5) * 60_000 };
       const sourceKey = typeof availabilityKey === 'function' ? availabilityKey() : availabilityKey;
@@ -41,8 +46,12 @@ export async function cachedPickerSource(key: string, read: () => Promise<any[]>
       }
     }
     return rows;
-  }).finally(() => { if (pending.get(key) === promise) pending.delete(key); });
-  pending.set(key, promise);
+  }).finally(() => {
+    if (callers.get(signal) === promise) callers.delete(signal);
+    if (!callers.size && pending.get(key) === callers) pending.delete(key);
+  });
+  callers.set(signal, promise);
+  pending.set(key, callers);
   return promise;
 }
 

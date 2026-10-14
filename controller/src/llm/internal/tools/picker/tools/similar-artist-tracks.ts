@@ -29,7 +29,7 @@ export default definePickerTool({
           abortSignal?.throwIfAborted();
           if (neighbours.length && failed === neighbours.length) throw new Error('could not read similar-artist songs from the music server');
           return out;
-        }, () => graphProbed ? 'similar-artists:availability' : undefined);
+        }, () => graphProbed ? 'similar-artists:availability' : undefined, abortSignal);
         if (abortSignal?.aborted) return toolDeadlineResult('similarArtistTracks');
         const out = collect(rows);
         return out.length ? out : emptyResult(rows.length, 'no fresh similar-artist top songs — choose another discovery source');

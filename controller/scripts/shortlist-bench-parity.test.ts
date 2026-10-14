@@ -66,6 +66,9 @@ test('Discovery Bench includes live targeted searches, operator recap and explor
     assert.equal(url.hostname, 'bench-model.invalid');
     const body = JSON.parse(String(init?.body));
     const user = body.messages.find((message: any) => message.role === 'user')?.content || '';
+    if (String(user).startsWith('{"brief"')) {
+      return answer(body.tools[0].function.name, { accepted: JSON.parse(user).proposals.map((proposal: any) => proposal.index) });
+    }
     if (String(user).startsWith('{"topic"')) {
       preparations++;
       return answer(body.tools[0].function.name, { searches: [{ kind: 'library', intent: 'artist', query: 'Portishead', evidence: show.topic }] });

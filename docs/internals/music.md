@@ -20,19 +20,31 @@ settles a close or convincingly comparable possible-flow choice. Shared matches
 (such as rock on both tracks) are compatibility, not a Leanings advantage.
 The compact review exposes `leaningsAdvantages`, reserves evidence slots for
 distinguishing preferences among close/possible-flow candidates, and runs the
-model whenever a viable challenger exists, even without a literal preference
-tag. Descriptive preferences may use a grounded editorial comparison: exact
-quoted facts from both tracks, the active preference and a genuine difference
-are checked in code. This verifies the evidence, not the subjective musical
-judgement. Comparisons and their evidence kind remain in review diagnostics.
+model when a viable challenger exists and either holds an exact advantage or
+some preference is open to interpretation — otherwise no answer could pass the
+validator, so the call is skipped. Descriptive preferences may use a grounded
+editorial comparison: exact quoted facts from both tracks, the active preference
+and a genuine difference are checked in code. Three rules bound it
+(`interpretableAgenticLeanings`, `EDITORIAL_LEANINGS_FIELDS`). The facts must
+describe the music — genre, moods, Last.fm tags, instrumental — never year or
+station history, which differ between almost any two tracks and so ground any
+comparison. A phrase some track in the pool matches literally is one the tags
+can carry, so a replacement claiming it needs the exact match. And while the
+host has any preference, a guest phrase needs an exact match too. This verifies
+the evidence, not the subjective musical judgement. Comparisons and their
+evidence kind remain in review diagnostics.
 Weak-flow matches cannot occupy the reserved evidence slots ahead of a viable challenger. Both routes join stored
 Last.fm tags into private review copies of the baseline and candidates, after
 initial selection; discovery payloads and the picker’s candidate map stay
 unchanged. Including the baseline prevents shared tags earning false credit.
 The private review receives up to 24 tags per track as evidence for interpretation.
-The tags are existing library evidence, not a new Last.fm fetch. Reviews now
-run more often, adding token use and latency; there remains at most one review
-call per pick.
+The tags are existing library evidence, not a new Last.fm fetch. A station
+with descriptive Leanings reviews more often, adding token use and latency;
+there remains at most one review call per pick.
+Both routes bound that review by the operator's existing `llm.agentTimeoutMs`
+(45 seconds by default), covering retries and cancelling generation. A timed-out
+review keeps the preliminary choice, logs its failure and cannot apply a late
+replacement. The general request timeout still applies when it is shorter.
 The final validator independently rejects a basis already supported by the
 baseline, even if the model proposes a swap. Short genres such as jazz,
 rock and soul are valid phrases. Parse each persona independently, including
@@ -142,7 +154,12 @@ The remaining pool sources also use this registry: `frequentAlbums` (scrobble
 history), `moodPlaylistTracks` (curated names), `similarArtistTracks` (artist graph
 then top songs), and `moodWildcard` (three tracks from another covered mood).
 Mood playlists are unavailable whenever a show pins playlists, including a stale
-unresolved anchor (`hasPlaylistAnchor`). The shared availability gate hides
+unresolved anchor (`hasPlaylistAnchor`). Both rules live in
+`music/discovery-policy.ts`. The pool picker, discovery tools and
+auto.m3u coast use `allowsMoodPlaylistDiscovery`: a failed pin cannot borrow
+another show's similarly named mood playlist. Other eligible sources retain
+their existing recovery behavior. This deliberately changes stale-pin pool and
+coast discovery on upgrade. `allowsMoodWildcardDiscovery` hides
 wildcards on both routes when show moods are pinned or an episode, journey or
 strict playlist owns the direction; all resulting tracks still obey strict locks.
 Frequent albums and wildcards use the diversity lane; artist neighbours use
@@ -163,6 +180,9 @@ probe. Unresolved seed names and failed server requests do not set this
 source-wide cooldown. The cache is bounded to 128 entries and shares
 pool invalidation, including
 protection against old in-flight responses after a server change.
+Unfinished reads coalesce only for callers with the same cancellation signal;
+a request and a live pick with different deadlines fetch independently. Completed
+pools remain shared, and cancelled results cannot publish a cooldown.
 
 Energy inside `tracksByMood` is a soft preference: eligible matches lead, then
 other tracks in that same mood fill remaining slots. Recency, artist caps,
@@ -232,9 +252,15 @@ it with the other selection controls. The shared live/bench helper gates before
 any occurrence lookup or preparation, so disabled stations make no extra call.
 When enabled for an active show with a nonblank topic or prepared brief,
 `broadcast/shortlist-search-preparation.ts` uses `djObject` and its normal
-per-provider output strategy for up to three search intents, with a ten-second
-shared deadline across its internal attempts. There are no discovery tools in
-that call; a provider may use its structured-response formatting tool.
+per-provider output strategy for up to three search intents. Structurally grounded
+proposals receive a second, independent semantic verification call against the
+original brief, without the proposer's intent labels. Each call has its own
+ten-second wall-clock deadline covering its internal attempts, so a slow
+generation cannot leave the verification no time. The result is cached for the
+airing, so only its first pick (or a retry) waits on them. Empty proposals make no
+verification call. There are no discovery tools in either call; a provider may
+use its structured-response formatting tool. Verification failure or timeout
+keeps ordinary discovery and uses the existing preparation retry cooldown.
 
 The model classifies musical requests in the brief's language. General
 programming wishes, presenter biographies and exclusions are discarded. Each
@@ -242,8 +268,10 @@ query copies a literal subject (at most 120 characters); evidence copies a full
 sentence (at most 320 characters) from an input field capped to 2,000 characters.
 `shortlist-search.ts` validates sentence quotes with `Intl.Segmenter`, checks the
 literal subject and rejects known presenter identities. It contains no English
-phrase lists for music/presenter classification. Classification itself is the
-model's responsibility; quoted words alone do not prove an interpretation.
+phrase lists for music/presenter classification. Semantic verification checks
+biography and general programming sentences independently of proposed title,
+theme or genre labels. This remains a model judgement; literal grounding is
+enforced by code, and quoted words alone do not prove an interpretation.
 Unsupported, ambiguous or paraphrased subjects are omitted. No persona Leanings,
 raw listener text, track IDs or executable tools enter preparation, and its
 validated empty result is cached normally. The truncated input remains in scope
@@ -252,8 +280,9 @@ for grounding; it is never reconstructed by parsing the outgoing prompt.
 Prepared queries, including successful empty results, persist in
 `state/shortlist-search-preparations.json` under the scheduled/takeover occurrence
 and brief content. Concurrent callers share preparation; later picks and
-restarts reuse it. Versions 1 and 2 are discarded because they used ungrounded or English-only
-evidence checks; the current store version is 3. Changed briefs and new airings prepare
+restarts reuse it. Versions 1 through 3 are discarded because they lacked the
+current independent verification; the current store version is 4.
+Changed briefs and new airings prepare
 separately. Failure
 keeps ordinary discovery, with a five-minute retry delay and at most two
 preparation attempts per input. Expired results are discarded; the store keeps

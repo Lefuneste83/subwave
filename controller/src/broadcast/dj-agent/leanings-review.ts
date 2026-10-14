@@ -352,13 +352,32 @@ export function compactAgenticReviewCandidate(track: any, leaningsOptions: strin
 
 // Subjective interpretation belongs to the reviewer. The controller verifies
 // supplied facts and a difference, not the truth of a musical taste judgement.
-export const EDITORIAL_LEANINGS_FIELDS = ['genre', 'moods', 'lastfm_tags', 'year', 'instrumental', 'unaired', 'play_count', 'last_played_days_ago'] as const;
+// So the facts must describe the music: two tracks almost always differ on
+// year or station history (play_count, unaired, last_played_days_ago), and a
+// "difference" that is always present grounds any comparison at all — a
+// 2015-versus-1972 pair swapped a pick for "strong musicianship" (#1687 review).
+export const EDITORIAL_LEANINGS_FIELDS = ['genre', 'moods', 'lastfm_tags', 'instrumental'] as const;
 export type EditorialLeaningsFact = { field: typeof EDITORIAL_LEANINGS_FIELDS[number]; value: string };
 export type EditorialLeaningsEvidence = {
   baselineFacts: EditorialLeaningsFact[];
   challengerFacts: EditorialLeaningsFact[];
   comparison: string;
 };
+
+// Which preferences an editorial comparison may support. Interpretation is for
+// what tags cannot carry: a phrase some track in this pick's pool matches
+// literally is one the metadata CAN carry, so a replacement claiming it must
+// carry it too — "Favours punk" must not swap onto a track with no punk tag.
+// Host priority holds here in code, not only in the prompt: while the host has
+// any preference, a guest phrase can win only through an exact match.
+export function interpretableAgenticLeanings(sources: AgenticLeaningsOption[], pool: any[]): string[] {
+  const phrases = sources.map(({ phrase }) => phrase);
+  const literal = new Set(pool.flatMap((track) => exactLeaningsMetadataMatches(track, phrases)).map(comparable));
+  const hasHost = sources.some(({ source }) => source === 'host');
+  return sources
+    .filter(({ phrase, source }) => !literal.has(comparable(phrase)) && (source === 'host' || !hasHost))
+    .map(({ phrase }) => phrase);
+}
 
 function quotedFacts(track: any, facts: unknown): EditorialLeaningsFact[] | null {
   if (!Array.isArray(facts) || facts.length < 1 || facts.length > 4) return null;
@@ -398,6 +417,7 @@ export function validateAgenticLeaningsReplacement({
   supportedLeanings,
   baselineSupportedLeanings,
   flowCloseness,
+  interpretableLeanings = [],
   editorialEvidence, baseline, challenger,
 }: {
   musicalReason: unknown;
@@ -407,6 +427,9 @@ export function validateAgenticLeaningsReplacement({
   supportedLeanings: string[];
   baselineSupportedLeanings: string[];
   flowCloseness: unknown;
+  // interpretableAgenticLeanings(); absent means none, so a caller that does
+  // not compute it gets exact matching only.
+  interpretableLeanings?: string[];
   editorialEvidence?: unknown; baseline?: any; challenger?: any;
 }): { valid: true; basis: string; evidenceKind: 'metadata-match' | 'editorial-comparison' } | { valid: false; reason: AgenticLeaningsReviewRejection } {
   const rawBasis = typeof leaningsBasis === 'string' ? leaningsBasis.trim().replace(/\s+/g, ' ') : '';
@@ -419,8 +442,12 @@ export function validateAgenticLeaningsReplacement({
     return { valid: false, reason: 'basis-not-in-leanings' };
   }
   const exact = supportedLeanings.some((option) => comparable(option) === basis);
-  if (!exact && !groundedEditorialComparison(editorialEvidence, baseline, challenger, basis)) {
-    return { valid: false, reason: editorialEvidence ? 'invalid-editorial-evidence' : 'basis-not-supported-by-candidate' };
+  if (!exact) {
+    const interpretable = interpretableLeanings.some((option) => comparable(option) === basis);
+    if (!interpretable || !editorialEvidence) return { valid: false, reason: 'basis-not-supported-by-candidate' };
+    if (!groundedEditorialComparison(editorialEvidence, baseline, challenger, basis)) {
+      return { valid: false, reason: 'invalid-editorial-evidence' };
+    }
   }
   // A shared match proves compatibility, not that a preference changed the
   // choice. Enforce this independently of the model's prompt and answer.

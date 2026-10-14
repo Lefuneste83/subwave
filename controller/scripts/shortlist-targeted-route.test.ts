@@ -28,6 +28,8 @@ const prohibited = [
   { id: 'recent', title: 'Recent', artist: 'Recent', genre: 'Rock', duration: 240 },
 ];
 let preparations = 0;
+let verifications = 0;
+let acceptSearches = true;
 let preparedAnswer = '{"searches":[{"kind":"library","query":"Portishead","intent":"artist","evidence":"Explore Portishead tracks"}]}';
 const preparationInputs: any[] = [];
 const selectionInputs: any[] = [];
@@ -60,6 +62,15 @@ before(async () => {
     assert.equal(url.hostname, 'targeted-model.invalid', 'no live network requests');
     const body = JSON.parse(String(init?.body));
     const user = body.messages.find((message: any) => message.role === 'user')?.content;
+    if (String(user).startsWith('{"brief"')) {
+      verifications++;
+      assert.doesNotMatch(String(user), /"intent"/, 'verification cannot inherit the proposer intent labels');
+      const accepted = acceptSearches ? JSON.parse(user).proposals.map((proposal: any) => proposal.index) : [];
+      return Response.json({ id: 'verification', object: 'chat.completion', created: 0, model: 'targeted-test',
+        choices: [{ index: 0, finish_reason: 'tool_calls', message: { role: 'assistant', content: null,
+          tool_calls: [{ id: 'verify', type: 'function', function: { name: body.tools[0].function.name, arguments: JSON.stringify({ accepted }) } }],
+        } }], usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } });
+    }
     if (String(user).startsWith('{"topic"')) {
       preparations++; preparationInputs.push(body);
       return Response.json({ id: 'preparation', object: 'chat.completion', created: 0, model: 'targeted-test',
@@ -107,6 +118,7 @@ test('default-off preparation makes no extra model call for a show with a topic'
   await settings.update({ llm: { shortlistSearchPreparation: false } });
   await pick();
   assert.equal(preparations, 0);
+  assert.equal(verifications, 0);
   assert.equal(selectionInputs.length, 1);
   assert.ok(!selectionInputs[0].messages.some((message: any) => String(message.content).startsWith('{"topic"')));
   await settings.update({ llm: { shortlistSearchPreparation: true } });
@@ -116,6 +128,7 @@ test('default-off preparation makes no extra model call for a show with a topic'
 test('one tool-free preparation supplies controller searches across picks without altering speech input', async () => {
   await pick(); await pick();
   assert.equal(preparations, 1);
+  assert.equal(verifications, 1, 'verification is reused on later picks');
   assert.equal(preparationInputs[0].tools.length, 1, 'the provider gets only its structured formatting tool');
   assert.equal(preparationInputs[0].tools[0].function.name, 'emit');
   assert.equal(selectionInputs.length, 2);
@@ -150,16 +163,21 @@ test('real targeted discovery preserves strict locks, recency, exclusions and du
 test('a generic presenter biography keeps ordinary discovery even if preparation invents searches', async () => {
   show.topic = readFileSync(new URL('./fixtures/shortlist-search/presenter-show-brief.md', import.meta.url), 'utf8');
   await settings.update({ shows: [show] });
+  const evidence = [...new Intl.Segmenter(undefined, { granularity: 'sentence' }).segment(show.topic)]
+    .find(part => part.segment.includes('overlooked album track'))!.segment.trim();
   preparedAnswer = JSON.stringify({ searches: [
-    { kind: 'theme', intent: 'theme', query: 'everyday life', evidence: "The working day has settled in, the kettle's probably been on once already" },
-    { kind: 'artist', intent: 'presenter', query: 'Taylor Example', evidence: 'Taylor Example is here to keep you company with two hours of great music and good conversation.' },
-    { kind: 'library', intent: 'general', query: 'overlooked album track', evidence: "the next he'll quietly champion an overlooked album track" },
+    { kind: 'library', intent: 'title', query: 'overlooked album track', evidence },
+    { kind: 'library', intent: 'genre', query: 'overlooked album track', evidence },
+    { kind: 'theme', intent: 'theme', query: 'overlooked album track', evidence },
   ] });
+  acceptSearches = false;
   const before = preparations;
+  const beforeVerification = verifications;
   const queryStart = queries.length;
   const pickStart = selectionInputs.length;
   await pick(); await pick();
   assert.equal(preparations, before + 1, 'empty grounded results are reused for the airing');
+  assert.equal(verifications, beforeVerification + 1, 'misleading title/genre/theme labels receive an independent check once');
   assert.ok(queries.slice(queryStart).every(query => !/Taylor|everyday life|overlooked/i.test(query)));
   for (const body of selectionInputs.slice(pickStart)) {
     const user = body.messages.find((message: any) => message.role === 'user').content;

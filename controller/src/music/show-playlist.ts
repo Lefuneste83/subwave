@@ -13,14 +13,6 @@ export type PlaylistPool = {
   names: string[];   // resolved playlist names, for logging / debug
 };
 
-// #642: configured or resolved show playlists own the curated-playlist lane,
-// including stale pins. All discovery routes use this policy.
-export function allowsMoodPlaylistDiscovery({ hasPlaylistAnchor = false, playlistTracks, playlistLock }: {
-  hasPlaylistAnchor?: boolean; playlistTracks?: readonly unknown[] | null; playlistLock?: ReadonlySet<string> | null;
-}): boolean {
-  return !hasPlaylistAnchor && !playlistTracks?.length && !playlistLock;
-}
-
 // Keeps the first occurrence of each id or normalised title|artist identity;
 // entries without an id are dropped. Pure, the unit-test seam.
 export function mergePlaylistTracks(lists: any[][]): any[] {

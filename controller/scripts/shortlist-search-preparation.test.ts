@@ -6,7 +6,15 @@ import test, { after } from 'node:test';
 
 const root = await mkdtemp(join(tmpdir(), 'subwave-search-preparation-'));
 process.env.STATE_DIR = root;
-const { createShortlistSearchPreparation, shortlistSearchPrompt } = await import('../src/broadcast/shortlist-search-preparation.js');
+const { createShortlistSearchPreparation: createPreparation, shortlistSearchPrompt } = await import('../src/broadcast/shortlist-search-preparation.js');
+// The synthetic verifier approves only the structurally grounded proposals.
+// Semantic rejection and deadline behavior have dedicated cases below.
+function createShortlistSearchPreparation(deps: Omit<Parameters<typeof createPreparation>[0], 'verify'>
+  & Partial<Pick<Parameters<typeof createPreparation>[0], 'verify'>>) {
+  return createPreparation({ ...deps, verify: deps.verify ?? (async prompt => ({
+    accepted: JSON.parse(prompt).proposals.map((proposal: { index: number }) => proposal.index),
+  })) });
+}
 const { groundShortlistSearches, shortlistSearchCalls } = await import('../src/music/shortlist-search.js');
 const { planShortlistSources } = await import('../src/music/shortlist.js');
 const { pickerScope } = await import('../src/llm/tools.js');
@@ -100,7 +108,7 @@ test('pre-grounding cache records are discarded even when their identity matches
     generate: async () => { calls++; return { searches: [] }; },
   }).ensure(brief), []);
   assert.equal(calls, 1);
-  assert.equal(JSON.parse(await readFile(file, 'utf8')).version, 3);
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).version, 4);
 });
 
 test('concurrent calls, later picks and a restarted owner reuse one durable preparation', async () => {
@@ -245,4 +253,83 @@ test('grounding and cache identity use the exact input snapshot sent to the mode
   finish(response);
   assert.deepEqual(await running, [{ kind: 'theme', query: 'coming home' }]);
   assert.deepEqual(await owner.ensure(brief), [{ kind: 'theme', query: 'coming home' }]);
+});
+
+test('an independent verifier rejects whole biography sentences despite title, genre and theme labels', async () => {
+  const evidence = sentence(presenterBrief, 'overlooked');
+  let verifications = 0;
+  const file = join(root, 'mislabelled-biography.json');
+  const deps = {
+    file, now: () => base,
+    generate: async () => ({ searches: [
+      { kind: 'library', intent: 'title', query: 'overlooked album track', evidence },
+      { kind: 'library', intent: 'genre', query: 'overlooked album track', evidence },
+      { kind: 'theme', intent: 'theme', query: 'overlooked album track', evidence },
+    ] }),
+    verify: async (prompt: string) => {
+      verifications++;
+      const input = JSON.parse(prompt);
+      assert.equal(input.brief.topic, presenterBrief.trim());
+      assert.equal(input.proposals.length, 3, 'full quoted sentences pass the literal check');
+      assert.doesNotMatch(prompt, /"intent"/, 'verification cannot inherit the proposed labels');
+      return { accepted: [] };
+    },
+  };
+  const input = { ...brief, topic: presenterBrief, presenterNames: ['Taylor Example'] };
+  assert.deepEqual(await createPreparation(deps).ensure(input), []);
+  assert.deepEqual(await createPreparation(deps).ensure(input), []);
+  assert.equal(verifications, 1, 'verified empty results survive a restart');
+});
+
+test('verification fails closed on an invalid verdict and shares the preparation cooldown', async () => {
+  for (const [i, verdict] of [{ accepted: [2] }, { accepted: [0], extra: true }, null].entries()) {
+    const file = join(root, `bad-verdict-${i}.json`);
+    const owner = createPreparation({ file, now: () => base, generate: async () => response, verify: async () => verdict });
+    assert.deepEqual(await owner.ensure(brief), []);
+    assert.equal(JSON.parse(await readFile(file, 'utf8')).records[0].status, 'failed');
+  }
+});
+
+test('verification has its own deadline and a late verdict cannot publish searches', async () => {
+  let generationSignal: AbortSignal | undefined;
+  let verificationSignal: AbortSignal | undefined;
+  let finish!: (verdict: unknown) => void;
+  const file = join(root, 'verification-deadline.json');
+  const owner = createPreparation({ file, now: () => base, timeoutMs: 40,
+    generate: async (_prompt, signal) => { generationSignal = signal; return response; },
+    verify: (_prompt, signal) => { verificationSignal = signal; return new Promise(resolve => { finish = resolve; }); },
+  });
+  assert.deepEqual(await owner.ensure(brief), []);
+  assert.notEqual(generationSignal, verificationSignal);
+  assert.equal(generationSignal?.aborted, false, 'a finished generation is not cancelled by the verification deadline');
+  assert.equal(verificationSignal?.aborted, true);
+  finish({ accepted: [0] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).records[0].status, 'failed');
+  assert.deepEqual(await owner.ensure(brief), []);
+});
+
+test('a slow generation does not spend the verification deadline', async () => {
+  const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  const owner = createPreparation({ file: join(root, 'separate-deadlines.json'), now: () => base, timeoutMs: 200,
+    generate: async () => { await wait(120); return response; },
+    verify: async () => { await wait(120); return { accepted: [0] }; },
+  });
+  assert.deepEqual(await owner.ensure(brief), [{ kind: 'theme', query: 'coming home' }],
+    'each call fits its own deadline though together they exceed one');
+});
+
+test('empty preparation skips verification and older unverified records are discarded', async () => {
+  const file = join(root, 'unverified-upgrade.json');
+  let calls = 0;
+  const deps = { file, now: () => base, generate: async () => { calls++; return { searches: [] }; },
+    verify: async () => { throw new Error('empty proposals must never be verified'); } };
+  await createPreparation(deps).ensure(brief);
+  const previous = JSON.parse(await readFile(file, 'utf8'));
+  previous.version = 3;
+  previous.records[0].searches = [{ kind: 'theme', query: 'biography' }];
+  await writeFile(file, JSON.stringify(previous));
+  assert.deepEqual(await createPreparation(deps).ensure(brief), []);
+  assert.equal(calls, 2);
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).version, 4);
 });

@@ -13,6 +13,7 @@
 // after the guards and the queue's answer, so it stays with the caller
 // (resolveAgenticLeaningsUsage after enqueue).
 
+import { withDeadline } from '../../llm/sdk.js';
 import {
   agenticLeaningsReviewPrompt,
   agenticLeaningsReviewSchema,
@@ -27,6 +28,7 @@ import {
   agenticTrackRef,
   compactAgenticReviewCandidate,
   eligibleAgenticLeanings,
+  interpretableAgenticLeanings,
   selectAgenticReviewCandidates,
   validateAgenticLeaningsReplacement,
   type PickResolution,
@@ -53,6 +55,7 @@ export type LeaningsReviewCall = (request: {
   temperature: number;
   kind: LeaningsRoute['kind'];
   telemetry: Record<string, unknown>;
+  signal?: AbortSignal;
 }) => Promise<any>;
 
 export type LeaningsPassResult = {
@@ -74,6 +77,7 @@ export async function runLeaningsReview({
   resolution,
   route,
   review,
+  reviewTimeoutMs,
   log,
   logEvent,
 }: {
@@ -88,6 +92,8 @@ export async function runLeaningsReview({
   resolution: PickResolution;
   route: LeaningsRoute;
   review: LeaningsReviewCall;
+  // The caller's agentDeadline(): one wall clock across the call's own attempts.
+  reviewTimeoutMs: number;
   log: (line: string) => void;
   logEvent: (event: string, fields: Record<string, unknown>) => void;
 }): Promise<LeaningsPassResult> {
@@ -120,17 +126,20 @@ export async function runLeaningsReview({
   };
   const compactCandidates = reviewCandidates.map((candidate) => compactAgenticReviewCandidate(candidate, leaningsOptions, reviewBaseline));
   const baselineSupportedLeanings = (compactCandidates[0].leaningsMatches ?? []) as string[];
-  // A descriptive preference need not occur literally in tags. Let the model
-  // interpret it whenever a viable challenger exists; matches remain hints,
-  // not a condition for making the review call.
-  if (!compactCandidates.slice(1).some(candidate =>
-    candidate.flowCloseness === 'close' || candidate.flowCloseness === 'possible')) {
+  // A descriptive preference need not occur literally in tags, so the model may
+  // interpret one against a viable challenger. Absent both an interpretable
+  // preference and a viable exact advantage, no answer could pass the
+  // validator — skip the call rather than spend it on a guaranteed keep.
+  const interpretableLeanings = interpretableAgenticLeanings(leaningsSources, [reviewBaseline, ...candidates]);
+  const viable = compactCandidates.slice(1).filter(candidate =>
+    candidate.flowCloseness === 'close' || candidate.flowCloseness === 'possible');
+  if (!viable.length || (!interpretableLeanings.length && !viable.some(candidate => candidate.leaningsAdvantages))) {
     resolution.leaningsReview = { outcome: 'not-run', replacementId: null, ...common };
     return { song, object, reviewed: false };
   }
   try {
     const compactById = new Map(compactCandidates.map((candidate) => [String(candidate.id), candidate]));
-    const answer: any = await review({
+    const answer: any = await withDeadline(reviewTimeoutMs, route.kind, async signal => review({
       system: agenticLeaningsReviewSystem(),
       prompt: agenticLeaningsReviewPrompt({
         baseline: compactCandidates[0],
@@ -142,13 +151,15 @@ export async function runLeaningsReview({
           djName,
           hostLeaningsOptions: leaningsSources.filter(({ source }) => source === 'host').map(({ phrase }) => phrase),
           guestLeaningsOptions: leaningsSources.filter(({ source }) => source === 'guest').map(({ phrase }) => phrase),
+          interpretableLeaningsOptions: interpretableLeanings,
         },
       }),
       schema: agenticLeaningsReviewSchema(common.candidateIds, leaningsOptions, preliminaryId),
       temperature: 0,
       kind: route.kind,
       telemetry: route.telemetry,
-    });
+      signal,
+    }));
     const reviewedSelectedId = answer.selectedId;
     const claimedBasis = answer.leaningsBasis === NO_AGENTIC_LEANINGS_INFLUENCE ? null : answer.leaningsBasis;
     if (reviewedSelectedId === preliminaryId) {
@@ -175,6 +186,7 @@ export async function runLeaningsReview({
       supportedLeanings: Array.isArray(compactReplacement?.leaningsMatches) ? compactReplacement.leaningsMatches as string[] : [],
       baselineSupportedLeanings,
       flowCloseness: compactReplacement?.flowCloseness,
+      interpretableLeanings,
       editorialEvidence: answer.editorialEvidence,
       baseline: compactCandidates[0], challenger: compactReplacement,
     });

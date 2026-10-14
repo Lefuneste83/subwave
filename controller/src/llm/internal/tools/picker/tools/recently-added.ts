@@ -14,7 +14,7 @@ export default definePickerTool({
     execute: async (_input, { abortSignal }: { abortSignal?: AbortSignal }) => {
       try {
         const rows = await cachedPickerSource('recent-albums', async () =>
-          albumSourcePool(await subsonic.getRecentlyAddedAlbums({ size: 12, signal: abortSignal }), abortSignal));
+          albumSourcePool(await subsonic.getRecentlyAddedAlbums({ size: 12, signal: abortSignal }), abortSignal), undefined, abortSignal);
         if (abortSignal?.aborted) return toolDeadlineResult('recentlyAdded');
         const out = collect(rows);
         return out.length ? out : emptyResult(rows.length, 'no fresh recently-added tracks — choose another discovery source');

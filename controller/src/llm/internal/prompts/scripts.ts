@@ -461,7 +461,7 @@ export async function generateLink(args: any) {
     topP: 0.92,
     repeatPenalty: 1.2,
     seed: randomSeed(),
-    kind: 'generatePersonaLink',
+    kind: 'generateLink',
   });
 }
 

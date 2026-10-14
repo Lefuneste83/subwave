@@ -18,7 +18,7 @@ export default definePickerTool({
           let albums = await subsonic.getFrequentAlbums({ size: 12, offset, signal: abortSignal });
           if (!albums.length && offset) albums = await subsonic.getFrequentAlbums({ size: 12, signal: abortSignal });
           return albumSourcePool(albums, abortSignal);
-        });
+        }, undefined, abortSignal);
         if (abortSignal?.aborted) return toolDeadlineResult('frequentAlbums');
         const out = collect(rows);
         return out.length ? out : emptyResult(rows.length, 'no fresh tracks from frequently played albums — choose another discovery source');

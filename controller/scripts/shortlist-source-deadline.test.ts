@@ -10,6 +10,7 @@ process.env.STATE_DIR = root;
 process.env.NAVIDROME_URL = 'http://deadline-library.invalid';
 const library = await import('../src/music/library.js');
 const { buildPickerTools } = await import('../src/llm/tools.js');
+const { clearPickerSourceCache } = await import('../src/llm/internal/tools/picker/source-pool-cache.js');
 const { executeShortlistPlan } = await import('../src/music/shortlist.js');
 await library.load();
 const realFetch = globalThis.fetch;
@@ -49,4 +50,39 @@ test('Shortlist supplies the registry deadline signal and continues after a time
     assert.deepEqual(result.candidates.map(track => track.id), ['finished']);
     assert.ok(result.elapsedMs < 1000, `discovery hung for ${result.elapsedMs}ms`);
   } finally { clearInterval(keepAlive); }
+});
+
+test('a request discovery read survives the concurrent live pick deadline', async () => {
+  clearPickerSourceCache();
+  const reads: Array<{ signal: AbortSignal; finish: (response: Response) => void }> = [];
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    assert.equal(url.hostname, 'deadline-library.invalid');
+    if (url.pathname.endsWith('/getAlbumList2')) {
+      const signal = init!.signal as AbortSignal;
+      return new Promise<Response>((resolve, reject) => {
+        reads.push({ signal, finish: resolve });
+        signal.addEventListener('abort', () => reject(new Error('cancelled pick read')), { once: true });
+      });
+    }
+    assert.ok(url.pathname.endsWith('/getAlbum'));
+    return Response.json({ 'subsonic-response': { status: 'ok', version: '1.16.1', album: { song: [
+      { id: 'request-survives', title: 'Request Survives', artist: 'Available Artist', duration: 240 },
+    ] } } });
+  };
+  const pick = new AbortController();
+  const request = new AbortController();
+  const options = { toolCallId: 'shared', messages: [], context: undefined };
+  const pickRead = buildPickerTools().tools.recentlyAdded.execute!({}, { ...options, abortSignal: pick.signal });
+  const requestRead = buildPickerTools().tools.recentlyAdded.execute!({}, { ...options, abortSignal: request.signal });
+  for (let wait = 0; wait < 100 && reads.length < 2; wait++) await new Promise(resolve => setTimeout(resolve, 1));
+  assert.equal(reads.length, 2, 'the registry must forward independent caller lifetimes to the source cache');
+  pick.abort(new Error('pick deadline'));
+  const pickResult = await pickRead as any;
+  assert.ok(pickResult.error);
+  assert.equal(reads[0].signal.aborted, true);
+  assert.equal(reads[1].signal.aborted, false);
+  reads[1].finish(Response.json({ 'subsonic-response': { status: 'ok', version: '1.16.1', albumList2: { album: [{ id: 'available' }] } } }));
+  const requestResult = await requestRead as any[];
+  assert.deepEqual(requestResult.map(track => track.id), ['request-survives']);
 });

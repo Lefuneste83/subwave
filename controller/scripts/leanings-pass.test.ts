@@ -49,6 +49,7 @@ async function run(answer: unknown, kind: LeaningsRoute['kind'] = 'djAgentLeanin
     context: { link: 'No link airs for this pick.', recentTransitions: ['washout'] },
     resolution,
     route: route(kind),
+    reviewTimeoutMs: 45_000,
     review: async (request) => {
       prompts.push(request.prompt);
       assert.equal(request.kind, kind);
@@ -336,5 +337,120 @@ for (const kind of ['djAgentLeaningsReview', 'djShortlistLeaningsReview'] as con
     assert.equal(prompts.length, 1);
     assert.equal(result.song, baseline);
     assert.equal(resolution.leaningsReview?.outcome, 'kept');
+  });
+}
+
+// #1687 review: an interpreted comparison must rest on facts about the music,
+// on a preference tags cannot carry, and on the host's preferences while the
+// host has any. Each case below swapped the pick before the validator said so.
+for (const kind of ['djAgentLeaningsReview', 'djShortlistLeaningsReview'] as const) {
+  const musicianship = { host: 'Favour strong musicianship.', guest: null, promptValue: 'Host: Favour strong musicianship.' };
+  for (const [field, before, after] of [['year', 1972, 2015], ['play_count', 12, 0], ['unaired', false, true], ['last_played_days_ago', 3, 90]] as const) {
+    test(`${kind}: ${field} is not musical evidence for an interpreted preference`, async () => {
+      const base = { ...baseline, [field]: before };
+      const challenger = { ...synth, [field]: after };
+      const { result, resolution } = await run({
+        selectedId: challenger.id, leaningsBasis: 'strong musicianship', musicalReason: goodReason, transition: null,
+        editorialEvidence: {
+          baselineFacts: [{ field, value: String(before) }],
+          challengerFacts: [{ field, value: String(after) }],
+          comparison: `strong musicianship: ${after} against ${before} gives this preference a clearer basis than the baseline.`,
+        },
+      }, kind, { song: base, seen: new Map([base, challenger].map(track => [track.id, track])), editorialLeanings: musicianship });
+      assert.equal(result.song, base);
+      assert.equal(resolution.leaningsReview?.rejectionReason, 'invalid-editorial-evidence');
+    });
+  }
+
+  test(`${kind}: a preference another track carries literally cannot be interpreted onto one without it`, async () => {
+    const rock = { ...baseline, genre: 'Hard Rock' };
+    const adjacent = { ...plain, genre: 'Rock', lastfm_tags: ['post-hardcore'] };
+    const punk = { ...synth, genre: 'Rock, Punk' };
+    const { result, resolution, prompts } = await run({
+      selectedId: adjacent.id, leaningsBasis: 'punk', musicalReason: goodReason, transition: null,
+      editorialEvidence: {
+        baselineFacts: [{ field: 'genre', value: 'Hard Rock' }],
+        challengerFacts: [{ field: 'lastfm_tags', value: 'post-hardcore' }],
+        comparison: 'punk: post-hardcore grew straight out of that scene, where Hard Rock sits further from the lineage.',
+      },
+    }, kind, {
+      song: rock, seen: new Map([rock, adjacent, punk].map(track => [track.id, track])),
+      editorialLeanings: { host: 'Favour punk.', guest: null, promptValue: 'Host: Favour punk.' },
+    });
+    assert.equal(prompts.length, 1, 'the real punk track is a viable advantage');
+    assert.deepEqual(JSON.parse(prompts[0].split('\n\n')[0]).context.interpretableLeaningsOptions, []);
+    assert.equal(result.song, rock);
+    assert.equal(resolution.leaningsReview?.rejectionReason, 'basis-not-supported-by-candidate');
+  });
+
+  const voices = { ...synth, lastfm_tags: ['soulful vocals'] };
+  const voicesAnswer = {
+    selectedId: voices.id, leaningsBasis: 'distinctive voices', musicalReason: goodReason, transition: null,
+    editorialEvidence: {
+      baselineFacts: [{ field: 'genre', value: 'Electronic' }],
+      challengerFacts: [{ field: 'lastfm_tags', value: 'soulful vocals' }],
+      comparison: 'distinctive voices: soulful vocals name the voice itself, where Electronic says nothing about one.',
+    },
+  };
+  const guest = { guest: { name: 'Guest DJ' }, musicalLeanings: 'Favours distinctive voices.' };
+
+  test(`${kind}: a guest preference cannot win by interpretation while the host has preferences`, async () => {
+    const { result, resolution, prompts } = await run(voicesAnswer, kind, {
+      seen: new Map([baseline, voices].map(track => [track.id, track])),
+      editorialLeanings: { host: 'Favour strong musicianship.', guest, promptValue: 'Host: Favour strong musicianship. Guest DJ: Favours distinctive voices.' },
+    });
+    assert.equal(prompts.length, 1, "the host's descriptive preference still earns a review");
+    assert.deepEqual(JSON.parse(prompts[0].split('\n\n')[0]).context.interpretableLeaningsOptions, ['strong musicianship']);
+    assert.equal(result.song, baseline);
+    assert.equal(resolution.leaningsReview?.rejectionReason, 'basis-not-supported-by-candidate');
+  });
+
+  test(`${kind}: with no host preferences, a guest's interpretation can settle the choice`, async () => {
+    const { result, resolution } = await run(voicesAnswer, kind, {
+      seen: new Map([baseline, voices].map(track => [track.id, track])),
+      editorialLeanings: { host: null, guest, promptValue: 'Guest DJ: Favours distinctive voices.' },
+    });
+    assert.equal(result.song, voices);
+    assert.equal(resolution.leaningsReview?.evidenceKind, 'editorial-comparison');
+    assert.equal(resolution.leaningsReview?.leaningsSource, 'guest');
+  });
+
+  test(`${kind}: tag-only Leanings with no viable advantage make no review call`, async () => {
+    const rock = { ...baseline, genre: 'Hard Rock' };
+    const peer = { ...plain, genre: 'Alternative Rock' };
+    const { result, resolution, prompts } = await run(null, kind, {
+      song: rock, seen: new Map([rock, peer].map(track => [track.id, track])),
+      editorialLeanings: { host: 'Favour rock.', guest: null, promptValue: 'Host: Favour rock.' },
+    });
+    assert.equal(prompts.length, 0, 'no answer could pass the validator, so the call is not made');
+    assert.equal(result.reviewed, false);
+    assert.equal(resolution.leaningsReview?.outcome, 'not-run');
+  });
+}
+
+for (const kind of ['djAgentLeaningsReview', 'djShortlistLeaningsReview'] as const) {
+  test(`${kind}: a hung review releases the pick, cancels generation and ignores a late answer`, async () => {
+    let finish!: (answer: unknown) => void;
+    let received: AbortSignal | undefined;
+    let calls = 0;
+    const { result, resolution, logLines, events } = await run(null, kind, {
+      reviewTimeoutMs: 25,
+      review: (request: { signal?: AbortSignal }) => {
+        calls++;
+        received = request.signal;
+        return new Promise(resolve => { finish = resolve; });
+      },
+    });
+    assert.equal(received?.aborted, true);
+    assert.equal(result.song, baseline);
+    assert.equal(result.object.reason, 'baseline reason');
+    assert.equal(result.reviewed, false);
+    assert.equal(resolution.leaningsReview?.outcome, 'failed');
+    assert.equal(events[0][0], route(kind).failureEvent);
+    assert.match(logLines[0], /failed.*using the baseline/);
+    finish({ selectedId: 'synth', leaningsBasis: 'synth-pop', musicalReason: goodReason });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(resolution.leaningsReview?.outcome, 'failed', 'late results cannot replace the settled baseline');
+    assert.equal(calls, 1, 'timeout never asks for another review');
   });
 }

@@ -12,6 +12,7 @@ import { filterPickerCandidates } from './recency.js';
 import { type YearRange, hasEraBound } from './show-filter.js';
 import { shortlistOffers, type CandidateOffers } from './shortlist-offers.js';
 import { shortlistSearchCalls, type ShortlistSearch } from './shortlist-search.js';
+import { allowsMoodWildcardDiscovery } from './discovery-policy.js';
 
 export type ShortlistSourceCall = {
   source: string;
@@ -135,7 +136,9 @@ export function planShortlistSources(
     ? []
     : rotated(
       ['deepCuts', 'starredSongs', 'recentlyAdded', 'randomSongs', 'frequentAlbums',
-        ...(!strings(context.moods).length && !context.scope.moodLock?.length && moods.length && !ownsDirection ? ['moodWildcard'] : [])],
+        ...(moods.length && allowsMoodWildcardDiscovery({ ...context.scope,
+          hasPinnedMoods: context.scope.hasPinnedMoods || !!strings(context.moods).length,
+        }) ? ['moodWildcard'] : [])],
       Math.floor(offset / 3),
     )
   ).filter((source) => availableSources.has(source));

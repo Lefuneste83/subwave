@@ -132,6 +132,9 @@ test('all added sources rotate within the existing budget; pinned moods suppress
     // alias with the six-source autonomous diversity lane.
     planShortlistSources({ ...context, discoveryPasses: 1 }, available).forEach(call => found.add(call.source));
     assert.ok(!planShortlistSources({ ...context, moods: ['calm'] }, available).some(call => call.source === 'moodWildcard'));
+    for (const pinned of [{ hasPinnedMoods: true }, { moodLock: ['calm'] }, { playlistLock: new Set(['p']) }, { audioWaypoint: [1] }]) {
+      assert.ok(!planShortlistSources({ ...context, scope: pickerScope(pinned) }, available).some(call => call.source === 'moodWildcard'));
+    }
     const scope = pickerScope({ hasPlaylistAnchor: true });
     const gated = new Set([...available].filter(source => source in buildPickerTools(scope).tools));
     assert.ok(!planShortlistSources({ ...context, scope }, gated).some(call => call.source === 'moodPlaylistTracks'));
