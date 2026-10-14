@@ -18,6 +18,7 @@ const settings = await import('../src/settings.js');
 await settings.load();
 const remoteTts = await import('../src/audio/remoteTts.js');
 const jingles = await import('../src/broadcast/jingles.js');
+const tts = await import('../src/audio/tts.js');
 const { jingleCreateBodySchema } = await import('../src/schemas/imaging-server.js');
 
 const sent: Array<{ voice: unknown; text: unknown }> = [];
@@ -47,10 +48,14 @@ test('a jingle with a voice slot is read in that voice, and without one in the s
 test('a chosen voice changes nothing else about how a jingle is spoken', async () => {
   sent.length = 0;
   const text = 'こんにちは。 Hello.';
-  await jingles.create(text, { tts: { engine: 'remote', voice: 'ident-voice', cloudProvider: 'openai', gainDb: 0, speed: 1 } });
+  const slot = { engine: 'remote', voice: 'ident-voice', cloudProvider: 'openai', gainDb: 6, speed: 2 };
+  await jingles.create(text, { tts: slot });
   await jingles.create(text);
   assert.equal(sent[0].text, sent[1].text);
   assert.match(String(sent[0].text), /こんにちは/);
+  // The slot's own pace and trim are a persona's dials, not a jingle's.
+  assert.equal(tts.speechPaceScale('jingle', { tts: slot }), tts.speechPaceScale('jingle'));
+  assert.equal(tts.voiceGainDb('jingle', { tts: slot }), tts.voiceGainDb('jingle'));
 });
 
 test('the create body takes no slot, the inherit slot, and refuses a bad one at tts', () => {

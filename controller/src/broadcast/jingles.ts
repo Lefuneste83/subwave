@@ -104,6 +104,20 @@ export async function create(text: string, { builtin = false, tts }: { builtin?:
 
   await speak(text, { kind: 'jingle', outPath, persona: tts ? { tts } : undefined });
 
+  // Levelled like an uploaded jingle. A TTS stinger renders well under the
+  // normalised tracks it plays between (9 dB on one cloud voice), and this is
+  // the one step both rotates share. A failed pass keeps the file as rendered.
+  if (await hasFfmpeg()) {
+    try {
+      await transcodeAudio(await readFile(outPath), {
+        outPath, format: 'wav', loudnorm: true,
+        sampleRate: JINGLE_SAMPLE_RATE, channels: 2,
+      });
+    } catch (err: any) {
+      console.warn(`[jingles] could not level ${filename}: ${err?.message || err}`);
+    }
+  }
+
   const meta = await loadMeta();
   meta.items[filename] = {
     text: text.trim(),

@@ -61,6 +61,8 @@ function JingleCreateModal({
   // text is a plain z.string(), so its z.input is a real string and
   // form.control needs no cast -- unlike every other field in this file.
   const textValue = useWatch({ control: form.control, name: 'text' }) || '';
+  // The voice is not a form field, so a server refusal of it lands here.
+  const ttsError = (form.formState.errors as Record<string, { message?: string } | undefined>).tts?.message;
 
   const onSubmit = form.handleSubmit(async (values) => {
     // Station default with no voice of its own is the plain request.
@@ -102,7 +104,9 @@ function JingleCreateModal({
         <div className="text-right font-mono text-[11px] text-muted">{textValue.length} / {JINGLE_TEXT_MAX}</div>
         <EngineVoiceFields
           value={tts}
-          onChange={patch => setTts(t => ({ ...t, ...patch }))}
+          // Back on the station default, a voice left over from another engine
+          // would ride along as an inherit slot instead of the plain request.
+          onChange={patch => setTts(t => ({ ...t, ...patch, ...(patch.engine === INHERIT_ENGINE.id ? { voice: '' } : {}) }))}
           data={data}
           adminFetch={adminFetch}
           allowInherit
@@ -113,6 +117,9 @@ function JingleCreateModal({
               fallback or default engine instead, and saved that way.</>
           )}
         />
+        {ttsError ? (
+          <div role="alert" className="text-[11px] leading-[1.6] text-[var(--danger)]">{ttsError}</div>
+        ) : null}
       </div>
     </Modal>
   );

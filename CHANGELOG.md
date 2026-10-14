@@ -12,6 +12,23 @@
   independent. Operators who already reconfigured profiles under #1777 must
   mark those profiles before upgrading. See [upgrade and recovery steps](docs/multi-station.md#upgrading-existing-profiles).
 
+## [1.23.0](https://github.com/perminder-klair/subwave/compare/v1.22.0...v1.23.0) (2026-10-13)
+
+
+### Features
+
+* **jingles:** choose the voice when creating a jingle ([254753a](https://github.com/perminder-klair/subwave/commit/254753ad9f84e065befffb1889e247f1f7eec360))
+* **shows:** play a show's anchor playlist in order ([#1889](https://github.com/perminder-klair/subwave/issues/1889)) ([f40d283](https://github.com/perminder-klair/subwave/commit/f40d28303b9d94e752159559331239ee633e0800))
+* **tts:** ElevenLabs v4 expression cues and model list ([#1893](https://github.com/perminder-klair/subwave/issues/1893)) ([4fd73de](https://github.com/perminder-klair/subwave/commit/4fd73def7f72daa7f46fb5757f94651d685de89e))
+
+
+### Bug Fixes
+
+* **admin:** show the Gemini notice only when Gemini is picked ([#1895](https://github.com/perminder-klair/subwave/issues/1895)) ([9b961e8](https://github.com/perminder-klair/subwave/commit/9b961e881d3100f8d012216e2a331fed1edb9993))
+* **jingles:** make a short TTS jingle audible ([#1900](https://github.com/perminder-klair/subwave/issues/1900)) ([09c15f1](https://github.com/perminder-klair/subwave/commit/09c15f17216134e1e6e4c47ee2d1073bd285d829))
+* **jingles:** tidy the edges of the jingle voice choice ([#1898](https://github.com/perminder-klair/subwave/issues/1898)) ([ee9ecb0](https://github.com/perminder-klair/subwave/commit/ee9ecb0df199b5ad707a76703ae6751b651b700c))
+* **llm:** force discovery on the native pass's first step ([#1887](https://github.com/perminder-klair/subwave/issues/1887)) ([b0a2ad6](https://github.com/perminder-klair/subwave/commit/b0a2ad6fc83f9a08610fdef7b4554c3095566f5b))
+
 ## [1.22.0](https://github.com/perminder-klair/subwave/compare/v1.21.0...v1.22.0) (2026-10-11)
 
 

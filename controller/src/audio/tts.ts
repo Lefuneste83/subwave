@@ -175,7 +175,8 @@ export function voiceGainDb(kind: string, persona?: any): number {
   const { engine } = resolveEngine(personaTts);
   const tts: any = settings.get().tts || {};
   const engineGain = settings.clampTtsGain(tts.gainDb?.[engine]);
-  const personaGain = personaTts ? settings.clampTtsGain(personaTts.gainDb) : 0;
+  // A global kind takes a voice from its caller, never that slot's trim.
+  const personaGain = personaTts && !GLOBAL_VOICE_KINDS.has(kind) ? settings.clampTtsGain(personaTts.gainDb) : 0;
   return settings.clampTtsGain(engineGain + personaGain);
 }
 
