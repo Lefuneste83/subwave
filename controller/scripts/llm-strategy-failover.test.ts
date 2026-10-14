@@ -1,15 +1,14 @@
 // Run the actual primitives, replacing only model generation. Settings, SDK
 // validation, strategy recovery, failover and telemetry all remain real.
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { createTempDir } from './test-utils/temp-dir.js';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import test, { after, type TestContext } from 'node:test';
+import test, { type TestContext } from 'node:test';
 import { z } from 'zod';
 import type { MockLanguageModelV3 } from 'ai/test';
 
-const previousStateDir = process.env.STATE_DIR;
-const stateRoot = mkdtempSync(path.join(tmpdir(), 'subwave-strategy-failover-'));
+const stateRoot = createTempDir(path.join(tmpdir(), 'subwave-strategy-failover-'));
 process.env.STATE_DIR = stateRoot;
 
 const store = await import('../src/settings/store.js');
@@ -20,27 +19,19 @@ const { recentCalls } = await import('../src/llm/log.js');
 const { agenticPickerContextWindow } = await import('../src/llm/internal/telemetry/context-window.js');
 const { GenerationCancelledError } = await import('../src/llm/internal/core/generation.js');
 const { resetFailoverStickyForTest } = await import('../src/llm/internal/core/failover.js');
-const previousCache = store.peek();
 const schema = z.object({ name: z.string() });
 const answer = { name: 'backup' };
 const tools = { sample: { inputSchema: z.object({}) } };
 
-after(() => {
-  store.setCache(previousCache);
-  if (previousStateDir === undefined) delete process.env.STATE_DIR;
-  else process.env.STATE_DIR = previousStateDir;
-  rmSync(stateRoot, { recursive: true, force: true });
-});
-
 function configure(t: TestContext, provider: string, backup = true) {
-  resetFailoverStickyForTest();
-  t.after(() => resetFailoverStickyForTest());
   const defaults = settings.getDefaults();
   store.setCache({ ...defaults, llm: {
     ...defaults.llm, provider, model: 'strategy-primary',
     fallback: { ...defaults.llm.fallback, enabled: backup, provider: 'openai', model: 'strategy-backup' },
   } });
   recentCalls.length = 0;
+  resetFailoverStickyForTest();
+  t.after(() => resetFailoverStickyForTest());
   t.mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected provider traffic'); });
   return { primary: primaryLeg(), backup: fallbackLeg() };
 }

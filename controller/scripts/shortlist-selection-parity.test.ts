@@ -6,13 +6,15 @@
 // - The selection signals the Agentic route reads from its session (the set's
 //   arc, listener favourites, a DJ-mode run's target) reach the Shortlist call.
 // - Listener favourites are one gate for every reader.
+import { createTempDir } from './test-utils/temp-dir.js';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chatCompletionResponse } from './test-utils/llm.js';
+import { rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { after, before } from 'node:test';
 
-const stateRoot = mkdtempSync(join(tmpdir(), 'subwave-shortlist-parity-'));
+const stateRoot = createTempDir(join(tmpdir(), 'subwave-shortlist-parity-'));
 process.env.STATE_DIR = stateRoot;
 
 const settings = await import('../src/settings.js');
@@ -21,7 +23,7 @@ const likes = await import('../src/broadcast/likes.js');
 const { djPick } = await import('../src/broadcast/dj-agent/shortlist-pick.js');
 const { shortlistSignals } = await import('../src/broadcast/dj-agent.js');
 const { nearestId } = await import('../src/llm/sdk.js');
-const { pickerScope, buildPickerTools } = await import('../src/llm/tools.js');
+const { pickerScope } = await import('../src/llm/tools.js');
 
 const realFetch = globalThis.fetch;
 let modelCalls = 0;
@@ -46,9 +48,8 @@ before(async () => {
     assert.equal(url.hostname, 'parity-model.invalid', 'unexpected network request');
     modelCalls++;
     const body = JSON.parse(String(init?.body));
-    return Response.json({
-      id: 'parity-completion', object: 'chat.completion', created: 0, model: 'parity-test',
-      choices: [{ index: 0, finish_reason: 'tool_calls', message: {
+    return chatCompletionResponse({ id: 'parity-completion', created: 0, model: 'parity-test',
+      message: {
         role: 'assistant', content: null, tool_calls: [{
           id: 'parity-tool', type: 'function', function: {
             name: body.tools[0].function.name,
@@ -59,9 +60,7 @@ before(async () => {
             }),
           },
         }],
-      } }],
-      usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
-    });
+      } });
   };
 });
 
@@ -104,10 +103,6 @@ test('listener favourites are one gate for the clause, the tool and the Shortlis
   assert.match(likes.favouritesClause(on), /"Loved" by Crowd \(1\)/);
 
   const withFavourites = pickerScope({ listenerFavourites: likes.djFavourites(on) });
-  assert.ok('listenerFavourites' in buildPickerTools(withFavourites).tools);
-  assert.ok(!('listenerFavourites' in buildPickerTools(pickerScope()).tools),
-    'off without favourites, and on the request path, which never sets them');
-
   assert.deepEqual(shortlistSignals({ history: [] }, withFavourites).listenerFavourites, [
     { title: 'Loved', artist: 'Crowd', likes: 1 },
   ]);

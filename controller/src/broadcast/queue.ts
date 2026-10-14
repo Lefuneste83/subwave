@@ -17,7 +17,7 @@ import { capCueOutSec } from '../music/track-floor.js';
 import { swallowedByCrossfade } from '../util/request-guard.js';
 import * as showBoundary from './show-boundary.js';
 import * as blocklist from '../music/blocklist.js';
-import { artistRootKey, trackKey, type CandidateLike } from '../music/recency.js';
+import { artistRootKey, creditedActKeys, creditedActNames, trackKey, type CandidateLike } from '../music/recency.js';
 import { albumKeyFor } from '../music/album-facts.js';
 import { speak, voiceGainDb } from '../audio/tts.js';
 import {
@@ -4317,11 +4317,19 @@ class Queue {
   // Both pickers use lead-artist keys from the queue tail, current track, and last
   // n distinct plays. New picks append at the tail, including behind unaired requests.
   neighbourArtistRoots(n = 0): Set<string> {
-    const out = new Set<string>();
-    if (!Number.isFinite(n) || n <= 0) return out;
+    return new Set(this.neighbourArtistCredits(n).flatMap(artist => creditedActKeys({ artist })));
+  }
+
+  // The same window as display credits, one per lead-artist key (first seen
+  // wins), so the Agentic pick event can name exactly the artists the guard
+  // will refuse. One walk serves both, so the named list and the guard's set
+  // cannot drift apart.
+  neighbourArtistCredits(n = 0): string[] {
+    const out = new Map<string, string>();
+    if (!Number.isFinite(n) || n <= 0) return [];
     const add = (artist: string | null | undefined) => {
       const key = artistRootKey({ artist });
-      if (key) out.add(key);
+      if (key && !out.has(key)) out.set(key, String(artist).trim());
     };
     for (const item of this.upcoming.slice(-n)) add(item?.track?.artist);
     add(this.current?.track?.artist);
@@ -4339,7 +4347,20 @@ class Queue {
       if (k) seenKeys.add(k);
       add(p.artist);
     }
-    return out;
+    return [...out.values()];
+  }
+
+  // The window as act names for the Agentic pick event: every act the guard
+  // will refuse, deduped across credits (recency.creditedActNames).
+  neighbourArtistActs(n = 0): string[] {
+    const out = new Map<string, string>();
+    for (const credit of this.neighbourArtistCredits(n)) {
+      for (const name of creditedActNames(credit)) {
+        const key = artistRootKey(name);
+        if (key && !out.has(key)) out.set(key, name);
+      }
+    }
+    return [...out.values()];
   }
 
   // Both pickers share this album window, including every unaired queue item.
