@@ -15,7 +15,7 @@ import { djObject, nearestId, modelTolerant } from '../llm/sdk.js';
 import * as budget from './dj-budget.js';
 import { withTrace, logEvent, timePhase } from '../observability/events.js';
 import { artistRootKey, recencyWindowsForLibrary } from '../music/recency.js';
-import { showNoRepeatGuard } from '../music/show-recency.js';
+import { showNoRepeatGuard, strictShowLibraryPool } from '../music/show-recency.js';
 import { isInOrderShow } from '../music/playlist-order.js';
 import { commitInOrderPick, resolveInOrderNext } from '../music/playlist-order-next.js';
 import { EXPLORE_SEED_PROBABILITY } from '../music/airing.js';
@@ -47,6 +47,7 @@ import { guardIntro, screenAck, isNamedRequester } from '../util/request-guard.j
 import * as likes from './likes.js';
 import { classifyPickFailure, SEED_NOT_A_PICK_CLAUSE, type PickFailure } from '../util/pick-seed.js';
 import { buildShortlist } from '../music/shortlist.js';
+import { genreRun } from '../music/genre-run.js';
 import { djPick, shortlistClauseSelectionReason, shortlistConversation, shortlistPickPrompt, shortlistPickSchema, shortlistReasonForLeanings, shortlistSituation, type ShortlistPickResolution, type ShortlistSelectionContext } from './dj-agent/shortlist-pick.js';
 import { shortlistOffers } from '../music/shortlist-offers.js';
 import { SHORTLIST_PASSES_DEFAULT } from '../schemas/settings.js';
@@ -302,6 +303,11 @@ export async function livePickerScope(queue: any, { audioWaypoint = null, showAt
   // starvation cascade. A resolved strict playlist is its own catalogue, so
   // clamp to its real identity count using the same resolved genre lock as the
   // tools; 0 leaves the relaxable window in charge.
+  // A strict-filter show's own catalogue, read once: it sizes the hard window
+  // below and, when small, becomes the showPoolTracks source.
+  const showLibraryPool = timePhase('pick.showLibraryPool', () => strictShowLibraryPool(strict ? library.candidateFilterTracks() : null, {
+    show: activeShow, excludedIds, resolvedGenres: genreLock ?? [], minTrackSec, maxTrackSec,
+  }));
   const effN = timePhase('pick.noRepeatGuard', () => showNoRepeatGuard(
     settings.get().llm?.noRepeatWindow ?? 0,
     librarySize,
@@ -313,6 +319,7 @@ export async function livePickerScope(queue: any, { audioWaypoint = null, showAt
       resolvedGenres: genreLock ?? [],
       minTrackSec,
       maxTrackSec,
+      showLibraryPool,
     },
   )).window;
   const { ids: hardRecentIds, keys: hardRecentKeys } = timePhase('pick.recentlyPlayedByCount', () => queue.recentlyPlayedByCount(effN));
@@ -359,6 +366,8 @@ export async function livePickerScope(queue: any, { audioWaypoint = null, showAt
     maxTrackSec,
     playlistLock,
     playlistTracks,
+    // A strict playlist or a prepared episode already names its own source.
+    showPool: playlistLock || episodeSource ? null : showLibraryPool,
     hasPlaylistAnchor: !!activeShow?.playlistIds?.length,
     hasPinnedMoods: !!activeShow?.moods?.length,
     excludedIds,
@@ -394,11 +403,21 @@ export function shortlistSignals(
   queue: any,
   scope: PickerScope,
   rankTarget: { bpm: number | null; key: string | null } | null = null,
-): Pick<ShortlistSelectionContext, 'recentPlays' | 'listenerFavourites' | 'mixRun'> {
-  const recentPlays = Array.isArray(queue?.history) ? picker.summariseRecent(queue) : [];
+  showGenres: readonly string[] | null = scope.genreLock,
+): Pick<ShortlistSelectionContext, 'recentPlays' | 'listenerFavourites' | 'mixRun' | 'genreRun'> {
+  const hasHistory = Array.isArray(queue?.history);
+  const recentPlays = hasHistory ? picker.summariseRecent(queue) : [];
   const favourites = scope.listenerFavourites ?? [];
+  // Same newest-first set summariseRecent reads: the track on air, then history.
+  // An episode, journey or strict playlist owns the direction — the same
+  // exemption the shortlist planner makes — so a run is not named there.
+  const ownsDirection = !!(scope.episodeSource || scope.playlistLock || scope.audioWaypoint?.length);
+  const run = hasHistory && !ownsDirection
+    ? genreRun([queue.current?.track, ...queue.history.map((entry: any) => entry?.track)], showGenres)
+    : null;
   return {
     ...(recentPlays.length ? { recentPlays } : {}),
+    ...(run ? { genreRun: run } : {}),
     ...(favourites.length ? {
       listenerFavourites: favourites.map(({ track, count }) => ({
         title: String(track?.title ?? 'unknown'),
@@ -411,10 +430,12 @@ export function shortlistSignals(
 }
 
 // A bench compares the same selection inputs without advancing a live run.
-export function selectionContextForPick(queue: any, ctx: any, { scope, wantLink = false, audioWaypoint = null, pickAnchor = null, predecessor, rankTarget = null, explore = false, useShortlist = true }: {
+export function selectionContextForPick(queue: any, ctx: any, { scope, wantLink = false, audioWaypoint = null, pickAnchor = null, predecessor, rankTarget = null, explore = false, useShortlist = true, showGenres = scope.genreLock }: {
   scope: PickerScope; wantLink?: boolean; audioWaypoint?: number[] | null; pickAnchor?: any;
   predecessor?: ReturnType<typeof predecessorContext>;
   rankTarget?: { bpm: number | null; key: string | null } | null; explore?: boolean; useShortlist?: boolean;
+  // The show's genres, soft or strict — the same list buildShortlist plans from.
+  showGenres?: readonly string[] | null;
 }): ShortlistSelectionContext {
   const anchorAnalysis = timePhase('pick.anchorAnalysis', () => (pickAnchor ? library.bpmKeyFor(pickAnchor) : null));
   const anchorRecord = timePhase('pick.anchorRecord', () => (pickAnchor?.id ? library.get(pickAnchor.id) : null));
@@ -440,7 +461,7 @@ export function selectionContextForPick(queue: any, ctx: any, { scope, wantLink 
     ...(recentTransitions ? { recentTransitions } : {}),
     // Agentic prompts are left exactly as they were: that route reads these
     // from its session window and pick event.
-    ...(useShortlist ? shortlistSignals(queue, scope, rankTarget) : {}),
+    ...(useShortlist ? shortlistSignals(queue, scope, rankTarget, showGenres) : {}),
     ...(useShortlist ? shortlistSituation(ctx) : {}),
     ...(useShortlist && explore ? { explore: true } : {}),
     ...(useShortlist ? shortlistConversation(session.promptMemory()) : {}),
@@ -471,6 +492,7 @@ async function pickViaSelectionRoute(queue, ctx, { wantLink, audioWaypoint = nul
   const anchorAnalysis = pickAnchor ? library.bpmKeyFor(pickAnchor) : null;
   const selectionContext = selectionContextForPick(queue, ctx, {
     scope, wantLink, audioWaypoint, pickAnchor, predecessor, rankTarget, explore, useShortlist,
+    showGenres: activeShow?.genres ?? scope.genreLock,
   });
   let steps: number;
   let toolCalls: any[];
