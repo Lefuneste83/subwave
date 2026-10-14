@@ -580,7 +580,7 @@ async function pickViaSelectionRoute(queue, ctx, { wantLink, audioWaypoint = nul
     };
     const run = await pickerAgent.run({
       editorial: ctx?.episodeEditorial ?? '',
-      messages: timePhase('pick.windowMessages', () => session.windowMessages()),
+      messages: timePhase('pick.windowMessages', () => session.pickWindowMessages()),
       scope,
       showAt,
       telemetry: { agentPickResolution },
