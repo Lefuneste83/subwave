@@ -155,13 +155,16 @@ interface LlmCall {
 export interface DebugLlm {
   activeModel?: string;
   provider?: string;
-  /** Set while D5's sticky window sends calls to the backup LLM; null/absent = normal routing. */
+  /** Set while LLM calls go to the backup instead of the primary (any failover); null/absent = normal routing. */
   routedToBackup?: {
-    kind?: 'unreachable' | 'exhausted' | 'hung';
+    reason?: string;
     since?: number;
-    until?: number;
+    lastAt?: number;
+    calls?: number;
+    lastOk?: boolean;
     provider?: string;
     model?: string;
+    retryPrimaryAt?: number;
   } | null;
   budget?: DebugBudget;
   recentCalls?: LlmCall[];

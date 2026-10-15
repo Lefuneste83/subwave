@@ -1,7 +1,8 @@
-// N2: the /debug "routed to backup" line reads failoverRoutingSnapshot(),
-// which must say "routed" exactly while D5's sticky window would send the next
-// unpinned call to the backup, and nothing otherwise. Real settings, legs and
-// failover; only the provider boundary is a callback. No network traffic.
+// N2: the /debug "routed to backup" line reads failoverRoutingSnapshot(). It
+// must report every case where an unpinned LLM call went to the backup instead
+// of the primary (D5's sticky window AND one-off failovers), and clear as soon
+// as the primary answers again. Real settings, legs and failover; only the
+// provider boundary is a callback. No network traffic.
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { createTempDir } from './test-utils/temp-dir.js';
@@ -20,9 +21,16 @@ const { failoverRoutingSnapshot } = await import('../src/llm/log.js');
 const { recentCalls } = await import('../src/llm/internal/telemetry/log.js');
 
 const primaryLabel = 'locca:qwen38-27B';
+const backupLabel = 'ollama:llama3.1:8b';
 const fallback = { enabled: true, provider: 'ollama', model: 'llama3.1:8b', baseUrl: 'http://127.0.0.1:11434' };
+const base = { provider: 'locca', model: 'qwen38-27B', baseUrl: 'http://127.0.0.1:8080' };
 const failExtra = (err: Error) => ({ diagnostic: err.message });
+
 const bare500 = () => Object.assign(new Error('Internal Server Error'), { statusCode: 500, __via: 'test-primary' });
+const retired = () => Object.assign(new Error('model qwen38 has been retired'), {
+  statusCode: 503, data: { error: { code: 'model_terminated' } }, __via: 'test-primary',
+});
+const quota = () => Object.assign(new Error('You exceeded your current quota'), { statusCode: 429, __via: 'test-primary' });
 
 async function configure(llm: Record<string, unknown>) {
   writeFileSync(path.join(stateRoot, 'settings.json'), JSON.stringify({ llm }));
@@ -31,23 +39,22 @@ async function configure(llm: Record<string, unknown>) {
   recentCalls.length = 0;
 }
 
-const base = { provider: 'locca', model: 'qwen38-27B', baseUrl: 'http://127.0.0.1:8080' };
-
-// Mark the primary down the way #1923 does in production: a 5xx that survived
-// the same-leg retries, so the call fails over and the window opens.
-async function primaryFails() {
-  const quiet = console.log;
+async function quietly<T>(fn: () => Promise<T>): Promise<T> {
+  const log = console.log;
   console.log = () => {};
-  try {
-    const result = await withFailover('routing-test', failExtra, async (leg) => {
-      if (leg.label === primaryLabel) throw bare500();
-      return { value: 'backup speech', via: 'test-backup' };
-    });
-    assert.equal(result, 'backup speech');
-  } finally {
-    console.log = quiet;
-  }
+  try { return await fn(); } finally { console.log = log; }
 }
+
+// One unpinned call whose primary fails with `err` (or answers when null).
+const call = (err: (() => Error) | null, backupFails = false) => quietly(() =>
+  withFailover('routing-test', failExtra, async (leg) => {
+    if (leg.label === primaryLabel) {
+      if (err) throw err();
+      return { value: 'primary', via: 'test-primary' };
+    }
+    if (backupFails) throw Object.assign(new Error('backup down too'), { __via: 'test-backup' });
+    return { value: 'backup', via: 'test-backup' };
+  }));
 
 after(() => {
   resetFailoverStickyForTest();
@@ -57,55 +64,90 @@ after(() => {
 test('normal routing reports nothing', async () => {
   resetFailoverStickyForTest();
   await configure({ ...base, fallback });
+  assert.equal(await call(null), 'primary');
   assert.equal(failoverRoutingSnapshot(), null);
 });
 
-test('a primary marked down reports the backup it is routed to, why and until when', async () => {
+test('a one-off failover with no sticky window is reported (a retired model)', async () => {
   resetFailoverStickyForTest();
   await configure({ ...base, fallback });
   const before = Date.now();
-  await primaryFails();
+  assert.equal(await call(retired), 'backup');
   const r = failoverRoutingSnapshot();
-  assert.ok(r, 'the window is open, so the line must show');
+  assert.ok(r, 'the call went to the backup, so the line must show');
   assert.equal(r.provider, 'ollama');
-  assert.equal(r.model, 'ollama:llama3.1:8b');
-  assert.equal(r.kind, 'exhausted');
-  assert.ok(r.since >= before && r.since <= Date.now());
-  assert.equal(r.until - r.since, 5 * 60_000, 'the production window');
+  assert.equal(r.model, backupLabel);
+  assert.equal(r.reason, 'primary model unavailable');
+  assert.equal(r.calls, 1);
+  assert.equal(r.lastOk, true);
+  assert.ok(r.since >= before && r.lastAt >= r.since);
+  assert.equal(r.retryPrimaryAt, undefined, 'no sticky window: the next call tries the primary first');
 });
 
-test('a primary that answers again clears the line', async () => {
+test('a quota refusal is reported too', async () => {
   resetFailoverStickyForTest();
   await configure({ ...base, fallback });
-  await primaryFails();
+  assert.equal(await call(quota), 'backup');
+  assert.equal(failoverRoutingSnapshot()?.reason, 'primary refused (quota/auth)');
+});
+
+test('the sticky window (#1923) is reported with when the primary is tried again, and counts every routed call', async () => {
+  resetFailoverStickyForTest();
+  await configure({ ...base, fallback });
+  await call(bare500);
+  const first = failoverRoutingSnapshot();
+  assert.ok(first);
+  assert.equal(first.reason, 'primary cannot serve (5xx after retries)');
+  assert.ok(first.retryPrimaryAt && first.retryPrimaryAt - first.since <= 5 * 60_000 + 50);
+  // The next call goes straight to the backup through the window.
+  assert.equal(await call(bare500), 'backup');
+  const second = failoverRoutingSnapshot();
+  assert.equal(second?.calls, 2);
+  assert.equal(second?.since, first.since, 'one continuous episode');
+  assert.equal(second?.reason, 'primary marked down: cannot serve (5xx)');
+});
+
+test('the first call the primary answers clears the line', async () => {
+  resetFailoverStickyForTest();
+  await configure({ ...base, fallback });
+  await call(retired);
   assert.ok(failoverRoutingSnapshot());
-  // The window expires (simulated by reading past it), the next call tries
-  // the primary, and it serves: routing is normal again.
-  const until = failoverRoutingSnapshot()!.until;
-  assert.equal(failoverRoutingSnapshot(until), null, 'past the window the line is gone, call or no call');
-  resetFailoverStickyForTest(10);
-  await primaryFails();
-  await new Promise((r) => setTimeout(r, 30));
-  const result = await withFailover('routing-test', failExtra, async () => ({ value: 'primary speech', via: 'test-primary' }));
-  assert.equal(result, 'primary speech');
+  assert.equal(await call(null), 'primary');
   assert.equal(failoverRoutingSnapshot(), null);
 });
 
-test('an expired window reports nothing even before the next call clears it (a quiet station)', async () => {
+test('after the sticky window ends the line stays until the primary actually answers', async () => {
   resetFailoverStickyForTest(20);
   await configure({ ...base, fallback });
-  await primaryFails();
-  assert.ok(failoverRoutingSnapshot(), 'inside the window');
+  await call(bare500);
   await new Promise((r) => setTimeout(r, 40));
-  // No call has arrived since, so the raw state still exists; the read must
-  // not trust it.
+  const r = failoverRoutingSnapshot();
+  assert.ok(r, 'the last call still went to the backup; nothing has shown the primary is back');
+  assert.equal(r.retryPrimaryAt, undefined, 'the window is over, so the next call tries the primary');
+  assert.equal(await call(null), 'primary');
+  assert.equal(failoverRoutingSnapshot(), null);
+});
+
+test('a backup that failed too is flagged on the line', async () => {
+  resetFailoverStickyForTest();
+  await configure({ ...base, fallback });
+  await assert.rejects(call(retired, true));
+  const r = failoverRoutingSnapshot();
+  assert.ok(r);
+  assert.equal(r.lastOk, false);
+});
+
+test('pinned calls never raise the line: an explicit leg choice is routing as intended', async () => {
+  resetFailoverStickyForTest();
+  await configure({ ...base, fallback });
+  await quietly(() => withFailover('routing-test', failExtra, async () => ({ value: 'tagged', via: 'test-backup' }), 'fallback'));
   assert.equal(failoverRoutingSnapshot(), null);
 });
 
 test('switching the primary in Settings ends the line at once', async () => {
   resetFailoverStickyForTest();
   await configure({ ...base, fallback });
-  await primaryFails();
+  await call(retired);
   assert.ok(failoverRoutingSnapshot());
   await configure({ ...base, model: 'mistral3-14b', fallback });
   assert.equal(failoverRoutingSnapshot(), null, 'the new primary gets the next call');
@@ -114,7 +156,7 @@ test('switching the primary in Settings ends the line at once', async () => {
 test('disabling the backup ends the line: there is nowhere to route', async () => {
   resetFailoverStickyForTest();
   await configure({ ...base, fallback });
-  await primaryFails();
+  await call(retired);
   assert.ok(failoverRoutingSnapshot());
   await configure({ ...base, fallback: { ...fallback, enabled: false } });
   assert.equal(failoverRoutingSnapshot(), null);
@@ -123,12 +165,12 @@ test('disabling the backup ends the line: there is nowhere to route', async () =
 test('reading the snapshot never changes routing', async () => {
   resetFailoverStickyForTest();
   await configure({ ...base, fallback });
-  await primaryFails();
+  await call(bare500);
   for (let i = 0; i < 5; i++) failoverRoutingSnapshot();
   const attempts: string[] = [];
-  await withFailover('routing-test', failExtra, async (leg) => {
+  await quietly(() => withFailover('routing-test', failExtra, async (leg) => {
     attempts.push(leg.label);
     return { value: 'still backup', via: 'test-backup' };
-  });
-  assert.deepEqual(attempts, ['ollama:llama3.1:8b'], 'the window still holds after repeated reads');
+  }));
+  assert.deepEqual(attempts, [backupLabel], 'the window still holds after repeated reads');
 });
