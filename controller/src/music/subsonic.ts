@@ -795,9 +795,14 @@ export async function getPlaylists({ signal }: { signal?: AbortSignal } = {}) {
   return r.playlists?.playlist || [];
 }
 
-export async function getPlaylist(id, { signal }: { signal?: AbortSignal } = {}) {
+// `includeBlocked` is for the blocklist's OWN playlist-rule resolver: it builds
+// the member set that `rejectBlocked` consults, so reading through the filter
+// returned the playlist minus its own members on every refresh after the first
+// (0 tracks, rule inert, flipping back each TTL). Airing paths take the default.
+export async function getPlaylist(id, { signal, includeBlocked = false }: { signal?: AbortSignal; includeBlocked?: boolean } = {}) {
   const r = await call('getPlaylist', { id }, { ...RETRY_FAST_TRANSPORT, signal });
-  return rejectArchive(r.playlist?.entry || []);
+  const songs = (r.playlist?.entry || []).filter((s) => !isStationArchive(s));
+  return includeBlocked ? songs : blocklist.rejectBlocked(songs);
 }
 
 // Playlist mutations: song-id lists ride the query string, so they are chunked

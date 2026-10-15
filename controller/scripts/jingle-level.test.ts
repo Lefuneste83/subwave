@@ -33,8 +33,11 @@ test.after(() => {
   rmSync(stateDir, { recursive: true, force: true });
 });
 
+// framelog=verbose, not quiet: ffmpeg 5.1 (the controller image's) has no
+// `quiet` level, fails, and still prints a summary of zeros.
 function integratedLufs(file: string): number {
-  const out = spawnSync('ffmpeg', ['-hide_banner', '-nostats', '-i', file, '-af', 'ebur128=framelog=quiet', '-f', 'null', '-']);
+  const out = spawnSync('ffmpeg', ['-hide_banner', '-nostats', '-i', file, '-af', 'ebur128=framelog=verbose', '-f', 'null', '-']);
+  assert.equal(out.status, 0, `ffmpeg could not measure ${file}: ${String(out.stderr).slice(-300)}`);
   const m = /\bI:\s*(-?\d+(?:\.\d+)?)\s*LUFS/.exec(String(out.stderr).slice(String(out.stderr).lastIndexOf('Summary:')));
   assert.ok(m, 'no loudness summary');
   return Number(m[1]);
