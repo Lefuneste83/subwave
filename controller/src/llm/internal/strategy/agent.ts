@@ -1,7 +1,8 @@
 // agentPlan resolves native output or forced done-tool output per leg. Ollama
 // skips native: it can return empty schema-valid JSON without discovery.
 // Recovery proceeds through done-only, terminal collapse (#1157), then text salvage.
-// All attempts share one deadline; throw so callers can use their stateless fallback.
+// All attempts share one deadline, and the native leg may use only part of it
+// (NATIVE_DEADLINE_SHARE); throw so callers can use their stateless fallback.
 
 import { Output, isStepCount, hasToolCall, ToolLoopAgent, ToolChoiceViolationError, tool } from 'ai';
 import type { ModelMessage, ToolSet, ToolLoopAgentSettings } from 'ai';
@@ -199,6 +200,22 @@ export function nativeToolExchange(trail: ModelMessage[]): ModelMessage[] {
   return out.some((m) => m.role === 'tool') ? out : [];
 }
 
+// The done-tool run's discovery budget after a native miss: the leg's budget
+// less the native steps that called a tool. Zero is safe only because the
+// caller passes steps solely when their tool results are carried forward, so
+// a run that commits at step 0 always has real candidates in view.
+export function remainingDiscoverySteps(budget: number, carriedSteps: StepLike[]): number {
+  const spent = carriedSteps.filter((s) => (s.toolCalls || []).length > 0).length;
+  return Math.max(0, budget - spent);
+}
+
+// Share of the shared deadline the native leg may use. A native call that hangs
+// would otherwise hold the whole budget (seen live: one pick waited the full
+// 90s and fell to the pool), leaving the done-tool path nothing; capped, the
+// rest of the cascade still gets its turn, with every step the native run
+// finished carried into it.
+export const NATIVE_DEADLINE_SHARE = 0.5;
+
 async function runDeadlined(deadlineAt: number | undefined, kind: string, label: string, agent: AgentLike, messages: ModelMessage[], attempt?: ReturnType<typeof createAgentAttempt>): Promise<AgentGenerateResult> {
   try {
     return await runDeadlinedCall(deadlineAt, kind, label, (signal) => agent.generate({
@@ -245,6 +262,7 @@ export async function djAgent({
       let lastVia = 'ai-sdk:agent';
       // One shared wall-clock ceiling for every attempt below.
       const deadlineAt = timeoutMs ? Date.now() + timeoutMs : undefined;
+      const nativeDeadlineAt = timeoutMs ? Date.now() + Math.floor(timeoutMs * NATIVE_DEADLINE_SHARE) : undefined;
       // Tokens billed across EVERY leg below, counted as each provider call
       // ends — including legs that throw, decline or hit their step cap, which
       // leave no result to read usage from. This sum is what telemetry/log.ts
@@ -290,7 +308,7 @@ export async function djAgent({
         let nativeTrailOf: (() => { steps: StepLike[]; messages: ModelMessage[] }) | null = null;
 
         // Native-first structured output. A miss falls through to the done-tool
-        // path below; lastVia stays ':native' so the record attributes there.
+        // path below, which takes the attribution over from here.
         if (plan === 'native-then-done') {
           try {
             lastVia = 'ai-sdk:agent:native';
@@ -324,7 +342,7 @@ export async function djAgent({
               // throw after every step was billed; nativeAttempt's callbacks
               // count each call as it ends and keep its trail.
             } as any);
-            const nr = await runDeadlined(deadlineAt, kind, 'native run', nativeAgent, messages);
+            const nr = await runDeadlined(nativeDeadlineAt, kind, 'native run', nativeAgent, messages);
             const nObj = nr.output;
             const nSteps = nr.steps?.length ?? 0;
             // Require a real discovery call: the cross-provider failure
@@ -352,10 +370,20 @@ export async function djAgent({
             }
             console.log(`[${kind}] native output produced no usable pick (explored=${explored}, accepted=${accepted}) — falling back to done-tool`);
           } catch (e) {
-            if (isGenerationControlError(e) || isModelUnavailable(e)) throw e;
+            // The native leg's own cap is not the pick's deadline: while shared
+            // time remains, the done-tool path runs with what native finished.
+            const nativeCapHit = (e as Error)?.name === 'AgentDeadlineError'
+              && deadlineAt != null && nativeDeadlineAt != null && nativeDeadlineAt < deadlineAt
+              && Date.now() < deadlineAt;
+            if (!nativeCapHit && (isGenerationControlError(e) || isModelUnavailable(e))) throw e;
             console.log(`[${kind}] native output failed (${e?.message}) — falling back to done-tool`);
           }
         }
+
+        // Past here the native pass is over, so the record names the path that
+        // answers (or fails). Left at ':native', a pick the done-tool run rescued
+        // read as a first-pass answer, and the stats hid how often native missed.
+        lastVia = 'ai-sdk:agent';
 
         // Unified main agent: done-tool (Ollama-with-tools, or a native miss),
         // native-no-tools (agent-level Output.object), or free text (no schema).
@@ -367,18 +395,25 @@ export async function djAgent({
 
         const discoveryToolNames = tools ? Object.keys(tools) : [];
         const useGatedDiscovery = useDoneTool && discoveryToolNames.length > 0;
-        const prepareStep = useGatedDiscovery ? gatedDiscoveryPrepareStep(discoveryToolNames, forcedChoice, discoverySteps) : undefined;
-        // On a gated run the cap is DERIVED, not the caller's: exactly
-        // discoverySteps + 1. Lower ends the loop before the forced `done` step
-        // runs; higher hands the model extra `done` steps to decline in.
-        // Ungated runs keep the caller's value.
-        const effectiveMaxSteps = useGatedDiscovery ? gatedMaxSteps : maxSteps;
-
         const nativeTrail = nativeTrailOf ? nativeTrailOf() : { steps: [], messages: [] };
         // Only the discovery exchange: tool-call turns and their results. The
         // native run's own unusable answer stays out, as before.
         const nativeToolMessages = nativeToolExchange(nativeTrail.messages);
         const baseMessages = nativeToolMessages.length ? endOnUserTurn([...messages, ...nativeToolMessages]) : messages;
+        // The carried rounds are discovery already spent, so they come off this
+        // run's budget. Gating a model that has its candidates back into fresh
+        // discovery-only steps is how a hosted Claude on tool_choice 'auto'
+        // answered in text there and stopped without `done`, every time, so
+        // each native miss paid for a wasted run before done-only recovery.
+        // Spent in full, the run commits at step 0 with the carried results in
+        // view, which is the shape recovery already succeeds with.
+        const runDiscoveryBudget = remainingDiscoverySteps(discoverySteps, nativeToolMessages.length ? nativeTrail.steps : []);
+        const prepareStep = useGatedDiscovery ? gatedDiscoveryPrepareStep(discoveryToolNames, forcedChoice, runDiscoveryBudget) : undefined;
+        // On a gated run the cap is DERIVED, not the caller's: exactly the
+        // run's discovery budget + 1. Lower ends the loop before the forced
+        // `done` step runs; higher hands the model extra `done` steps to
+        // decline in. Ungated runs keep the caller's value.
+        const effectiveMaxSteps = useGatedDiscovery ? runDiscoveryBudget + 1 : maxSteps;
         const mainAttempt = createAgentAttempt(meter);
         const agent = new ToolLoopAgent({
           ...mainAttempt.callbacks,
