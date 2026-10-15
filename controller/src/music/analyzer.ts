@@ -1111,9 +1111,13 @@ export interface FacetRequestOpts {
 
 // null = unknown (not probed / old backend). Callers use the facet protocol
 // only on === true.
-export function facetsAvailable(): boolean | null {
-  if (_backend === 'sidecar') return _sidecarFacetsCapable;
-  if (_backend === 'local') return _localFacetsCapable;
+export async function facetsAvailable(): Promise<boolean | null> {
+  const backend = await resolveBackend();
+  if (backend === 'sidecar') return _sidecarFacetsCapable;
+  if (backend === 'local') {
+    if (!ready) await startWorker();
+    return _localFacetsCapable;
+  }
   return null;
 }
 
@@ -1204,7 +1208,9 @@ export async function analyzeFacets(
   } catch (err) {
     if (!(err instanceof AnalyzerPathUnavailableError)) throw err;
     // Same degrade as analyzePathWithUrlFallback: no stems without shared state.
-    return facetRequest({ url, ...body });
+    const facets = opts.facets.filter(f => f !== 'stems');
+    return facets.length ? facetRequest({ url, ...body, facets })
+      : { facets: {}, source: { kind: 'unknown', durationS: null, complete: null } };
   }
 }
 

@@ -205,6 +205,21 @@ async function scoreAudioMoods(): Promise<void> {
   }
 }
 
+async function lyricVocalFor(id: string, wanted: boolean): Promise<LyricVocalResult | null> {
+  if (!wanted) return null;
+  try {
+    return deriveVocalFromLyrics(await subsonic.getStructuredLyrics(id));
+  } catch {
+    return null;
+  }
+}
+
+function lyricTailRanges(id: string, outro: Pick<analyzer.OutroInfo, 'startMs'>, lyricVocal: LyricVocalResult) {
+  const durMs = (Number(db.getTrack(id)?.durationSec) || 0) * 1000;
+  const windowStartMs = durMs > 0 ? Math.min(outro.startMs, durMs - 20_000) : outro.startMs;
+  return clipRangesToTail(lyricVocal.vocalRanges, windowStartMs, durMs > 0 ? durMs : null);
+}
+
 export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<AnalyzeStats> {
   if (!(await analyzer.isAvailable())) {
     // The only two things resolveBackend() consults, named by their env vars.
@@ -419,7 +434,8 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   }
   // A facet plan on a backend that speaks the facet protocol asks for exactly
   // the planned facets; an older backend gets the flat request (flags above).
-  const useFacets = !!plan && analyzer.facetsAvailable() === true;
+  const useFacets = !!plan && (await analyzer.facetsAvailable()) === true;
+  // Read after facetsAvailable(): a local worker has sent its ready message by then.
   const rangedOk = useFacets && analyzer.rangedTailAvailable() === true;
   const isRanged = (id: string): boolean => {
     const f = plannedFacets.get(id);
@@ -514,10 +530,11 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
       ? Promise.resolve({ skip: true as const })
       : analyzer.downloadCapped(songId).then((r) => r, (err) => ({ err }));
 
-  interface TrackWorkResult {
+  type TrackWorkResult = { kind: 'skipped' } | {
+    kind: 'analyzed';
     audioEmbedded: boolean;
     vocalAnalyzed: boolean;
-  }
+  };
 
   const allocateStems = (id: string): string | undefined => {
     const want = planned.get(id);
@@ -559,70 +576,87 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     // A tail measured on its own also brings the outro's vocal ranges when the
     // station uses vocal activity — otherwise the vocal facet turns head-only
     // and the regular vocal backfill would chase these tracks forever.
-    const tailVocals = facets.includes('tail') && !facets.includes('vocal') && vocalBackfill;
-    const res = await analyzer.analyzeFacets(
+    const wantsVocal = facets.includes('vocal');
+    const tailVocals = facets.includes('tail') && !wantsVocal && vocalBackfill;
+    const lyricVocal = await lyricVocalFor(id, wantsVocal || tailVocals);
+    const requestedFacets = facets.filter(f =>
+      !(f === 'vocal' && lyricVocal) && !(f === 'stems' && !stems_dir));
+    const res = requestedFacets.length ? await analyzer.analyzeFacets(
       id,
-      { facets: facets as analyzer.FacetName[], ranged, tailVocals, stems_dir, complete: localComplete },
+      { facets: requestedFacets, ranged, tailVocals: tailVocals && !lyricVocal, stems_dir, complete: localComplete },
       ranged ? undefined : (localPath ?? undefined),
-    );
-    if (res.source.kind === 'ranged') {
+    ) : null;
+    if (res?.source.kind === 'ranged') {
       rangedTracks += 1;
       rangedBytes += res.source.bytesRead ?? 0;
       rangedSize += res.source.size ?? 0;
-    } else if (res.source.fallback) {
+    } else if (res?.source.fallback) {
       fallbackReasons.set(res.source.fallback, (fallbackReasons.get(res.source.fallback) ?? 0) + 1);
     }
     const source: db.FacetSource =
-      res.source.kind === 'ranged' ? 'ranged'
-        : res.source.kind === 'capped-download' ? (res.source.complete === false ? 'capped' : 'url')
+      res?.source.kind === 'ranged' ? 'ranged'
+        : res?.source.kind === 'capped-download' ? (res.source.complete === false ? 'capped' : 'url')
           : localComplete === true ? 'full' : localComplete === false ? 'capped' : 'unknown';
 
     const w: db.FacetWrite = { source };
     const failures: string[] = [];
     let wroteClap = false;
-    for (const f of facets) {
-      const a = res.facets[f as analyzer.FacetName];
+    for (const f of requestedFacets) {
+      const a = res?.facets[f];
       if (!a) continue;
       if (a.status === 'failed') { failures.push(db.facetFailure(f, a.reason)); continue; }
       if (a.status === 'unavailable') continue;
+      if (a.status === 'unmeasurable') {
+        (w.unmeasurable ??= {})[f] = a.reason ?? 'not-measured';
+        continue;
+      }
       const r = a.result;
-      if (f === 'head' && a.status === 'ok') {
+      if (f === 'head') {
         w.head = {
           bpm: r.bpm, musicalKey: r.musicalKey, introMs: r.introMs, confidence: r.confidence,
           sections: r.sections, pace: r.paceCurve, beats: r.beats, bars: r.bars, keyRanges: r.keyRanges,
           leadSilenceMs: r.leadSilenceMs,
         };
       } else if (f === 'loudness') {
-        w.loudness = a.status === 'ok'
-          ? { loudnessLufs: r.loudnessLufs, peakDb: r.peakDb }
-          : { unmeasurable: a.reason ?? 'not-measured' };
+        w.loudness = { loudnessLufs: r.loudnessLufs, peakDb: r.peakDb };
       } else if (f === 'tail') {
-        w.tail = a.status === 'ok'
-          ? { outro: r.outro, tailSilenceMs: r.tailSilenceMs, tailStartMs: r.tailStartMs }
-          : { unmeasurable: a.reason ?? 'tail-not-measured' };
-      } else if (f === 'clap' && a.status === 'ok' && r.audioEmbedding?.length === db.AUDIO_EMBEDDING_DIM) {
+        w.tail = { outro: r.outro, tailSilenceMs: r.tailSilenceMs, tailStartMs: r.tailStartMs };
+      } else if (f === 'clap' && r.audioEmbedding?.length === db.AUDIO_EMBEDDING_DIM) {
         w.clap = r.audioEmbedding;
         wroteClap = true;
-      } else if (f === 'vocal' && a.status === 'ok') {
+      } else if (f === 'vocal') {
         w.vocal = { vocalRanges: r.vocalRanges ?? [], tailVocalRanges: a.tailVocalRanges };
-      } else if (f === 'stems' && a.status === 'ok') {
+      } else if (f === 'stems') {
         w.stems = { attempted: true };
       }
     }
+    if (lyricVocal) {
+      if (w.head && lyricVocal.introMs != null) w.head.introMs = lyricVocal.introMs;
+      const tail = w.tail && !('unmeasurable' in w.tail) ? w.tail : null;
+      const outro = tail?.outro ?? db.getTrack(id)?.outro;
+      if (wantsVocal) {
+        w.vocal = { vocalRanges: lyricVocal.vocalRanges,
+          tailVocalRanges: outro ? lyricTailRanges(id, outro, lyricVocal) : null };
+      } else if (tail?.outro) {
+        tail.outro = { ...tail.outro, vocalRanges: lyricTailRanges(id, tail.outro, lyricVocal) };
+      }
+    }
     const answered = facets.filter((f) => {
-      const a = res.facets[f as analyzer.FacetName];
+      if (f === 'vocal' && lyricVocal) return true;
+      const a = res?.facets[f];
       return a && a.status !== 'failed' && a.status !== 'unavailable';
     });
     // Nothing usable came back: fail the track like a flat analysis would, so
     // the pass's systemic-failure guard sees it.
     if (failures.length > 0 && answered.length === 0) throw new Error(failures.join('; '));
+    if (answered.length === 0) return { kind: 'skipped' };
     if (failures.length > 0) w.failed = failures.join('; ');
     if (wroteClap && !audioMetaStamped) {
       db.setAudioEmbeddingMeta(audioModelLabel, db.AUDIO_EMBEDDING_DIM);
       audioMetaStamped = true;
     }
     db.writeFacetResults(id, w);
-    return { audioEmbedded: wroteClap, vocalAnalyzed: !!w.vocal };
+    return { kind: 'analyzed', audioEmbedded: wroteClap, vocalAnalyzed: !!w.vocal };
   };
 
   const runTrack = async (
@@ -660,14 +694,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
       const embed = want ? want.clap : audioBackfill ? true : undefined;
       const vocalWantedHere = want ? want.vocal : vocalBackfill;
       // Lyric-first vocal ranges (#1125), before spending a Demucs separation.
-      let lyricVocal: LyricVocalResult | null = null;
-      if (vocalWantedHere) {
-        try {
-          lyricVocal = deriveVocalFromLyrics(await subsonic.getStructuredLyrics(id));
-        } catch {
-          lyricVocal = null;
-        }
-      }
+      const lyricVocal = await lyricVocalFor(id, vocalWantedHere);
       // The concurrent path reserved headroom at admission; serial spends here.
       const stems_dir = admittedStems ? admittedStems.dir : allocateStems(id);
       // A lyric-decided track skips Demucs unless stem caching needs it anyway.
@@ -700,12 +727,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
         const vocalRanges = lyricVocal ? lyricVocal.vocalRanges : a.vocalRanges;
         let outro = a.outro;
         if (lyricVocal && outro) {
-          const durMs = (Number(db.getTrack(id)?.durationSec) || 0) * 1000;
-          const windowStartMs = durMs > 0 ? Math.min(outro.startMs, durMs - 20_000) : outro.startMs;
-          outro = {
-            ...outro,
-            vocalRanges: clipRangesToTail(lyricVocal.vocalRanges, windowStartMs, durMs > 0 ? durMs : null),
-          };
+          outro = { ...outro, vocalRanges: lyricTailRanges(id, outro, lyricVocal) };
         }
         db.upsertTrackAnalysis(id, {
           bpm: a.bpm,
@@ -753,7 +775,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
           console.error(`[analyze] ${id} audio-vector write failed: ${err?.message || err}`);
         }
       }
-      return { audioEmbedded: storedAudio, vocalAnalyzed: storedVocal };
+      return { kind: 'analyzed', audioEmbedded: storedAudio, vocalAnalyzed: storedVocal };
     } finally {
       // Best-effort, regardless of outcome.
       if (localPath) await rm(localPath, { force: true }).catch(() => {});
@@ -766,12 +788,14 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     index: number,
   ): Promise<void> => {
     if (outcome.status === 'fulfilled') {
-      analyzed += 1;
-      if (outcome.value.audioEmbedded) audioEmbedded += 1;
-      if (outcome.value.vocalAnalyzed) vocalAnalyzed += 1;
-      // A success proves the buffered failures were about their files.
-      flushFailureStamps();
-      consecutiveFailures = 0;
+      if (outcome.value.kind === 'analyzed') {
+        analyzed += 1;
+        if (outcome.value.audioEmbedded) audioEmbedded += 1;
+        if (outcome.value.vocalAnalyzed) vocalAnalyzed += 1;
+        // A success proves the buffered failures were about their files.
+        flushFailureStamps();
+        consecutiveFailures = 0;
+      }
     } else {
       failed += 1;
       consecutiveFailures += 1;

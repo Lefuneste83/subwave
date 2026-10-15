@@ -1,8 +1,7 @@
 // Per-facet analysis status: which parts of a track's acoustic analysis exist,
 // at which version, and why a missing one is missing. A shadow of the analysis
-// columns on `tracks` for now — every row here is DERIVED from those columns
-// (deriveFacetRows), so the two can't disagree. Nothing reads this table to
-// decide what to analyse yet; the facet planner will.
+// columns on `tracks` and explicit unmeasurable answers — every status here is
+// DERIVED from those facts (deriveFacetRows), so the two can't disagree.
 //
 // Why a separate table: one ANALYSIS_VERSION on `tracks` marks a track done for
 // every feature at once, so a track whose download was too large to reach its
@@ -91,6 +90,8 @@ export interface DerivedFacet {
 export interface DeriveOpts {
   // How an unmeasured tail is explained (a capped download can't reach it).
   tailReason?: string;
+  // A facet-only attempt need not have a head-analysis stamp to explain it.
+  unmeasurable?: Partial<Record<Facet, string>>;
 }
 
 // The one place a facet status is decided. Pure: same row in, same rows out —
@@ -133,6 +134,14 @@ export function deriveFacetRows(
   }
 
   if (row.has_stems) ok('stems');
+
+  for (const facet of FACETS) {
+    const reason = opts.unmeasurable?.[facet];
+    if (reason == null) continue;
+    const prior = out.find(r => r.facet === facet);
+    if (!prior) unmeasurable(facet, reason);
+    else if (prior.status === 'unmeasurable') prior.reason = reason;
+  }
 
   // A failed analysis counts against every facet it would have produced.
   // A facet-protocol failure also names its facets ("tail: …"); a named facet
@@ -184,6 +193,8 @@ interface StoredFacet {
   reason: string | null;
   attempts: number;
   source: string | null;
+  // The terminal attempt is a fact even when no measurement column exists.
+  unmeasurable_reason: string | null;
 }
 
 export interface SyncOpts extends DeriveOpts {
@@ -217,21 +228,29 @@ function syncTrackFacetsOn(d: Database.Database, id: string, opts: SyncOpts): vo
     return;
   }
   const hasClap = !!d.prepare('SELECT 1 FROM track_audio_vectors WHERE id = ? LIMIT 1').get(id);
-  const derived = deriveFacetRows(row, hasClap, opts);
   const stored = new Map(
     (d
-      .prepare('SELECT facet, status, version, reason, attempts, source FROM track_facet_status WHERE track_id = ?')
+      .prepare('SELECT facet, status, version, reason, attempts, source, unmeasurable_reason FROM track_facet_status WHERE track_id = ?')
       .all(id) as StoredFacet[]).map(r => [r.facet, r]),
   );
+  const unmeasurable: Partial<Record<Facet, string>> = {};
+  for (const r of stored.values()) {
+    if (r.unmeasurable_reason != null) unmeasurable[r.facet] = r.unmeasurable_reason;
+  }
+  Object.assign(unmeasurable, opts.unmeasurable);
+  if (opts.tailReason != null) unmeasurable.tail = opts.tailReason;
+  for (const facet of opts.fresh ?? []) delete unmeasurable[facet];
+  const derived = deriveFacetRows(row, hasClap, { ...opts, unmeasurable });
   const fresh = new Set(opts.fresh ?? []);
   const tried = new Set(opts.tried ?? []);
   const now = new Date().toISOString();
   const upsert = d.prepare(
-    `INSERT INTO track_facet_status (track_id, facet, version, status, reason, attempts, source, at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO track_facet_status (track_id, facet, version, status, reason, attempts, source, at, unmeasurable_reason)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(track_id, facet) DO UPDATE SET
        version = excluded.version, status = excluded.status, reason = excluded.reason,
-       attempts = excluded.attempts, source = excluded.source, at = excluded.at`,
+       attempts = excluded.attempts, source = excluded.source, at = excluded.at,
+       unmeasurable_reason = excluded.unmeasurable_reason`,
   );
   for (const r of derived) {
     const prev = stored.get(r.facet);
@@ -244,7 +263,8 @@ function syncTrackFacetsOn(d: Database.Database, id: string, opts: SyncOpts): vo
     // reason. A failure's reason is the latest error.
     if (!isFresh && prev && prev.status === r.status && r.status !== 'failed' && r.facet !== 'vocal') r.reason = prev.reason;
     const version =
-      isFresh || !prev || prev.status !== r.status ? r.version : Math.min(prev.version, r.version);
+      isFresh || !prev || (prev.status !== r.status && unmeasurable[r.facet] == null)
+        ? r.version : Math.min(prev.version, r.version);
     // 'seed' is reserved for rows the seed wrote; a live write that creates a
     // row without measuring it (a failure, a re-derive) records what it knows.
     const source = isFresh ? (opts.source ?? 'unknown') : (prev?.source ?? opts.source ?? null);
@@ -254,11 +274,12 @@ function syncTrackFacetsOn(d: Database.Database, id: string, opts: SyncOpts): vo
       prev.status === r.status &&
       prev.version === version &&
       prev.reason === r.reason &&
-      prev.attempts === r.attempts
+      prev.attempts === r.attempts &&
+      prev.unmeasurable_reason === (unmeasurable[r.facet] ?? null)
     ) {
       continue;
     }
-    upsert.run(id, r.facet, version, r.status, r.reason, r.attempts, source, now);
+    upsert.run(id, r.facet, version, r.status, r.reason, r.attempts, source, now, unmeasurable[r.facet] ?? null);
   }
   // Whatever the columns no longer support (cleared, or a failure wiped by a
   // success) goes: no row = not done.
@@ -317,6 +338,10 @@ export function ensureFacetStatus(d: Database.Database): number {
     .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='track_facet_status'`)
     .get();
   if (exists) {
+    const columns = d.pragma('table_info(track_facet_status)') as Array<{ name: string }>;
+    if (!columns.some(c => c.name === 'unmeasurable_reason')) {
+      d.exec('ALTER TABLE track_facet_status ADD COLUMN unmeasurable_reason TEXT');
+    }
     // An unchanged stamp means every row is still derived under the current
     // versions: nothing to do, and no per-open scan of the table. A missing
     // stamp (a table created before the meta row existed) re-derives once.
@@ -338,6 +363,7 @@ export function ensureFacetStatus(d: Database.Database): number {
         attempts  INTEGER NOT NULL DEFAULT 0,
         source    TEXT,
         at        TEXT    NOT NULL,
+        unmeasurable_reason TEXT,
         PRIMARY KEY (track_id, facet)
       ) WITHOUT ROWID;
       CREATE INDEX idx_facet_status ON track_facet_status(facet, status, version);
@@ -377,8 +403,8 @@ export function ensureFacetStatus(d: Database.Database): number {
 export function moveFacetRows(oldId: string, newId: string): void {
   const d = requireDb();
   d.prepare(
-    `INSERT OR IGNORE INTO track_facet_status (track_id, facet, version, status, reason, attempts, source, at)
-     SELECT ?, facet, version, status, reason, attempts, source, at
+    `INSERT OR IGNORE INTO track_facet_status (track_id, facet, version, status, reason, attempts, source, at, unmeasurable_reason)
+     SELECT ?, facet, version, status, reason, attempts, source, at, unmeasurable_reason
        FROM track_facet_status WHERE track_id = ?`,
   ).run(newId, oldId);
   d.prepare('DELETE FROM track_facet_status WHERE track_id = ?').run(oldId);
