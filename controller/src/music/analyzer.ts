@@ -1210,7 +1210,7 @@ export async function analyzeFacets(
     // Same degrade as analyzePathWithUrlFallback: no stems without shared state.
     const facets = opts.facets.filter(f => f !== 'stems');
     return facets.length ? facetRequest({ url, ...body, facets })
-      : { facets: {}, source: { kind: 'unknown', durationS: null, complete: null } };
+      : { facets: {}, source: { kind: 'unknown', durationS: null, complete: null, fallback: null, bytesRead: null, size: null } };
   }
 }
 
