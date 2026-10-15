@@ -28,6 +28,7 @@ process.env.STATE_DIR = stateDir;
 
 const db = await import('../src/music/library-db.js');
 const library = await import('../src/music/library.js');
+const { buildPickerContext, pickerScope } = await import('../src/llm/internal/tools/picker/scope.js');
 await db.open({ embeddingDim: 8, adoptStoredDim: true });
 
 const moods = ['calm', 'dark', 'warm'];
@@ -68,6 +69,22 @@ test('every pickStats field agrees with the dashboard stats()', () => {
   assert.deepEqual(Object.keys(p.byMood).sort(), ['calm', 'dark', 'warm'], 'per-mood counts, for the mood tools');
   assert.equal(p.mirrorTotal, 302);
   assert.ok(p.total > 0 && p.total < 302, 'untagged rows are excluded from total');
+});
+
+test('a warm picker context never recomputes expired dashboard stats', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  db.invalidateStats();
+  const stats = library.pickStats();
+  const labelShare = db.labelOnlyVectorCount() / stats.withEmbedding;
+  db.stats();
+  t.mock.timers.tick(6000);
+  const prepare = t.mock.method(db.requireDb(), 'prepare');
+
+  const ctx = buildPickerContext(pickerScope());
+  assert.equal(ctx.hasTextEmbeddings, true);
+  assert.equal(ctx.textIndexDegraded, labelShare > 0.5);
+  assert.equal(library.labelOnlyShare(), labelShare);
+  assert.equal(prepare.mock.callCount(), 0, 'warm pick preparation must not query the database');
 });
 
 test('an empty library reports no coverage', () => {
