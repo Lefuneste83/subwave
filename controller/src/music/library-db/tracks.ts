@@ -389,6 +389,12 @@ interface TrackAnalysisWrite {
   source?: FacetSource;
 }
 
+function preserveTailVocal(id: string, outro: TrackOutro): TrackOutro {
+  if (outro.vocalRanges != null) return outro;
+  const prior = getTrack(id)?.outro?.vocalRanges;
+  return prior != null ? { ...outro, vocalRanges: prior } : outro;
+}
+
 // Stamps ANALYSIS_VERSION so resumable runs skip analysed rows and a bump
 // re-targets stale ones. UPDATE on an existing meta row.
 export function upsertTrackAnalysis(id: string, a: TrackAnalysisWrite): void {
@@ -396,12 +402,10 @@ export function upsertTrackAnalysis(id: string, a: TrackAnalysisWrite): void {
   d.transaction(() => {
   let outro = a.outro;
   let carriedTailVocal = false;
-  if (a.preserveTailVocal && outro && outro.vocalRanges == null) {
-    const prior = getTrack(id)?.outro?.vocalRanges;
-    if (prior != null) {
-      outro = { ...outro, vocalRanges: prior };
-      carriedTailVocal = true;
-    }
+  if (a.preserveTailVocal && outro) {
+    const kept = preserveTailVocal(id, outro);
+    carriedTailVocal = kept !== outro;
+    outro = kept;
   }
   d
     .prepare(
@@ -515,6 +519,9 @@ export function writeFacetResults(id: string, w: FacetWrite): void {
   const d = requireDb();
   d.transaction(() => {
     const fresh: Facet[] = [];
+    const tried: Facet[] = [];
+    const unmeasurable: Partial<Record<Facet, string>> = {};
+    let carriedTailVocal = false;
     if (w.head) {
       const h = w.head;
       d.prepare(
@@ -536,23 +543,32 @@ export function writeFacetResults(id: string, w: FacetWrite): void {
       if (!('unmeasurable' in w.loudness)) {
         d.prepare('UPDATE tracks SET loudness_lufs = ?, peak_db = ? WHERE id = ?')
           .run(finite(w.loudness.loudnessLufs), finite(w.loudness.peakDb), id);
+        fresh.push('loudness');
+      } else {
+        tried.push('loudness');
+        unmeasurable.loudness = w.loudness.unmeasurable;
       }
-      fresh.push('loudness');
     }
-    let tailReason: string | undefined;
     if (w.tail) {
       if ('unmeasurable' in w.tail) {
-        tailReason = w.tail.unmeasurable;
+        unmeasurable.tail = w.tail.unmeasurable;
+        tried.push('tail');
       } else {
+        let outro = w.tail.outro;
+        if (outro && w.vocal?.tailVocalRanges == null) {
+          const kept = preserveTailVocal(id, outro);
+          carriedTailVocal = kept !== outro;
+          outro = kept;
+        }
         // A fresh measurement off a proven end: overwrite, never COALESCE.
         d.prepare('UPDATE tracks SET outro_json = ?, tail_silence_ms = ?, tail_start_ms = ? WHERE id = ?').run(
-          w.tail.outro ? JSON.stringify(w.tail.outro) : null,
+          outro ? JSON.stringify(outro) : null,
           finite(w.tail.tailSilenceMs) != null ? Math.max(0, Math.round(w.tail.tailSilenceMs as number)) : null,
           finite(w.tail.tailStartMs) != null ? Math.max(0, Math.round(w.tail.tailStartMs as number)) : null,
           id,
         );
+        fresh.push('tail');
       }
-      fresh.push('tail');
     }
     if (w.vocal) {
       d.prepare('UPDATE tracks SET vocal_ranges_json = ? WHERE id = ?').run(JSON.stringify(w.vocal.vocalRanges), id);
@@ -566,7 +582,7 @@ export function writeFacetResults(id: string, w: FacetWrite): void {
           } catch { /* a corrupt outro keeps its old value */ }
         }
       }
-      fresh.push('vocal');
+      if (!carriedTailVocal) fresh.push('vocal');
     }
     if (w.stems) {
       d.prepare('UPDATE tracks SET stems_at = ? WHERE id = ?').run(new Date().toISOString(), id);
@@ -582,7 +598,7 @@ export function writeFacetResults(id: string, w: FacetWrite): void {
         'UPDATE tracks SET analyze_error = NULL, analyze_failed_at = NULL, analyze_fail_count = NULL WHERE id = ?',
       ).run(id);
     }
-    syncTrackFacets(id, { fresh, source: w.source, tailReason });
+    syncTrackFacets(id, { fresh, tried, source: w.source, unmeasurable });
     if (w.clap) upsertTrackAudioVector(id, w.clap);
   })();
 }

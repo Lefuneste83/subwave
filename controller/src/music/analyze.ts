@@ -189,6 +189,21 @@ async function scoreAudioMoods(): Promise<void> {
   }
 }
 
+async function lyricVocalFor(id: string, wanted: boolean): Promise<LyricVocalResult | null> {
+  if (!wanted) return null;
+  try {
+    return deriveVocalFromLyrics(await subsonic.getStructuredLyrics(id));
+  } catch {
+    return null;
+  }
+}
+
+function lyricTailRanges(id: string, outro: Pick<analyzer.OutroInfo, 'startMs'>, lyricVocal: LyricVocalResult) {
+  const durMs = (Number(db.getTrack(id)?.durationSec) || 0) * 1000;
+  const windowStartMs = durMs > 0 ? Math.min(outro.startMs, durMs - 20_000) : outro.startMs;
+  return clipRangesToTail(lyricVocal.vocalRanges, windowStartMs, durMs > 0 ? durMs : null);
+}
+
 export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<AnalyzeStats> {
   if (!(await analyzer.isAvailable())) {
     // The only two things resolveBackend() consults, named by their env vars.
@@ -403,7 +418,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   }
   // A facet plan on a backend that speaks the facet protocol asks for exactly
   // the planned facets; an older backend gets the flat request (flags above).
-  const useFacets = !!plan && analyzer.facetsAvailable() === true;
+  const useFacets = !!plan && (await analyzer.facetsAvailable()) === true;
   if (plan) {
     logEvent(
       'info',
@@ -526,21 +541,24 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     // A tail measured on its own also brings the outro's vocal ranges when the
     // station uses vocal activity — otherwise the vocal facet turns head-only
     // and the regular vocal backfill would chase these tracks forever.
-    const tailVocals = facets.includes('tail') && !facets.includes('vocal') && vocalBackfill;
-    const res = await analyzer.analyzeFacets(
+    const wantsVocal = facets.includes('vocal');
+    const tailVocals = facets.includes('tail') && !wantsVocal && vocalBackfill;
+    const lyricVocal = await lyricVocalFor(id, wantsVocal || tailVocals);
+    const requestedFacets = lyricVocal ? facets.filter(f => f !== 'vocal') : facets;
+    const res = requestedFacets.length ? await analyzer.analyzeFacets(
       id,
-      { facets: facets as analyzer.FacetName[], tailVocals, stems_dir, complete: localComplete },
+      { facets: requestedFacets, tailVocals: tailVocals && !lyricVocal, stems_dir, complete: localComplete },
       localPath ?? undefined,
-    );
+    ) : null;
     const source: db.FacetSource =
-      res.source.kind === 'capped-download' ? (res.source.complete === false ? 'capped' : 'url')
+      res?.source.kind === 'capped-download' ? (res.source.complete === false ? 'capped' : 'url')
         : localComplete === true ? 'full' : localComplete === false ? 'capped' : 'unknown';
 
     const w: db.FacetWrite = { source };
     const failures: string[] = [];
     let wroteClap = false;
-    for (const f of facets) {
-      const a = res.facets[f as analyzer.FacetName];
+    for (const f of requestedFacets) {
+      const a = res?.facets[f];
       if (!a) continue;
       if (a.status === 'failed') { failures.push(db.facetFailure(f, a.reason)); continue; }
       if (a.status === 'unavailable') continue;
@@ -568,8 +586,20 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
         w.stems = { attempted: true };
       }
     }
+    if (lyricVocal) {
+      if (w.head && lyricVocal.introMs != null) w.head.introMs = lyricVocal.introMs;
+      const tail = w.tail && !('unmeasurable' in w.tail) ? w.tail : null;
+      const outro = tail?.outro ?? db.getTrack(id)?.outro;
+      if (wantsVocal) {
+        w.vocal = { vocalRanges: lyricVocal.vocalRanges,
+          tailVocalRanges: outro ? lyricTailRanges(id, outro, lyricVocal) : null };
+      } else if (tail?.outro) {
+        tail.outro = { ...tail.outro, vocalRanges: lyricTailRanges(id, tail.outro, lyricVocal) };
+      }
+    }
     const answered = facets.filter((f) => {
-      const a = res.facets[f as analyzer.FacetName];
+      if (f === 'vocal' && lyricVocal) return true;
+      const a = res?.facets[f];
       return a && a.status !== 'failed' && a.status !== 'unavailable';
     });
     // Nothing usable came back: fail the track like a flat analysis would, so
@@ -617,14 +647,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
       const embed = want ? want.clap : audioBackfill ? true : undefined;
       const vocalWantedHere = want ? want.vocal : vocalBackfill;
       // Lyric-first vocal ranges (#1125), before spending a Demucs separation.
-      let lyricVocal: LyricVocalResult | null = null;
-      if (vocalWantedHere) {
-        try {
-          lyricVocal = deriveVocalFromLyrics(await subsonic.getStructuredLyrics(id));
-        } catch {
-          lyricVocal = null;
-        }
-      }
+      const lyricVocal = await lyricVocalFor(id, vocalWantedHere);
       // The concurrent path reserved headroom at admission; serial spends here.
       const stems_dir = admittedStems ? admittedStems.dir : allocateStems(id);
       // A lyric-decided track skips Demucs unless stem caching needs it anyway.
@@ -657,12 +680,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
         const vocalRanges = lyricVocal ? lyricVocal.vocalRanges : a.vocalRanges;
         let outro = a.outro;
         if (lyricVocal && outro) {
-          const durMs = (Number(db.getTrack(id)?.durationSec) || 0) * 1000;
-          const windowStartMs = durMs > 0 ? Math.min(outro.startMs, durMs - 20_000) : outro.startMs;
-          outro = {
-            ...outro,
-            vocalRanges: clipRangesToTail(lyricVocal.vocalRanges, windowStartMs, durMs > 0 ? durMs : null),
-          };
+          outro = { ...outro, vocalRanges: lyricTailRanges(id, outro, lyricVocal) };
         }
         db.upsertTrackAnalysis(id, {
           bpm: a.bpm,

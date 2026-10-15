@@ -291,6 +291,81 @@ await test('re-analyze (clearAnalysis) mirrors exactly what it clears', () => {
   assertConsistent();
 });
 
+await test('an existing facet table gains terminal answers without changing user_version', async () => {
+  const before = brief('full');
+  sql.exec('ALTER TABLE track_facet_status DROP COLUMN unmeasurable_reason');
+  db.close();
+  await db.open({ embeddingDim: 8, adoptStoredDim: true });
+  assert.equal(d.pragma('user_version', { simple: true }), userVersion);
+  assert.deepEqual(brief('full'), before);
+  assert.ok((d.pragma('table_info(track_facet_status)') as Array<{ name: string }>)
+    .some(c => c.name === 'unmeasurable_reason'));
+});
+
+for (const facet of ['tail', 'loudness'] as const) {
+  await test(`an unmeasurable ${facet} retry keeps the retained measurement's version`, () => {
+    const id = `retained-${facet}`;
+    db.upsertTrackMeta(id, { title: id, duration: 240 });
+    db.upsertTrackAnalysis(id, { bpm: 120, loudnessLufs: -10,
+      outro: { startMs: 220000, ending: 'cold', lufs: -10, bpm: 120, beats: null, bars: null } });
+    sql.prepare('UPDATE track_facet_status SET version = 0 WHERE track_id = ? AND facet = ?').run(id, facet);
+    db.writeFacetResults(id, { source: 'capped', [facet]: { unmeasurable: 'capped-download' } });
+    assert.equal(rows(id)[facet].version, 0);
+    assert.equal(rows(id)[facet].status, 'ok');
+    assert.ok(db.facetNeedsIds(facet).includes(id));
+    assert.equal(db.getTrack(id)?.loudnessLufs, -10);
+    assert.equal(db.getTrack(id)?.outro?.startMs, 220000);
+  });
+
+  await test(`a first ${facet}-only unmeasurable answer survives resync and reopening`, async () => {
+    const id = `terminal-${facet}`;
+    const reason = facet === 'tail' ? 'capped-download' : 'no-loudness-meter';
+    db.upsertTrackMeta(id, { title: id, duration: 240 });
+    db.writeFacetResults(id, { source: 'capped', [facet]: { unmeasurable: reason } });
+    const expected = { status: 'unmeasurable', reason, version: db.FACET_VERSIONS[facet] };
+    const answer = () => {
+      const r = rows(id)[facet];
+      return r && { status: r.status, reason: r.reason, version: r.version };
+    };
+    assert.deepEqual(answer(), expected);
+    assert.equal(rows(id).head, undefined, 'a facet answer cannot complete head analysis');
+    assert.ok(!db.facetNeedsIds(facet).includes(id));
+    db.upsertTrackAudioVector(id, clap());
+    assert.deepEqual(answer(), expected);
+    sql.prepare('DELETE FROM track_facet_meta').run();
+    db.close();
+    await db.open({ embeddingDim: 8, adoptStoredDim: true });
+    assert.deepEqual(answer(), expected);
+    sql.prepare('UPDATE track_facet_status SET version = 0 WHERE track_id = ? AND facet = ?').run(id, facet);
+    db.recordAnalysisFailure(id, `${facet}: decode failed`);
+    assert.equal(rows(id)[facet].status, 'failed');
+    db.clearAnalysisFailures(id);
+    assert.deepEqual(answer(), { ...expected, version: 0 }, 'clearing a failed retry keeps the older terminal answer');
+    assert.ok(db.facetNeedsIds(facet).includes(id));
+    assert.equal(checkFacets().driftCount, 0);
+    db.writeFacetResults(id, { source: 'full', [facet]: facet === 'tail'
+      ? { outro: { startMs: 220000, ending: 'cold', lufs: -10, bpm: 120, beats: null, bars: null },
+          tailSilenceMs: 0, tailStartMs: 240000 }
+      : { loudnessLufs: -10, peakDb: -1 } });
+    assert.equal(rows(id)[facet].status, 'ok');
+    const stored = sql.prepare('SELECT unmeasurable_reason FROM track_facet_status WHERE track_id = ? AND facet = ?')
+      .get(id, facet) as { unmeasurable_reason: string | null };
+    assert.equal(stored.unmeasurable_reason, null);
+  });
+}
+
+await test('terminal facet answers follow id adoption and are removed by analysis reset', () => {
+  for (const id of ['terminal-old', 'terminal-new']) db.upsertTrackMeta(id, { title: id, duration: 240 });
+  db.writeFacetResults('terminal-old', { source: 'capped', tail: { unmeasurable: 'capped-download' } });
+  db.moveFacetRows('terminal-old', 'terminal-new');
+  db.syncTrackFacets('terminal-new');
+  assert.equal(rows('terminal-new').tail.reason, 'capped-download');
+  assert.equal(rows('terminal-new').head, undefined);
+  db.clearAnalysis();
+  assert.deepEqual(rows('terminal-new'), {});
+  assert.equal(checkFacets().driftCount, 0);
+});
+
 await test('facetCounts adds up', () => {
   for (const c of db.facetCounts()) {
     assert.equal(c.ok + c.unmeasurable + c.failed + c.missing, c.total, c.facet);
