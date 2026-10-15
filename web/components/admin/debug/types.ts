@@ -155,6 +155,14 @@ interface LlmCall {
 export interface DebugLlm {
   activeModel?: string;
   provider?: string;
+  /** Set while D5's sticky window sends calls to the backup LLM; null/absent = normal routing. */
+  routedToBackup?: {
+    kind?: 'unreachable' | 'exhausted' | 'hung';
+    since?: number;
+    until?: number;
+    provider?: string;
+    model?: string;
+  } | null;
   budget?: DebugBudget;
   /** A primary marked down and routed around — the reason behind backup calls
    * that carry no failover record of their own. */
