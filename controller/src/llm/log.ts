@@ -43,3 +43,7 @@ export {
 
 // Live process-local generation ages, separate from completed-call accounting.
 export { generationHealthSnapshot } from './internal/core/generation.js';
+
+// Whether a down primary is being routed around, and why — the reason behind
+// backup calls that carry no failover record of their own.
+export { failoverStickySnapshot } from './internal/core/failover.js';
