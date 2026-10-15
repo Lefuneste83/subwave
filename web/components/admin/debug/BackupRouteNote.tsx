@@ -2,26 +2,37 @@ import type { DebugLlm } from './types';
 
 type Routing = NonNullable<DebugLlm['routedToBackup']>;
 
-const REASON: Record<string, string> = {
-  unreachable: 'primary unreachable',
-  exhausted: 'primary failing (5xx)',
-  hung: 'primary not answering',
+const ago = (ms: number) => {
+  const mins = Math.floor(ms / 60_000);
+  return mins < 1 ? 'under a minute ago' : `${mins} min ago`;
 };
 
-// The tooltip: why the primary was set aside and how long the window has left.
-// The controller re-checks the window on every /debug read, so this only has to
-// phrase it; `now` is a parameter so the wording can be tested.
+// The tooltip, one fact per sentence: why, how much, whether the backup is
+// coping, and when the primary gets its next try. The controller decides all
+// of it on every /debug read; this only phrases it. `now` is a parameter so
+// the wording can be tested.
 export function backupRouteTitle(r: Routing, now: number = Date.now()): string {
-  const why = (r.kind && REASON[r.kind]) || 'primary marked down';
-  if (typeof r.until !== 'number') return `${why} — routing to the backup`;
-  const mins = Math.max(1, Math.ceil((r.until - now) / 60_000));
-  return `${why} — routing to the backup for about ${mins} more min, then the primary is tried again`;
+  const parts = [r.reason || 'primary not used'];
+  if (typeof r.calls === 'number' && typeof r.since === 'number') {
+    const mins = Math.floor((now - r.since) / 60_000);
+    parts.push(`${r.calls} call${r.calls === 1 ? '' : 's'} to the backup in the last ${mins < 1 ? 'minute' : `${mins} min`}`);
+  }
+  if (typeof r.lastAt === 'number') parts.push(`last one ${ago(now - r.lastAt)}`);
+  if (r.lastOk === false) parts.push('the backup failed too on the last call');
+  if (typeof r.retryPrimaryAt === 'number') {
+    const mins = Math.max(1, Math.ceil((r.retryPrimaryAt - now) / 60_000));
+    parts.push(`primary tried again in about ${mins} min`);
+  } else {
+    parts.push('the next call tries the primary first');
+  }
+  return parts.join(' · ');
 }
 
-// Inline note on the "LLM recent calls" subtitle while calls go to the backup
-// (N2). The dot borrows the Dash "On Air" LIVE lamp's colour: the theme
-// accent with its glow. Nothing renders under normal routing, so the subtitle
-// returns to its plain form when the primary is back.
+// Inline note on the "LLM recent calls" subtitle whenever calls are going to
+// the backup instead of the primary, whatever the cause (N2). The dot borrows
+// the Dash "On Air" LIVE lamp's colour: the theme accent with its glow.
+// Nothing renders under normal routing, so the subtitle returns to its plain
+// form as soon as the primary answers again.
 export default function BackupRouteNote({ routing }: { routing?: DebugLlm['routedToBackup'] }) {
   if (!routing) return null;
   const label = [routing.provider, routing.model].filter(Boolean).join(' / ') || 'backup';

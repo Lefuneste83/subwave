@@ -4,12 +4,16 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import BackupRouteNote, { backupRouteTitle } from './BackupRouteNote';
 
+const T0 = 1_000_000_000;
 const routing = {
-  kind: 'exhausted' as const,
-  since: 1_000_000,
-  until: 1_000_000 + 5 * 60_000,
+  reason: 'primary cannot serve (5xx after retries)',
+  since: T0,
+  lastAt: T0 + 2 * 60_000,
+  calls: 7,
+  lastOk: true,
   provider: 'locca',
   model: 'locca:qwythos-9b',
+  retryPrimaryAt: T0 + 5 * 60_000,
 };
 
 test('while routed, the note names the backup in the subtitle form "provider / model"', () => {
@@ -28,16 +32,25 @@ test('normal routing renders nothing, so the subtitle returns to its plain form'
   assert.equal(renderToStaticMarkup(createElement(BackupRouteNote, {})), '');
 });
 
-test('the tooltip gives the reason and the time left in the window', () => {
+test('the tooltip says why, how much, and when the primary is tried again (sticky window)', () => {
   assert.equal(
-    backupRouteTitle(routing, routing.since + 60_000),
-    'primary failing (5xx) — routing to the backup for about 4 more min, then the primary is tried again',
+    backupRouteTitle(routing, T0 + 3 * 60_000),
+    'primary cannot serve (5xx after retries) · 7 calls to the backup in the last 3 min · last one 1 min ago · primary tried again in about 2 min',
   );
-  assert.match(backupRouteTitle({ ...routing, kind: 'unreachable' }, routing.since), /^primary unreachable/);
-  assert.match(backupRouteTitle({ ...routing, kind: 'hung' }, routing.since), /^primary not answering/);
 });
 
-test('the tooltip never counts below one minute, and copes with a partial payload', () => {
-  assert.match(backupRouteTitle(routing, routing.until - 1_000), /about 1 more min/);
-  assert.equal(backupRouteTitle({ provider: 'locca' }), 'primary marked down — routing to the backup');
+test('a one-off failover says the next call tries the primary first', () => {
+  const r = { ...routing, reason: 'primary model unavailable', calls: 1, lastAt: T0, retryPrimaryAt: undefined };
+  assert.equal(
+    backupRouteTitle(r, T0 + 10_000),
+    'primary model unavailable · 1 call to the backup in the last minute · last one under a minute ago · the next call tries the primary first',
+  );
+});
+
+test('a backup that failed too is called out', () => {
+  assert.match(backupRouteTitle({ ...routing, lastOk: false }, T0), /the backup failed too on the last call/);
+});
+
+test('the tooltip copes with a partial payload', () => {
+  assert.equal(backupRouteTitle({ provider: 'locca' }), 'primary not used · the next call tries the primary first');
 });

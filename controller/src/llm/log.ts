@@ -47,6 +47,7 @@ export { generationHealthSnapshot } from './internal/core/generation.js';
 // Whether a down primary is being routed around, and why — the reason behind
 // backup calls that carry no failover record of their own.
 export { failoverStickySnapshot } from './internal/core/failover.js';
-// Whether the sticky failover window is currently sending calls to the backup
-// (D5), for /debug's "routed to backup" line. Read-only; null = normal routing.
+// Whether LLM calls are currently going to the backup instead of the primary
+// (any failover, sticky or one-off), for /debug's "routed to backup" line.
+// Read-only; null = normal routing.
 export { failoverRoutingSnapshot, type FailoverRouting } from './internal/core/failover.js';
