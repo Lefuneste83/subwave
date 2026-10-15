@@ -497,10 +497,11 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   const prefetch = (songId: string): Prefetch =>
     analyzer.downloadCapped(songId).then((r) => r, (err) => ({ err }));
 
-  interface TrackWorkResult {
+  type TrackWorkResult = { kind: 'skipped' } | {
+    kind: 'analyzed';
     audioEmbedded: boolean;
     vocalAnalyzed: boolean;
-  }
+  };
 
   const allocateStems = (id: string): string | undefined => {
     const want = planned.get(id);
@@ -544,7 +545,8 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     const wantsVocal = facets.includes('vocal');
     const tailVocals = facets.includes('tail') && !wantsVocal && vocalBackfill;
     const lyricVocal = await lyricVocalFor(id, wantsVocal || tailVocals);
-    const requestedFacets = lyricVocal ? facets.filter(f => f !== 'vocal') : facets;
+    const requestedFacets = facets.filter(f =>
+      !(f === 'vocal' && lyricVocal) && !(f === 'stems' && !stems_dir));
     const res = requestedFacets.length ? await analyzer.analyzeFacets(
       id,
       { facets: requestedFacets, tailVocals: tailVocals && !lyricVocal, stems_dir, complete: localComplete },
@@ -562,27 +564,27 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
       if (!a) continue;
       if (a.status === 'failed') { failures.push(db.facetFailure(f, a.reason)); continue; }
       if (a.status === 'unavailable') continue;
+      if (a.status === 'unmeasurable') {
+        (w.unmeasurable ??= {})[f] = a.reason ?? 'not-measured';
+        continue;
+      }
       const r = a.result;
-      if (f === 'head' && a.status === 'ok') {
+      if (f === 'head') {
         w.head = {
           bpm: r.bpm, musicalKey: r.musicalKey, introMs: r.introMs, confidence: r.confidence,
           sections: r.sections, pace: r.paceCurve, beats: r.beats, bars: r.bars, keyRanges: r.keyRanges,
           leadSilenceMs: r.leadSilenceMs,
         };
       } else if (f === 'loudness') {
-        w.loudness = a.status === 'ok'
-          ? { loudnessLufs: r.loudnessLufs, peakDb: r.peakDb }
-          : { unmeasurable: a.reason ?? 'not-measured' };
+        w.loudness = { loudnessLufs: r.loudnessLufs, peakDb: r.peakDb };
       } else if (f === 'tail') {
-        w.tail = a.status === 'ok'
-          ? { outro: r.outro, tailSilenceMs: r.tailSilenceMs, tailStartMs: r.tailStartMs }
-          : { unmeasurable: a.reason ?? 'tail-not-measured' };
-      } else if (f === 'clap' && a.status === 'ok' && r.audioEmbedding?.length === db.AUDIO_EMBEDDING_DIM) {
+        w.tail = { outro: r.outro, tailSilenceMs: r.tailSilenceMs, tailStartMs: r.tailStartMs };
+      } else if (f === 'clap' && r.audioEmbedding?.length === db.AUDIO_EMBEDDING_DIM) {
         w.clap = r.audioEmbedding;
         wroteClap = true;
-      } else if (f === 'vocal' && a.status === 'ok') {
+      } else if (f === 'vocal') {
         w.vocal = { vocalRanges: r.vocalRanges ?? [], tailVocalRanges: a.tailVocalRanges };
-      } else if (f === 'stems' && a.status === 'ok') {
+      } else if (f === 'stems') {
         w.stems = { attempted: true };
       }
     }
@@ -605,13 +607,14 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     // Nothing usable came back: fail the track like a flat analysis would, so
     // the pass's systemic-failure guard sees it.
     if (failures.length > 0 && answered.length === 0) throw new Error(failures.join('; '));
+    if (answered.length === 0) return { kind: 'skipped' };
     if (failures.length > 0) w.failed = failures.join('; ');
     if (wroteClap && !audioMetaStamped) {
       db.setAudioEmbeddingMeta(audioModelLabel, db.AUDIO_EMBEDDING_DIM);
       audioMetaStamped = true;
     }
     db.writeFacetResults(id, w);
-    return { audioEmbedded: wroteClap, vocalAnalyzed: !!w.vocal };
+    return { kind: 'analyzed', audioEmbedded: wroteClap, vocalAnalyzed: !!w.vocal };
   };
 
   const runTrack = async (
@@ -728,7 +731,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
           console.error(`[analyze] ${id} audio-vector write failed: ${err?.message || err}`);
         }
       }
-      return { audioEmbedded: storedAudio, vocalAnalyzed: storedVocal };
+      return { kind: 'analyzed', audioEmbedded: storedAudio, vocalAnalyzed: storedVocal };
     } finally {
       // Best-effort, regardless of outcome.
       if (localPath) await rm(localPath, { force: true }).catch(() => {});
@@ -741,12 +744,14 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     index: number,
   ): Promise<void> => {
     if (outcome.status === 'fulfilled') {
-      analyzed += 1;
-      if (outcome.value.audioEmbedded) audioEmbedded += 1;
-      if (outcome.value.vocalAnalyzed) vocalAnalyzed += 1;
-      // A success proves the buffered failures were about their files.
-      flushFailureStamps();
-      consecutiveFailures = 0;
+      if (outcome.value.kind === 'analyzed') {
+        analyzed += 1;
+        if (outcome.value.audioEmbedded) audioEmbedded += 1;
+        if (outcome.value.vocalAnalyzed) vocalAnalyzed += 1;
+        // A success proves the buffered failures were about their files.
+        flushFailureStamps();
+        consecutiveFailures = 0;
+      }
     } else {
       failed += 1;
       consecutiveFailures += 1;

@@ -51,11 +51,11 @@ export function checkFacets(sample = 10): FacetCheckReport {
   const clap = new Set(
     (d.prepare('SELECT id FROM track_audio_vectors').all() as Array<{ id: string }>).map(r => r.id),
   );
-  const stored = new Map<string, Map<db.Facet, { status: string; attempts: number; unmeasurable_reason: string | null }>>();
+  const stored = new Map<string, Map<db.Facet, { status: string; version: number; attempts: number; unmeasurable_reason: string | null }>>();
   let rows = 0;
   for (const r of d
-    .prepare('SELECT track_id, facet, status, attempts, unmeasurable_reason FROM track_facet_status')
-    .all() as Array<{ track_id: string; facet: db.Facet; status: string; attempts: number; unmeasurable_reason: string | null }>) {
+    .prepare('SELECT track_id, facet, status, version, attempts, unmeasurable_reason FROM track_facet_status')
+    .all() as Array<{ track_id: string; facet: db.Facet; status: string; version: number; attempts: number; unmeasurable_reason: string | null }>) {
     rows += 1;
     let m = stored.get(r.track_id);
     if (!m) stored.set(r.track_id, (m = new Map()));
@@ -92,7 +92,12 @@ export function checkFacets(sample = 10): FacetCheckReport {
     ['stems', 'needsStemsIds()', () => db.needsStemsIds()],
   ];
   const scopes: ScopeDiff[] = legacy.map(([facet, name, q]) => {
-    const a = new Set(q());
+    // Legacy columns cannot represent an explicit terminal facet answer.
+    const a = new Set(q().filter(id => {
+      const cell = stored.get(id)?.get(facet);
+      return !(cell?.status === 'unmeasurable' && cell.unmeasurable_reason != null
+        && cell.version >= db.FACET_VERSIONS[facet]);
+    }));
     const b = new Set(db.facetNeedsIds(facet));
     const onlyLegacy = [...a].filter(id => !b.has(id));
     const onlyFacet = [...b].filter(id => !a.has(id));

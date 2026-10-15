@@ -2,7 +2,7 @@
 // The write path every ingest pass (tagger, analyzer, enricher) goes through.
 
 import { ANALYSIS_VERSION, AUDIO_EMBEDDING_DIM, SQL_HAS_MOODS, TAGGER_VERSION, getEmbeddingDim, requireDb } from './handle.js';
-import { clearFacetFailures, clearFacetRows, syncTrackFacets, type Facet, type FacetSource } from './facets.js';
+import { FACETS, clearFacetFailures, clearFacetRows, syncTrackFacets, type Facet, type FacetSource } from './facets.js';
 import type { TagWrite, TrackEnrichment, TrackKeyRange, TrackMeta, TrackOutro, TrackPaceSpan, TrackRecord, TrackRow, TrackSection } from './types.js';
 import { normaliseYear, rowToTrack, safeParseArray } from './rows.js';
 import { runDdl } from './schema.js';
@@ -502,6 +502,7 @@ export interface FacetWrite {
   clap?: number[];
   vocal?: { vocalRanges: TrackSection[]; tailVocalRanges: TrackSection[] | null };
   stems?: { attempted: true };
+  unmeasurable?: Partial<Record<Facet, string>>;
   // Set when any requested facet failed: counts one failed attempt for the
   // track, exactly like a failed flat analysis. Absent = every facet answered,
   // which clears the failure history like a flat success.
@@ -519,8 +520,8 @@ export function writeFacetResults(id: string, w: FacetWrite): void {
   const d = requireDb();
   d.transaction(() => {
     const fresh: Facet[] = [];
-    const tried: Facet[] = [];
-    const unmeasurable: Partial<Record<Facet, string>> = {};
+    const tried: Facet[] = FACETS.filter(f => w.unmeasurable?.[f] != null);
+    const unmeasurable: Partial<Record<Facet, string>> = { ...w.unmeasurable };
     let carriedTailVocal = false;
     if (w.head) {
       const h = w.head;
@@ -568,6 +569,12 @@ export function writeFacetResults(id: string, w: FacetWrite): void {
           id,
         );
         fresh.push('tail');
+        if (w.tail.outro?.vocalRanges != null) {
+          const prior = d.prepare<[string], { reason: string | null }>(
+            "SELECT reason FROM track_facet_status WHERE track_id = ? AND facet = 'vocal'",
+          ).get(id);
+          if (prior?.reason === 'head-only') fresh.push('vocal');
+        }
       }
     }
     if (w.vocal) {
