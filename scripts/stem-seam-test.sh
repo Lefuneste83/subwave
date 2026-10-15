@@ -10,7 +10,7 @@
 # mixer and correctly fails on a checkout missing the required fix.
 #
 # Needs controller/node_modules (npm ci), Python with numpy + soundfile
-# (or ANALYZER_IMAGE), and savonet/liquidsoap:v2.4.5 (or LIQ_BIN).
+# (or ANALYZER_IMAGE), and savonet/liquidsoap:v2.4.6 (or LIQ_BIN).
 # Output: scripts/.fx-render/stemseam/ or STEM_SEAM_WORK.
 # Frame-boundary buffering: `cross` can buffer a frame (20ms) less than a
 # seam's stamp. radio.liq's clip seam alignment absorbs that, so the beat grid
@@ -19,7 +19,7 @@
 # check tolerates the frame and the alignment slack separately.
 set -euo pipefail
 
-IMAGE="${LIQ_IMAGE:-savonet/liquidsoap:v2.4.5}"
+IMAGE="${LIQ_IMAGE:-savonet/liquidsoap:v2.4.6}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 WORK="${STEM_SEAM_WORK:-$HERE/.fx-render/stemseam}"
