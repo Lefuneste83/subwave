@@ -7,6 +7,7 @@ import * as subsonic from './subsonic.js';
 import { clearPickerSourceCache } from '../llm/tools.js';
 import { shortlistOffers } from './shortlist-offers.js';
 import * as library from './library.js';
+import { isInstrumental } from './lyric-vocal.js';
 import * as dj from '../llm/dj.js';
 import { nearestId } from '../llm/sdk.js';
 import { logEvent } from '../observability/events.js';
@@ -813,10 +814,8 @@ export async function pickViaPool(queue, ctx, rankTarget: { bpm: number | null; 
           pace: c.paceMean ?? rec?.paceMean ?? undefined,
           // Mirrors the agent picker's `sections`.
           sections: library.sectionCount(c) ?? library.sectionCount(rec) ?? undefined,
-          // Instrumental flag from measured vocal ranges ([] = no vocals).
-          instrumental: Array.isArray(rec?.vocalRanges)
-            ? rec.vocalRanges.length === 0
-            : undefined,
+          // Instrumental flag from the shared measured-duration policy.
+          instrumental: isInstrumental(rec?.vocalRanges, rec?.vocalRangesInvalid) ?? undefined,
           unaired: neverAired,
           source: c._source || null,
           // Cosine similarity to the expected predecessor, KNN sources only.

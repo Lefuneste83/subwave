@@ -116,8 +116,10 @@ import {
   maxTrackSecondsValueSchema,
   isGeminiLibraryLanguage,
   normalizeGeminiLibraryLanguage,
+  ttsVoiceLevellingSchema,
   type ScheduledBackupSettings,
   type JingleRotateOwner,
+  type TtsPatch,
 } from './schemas/settings.js';
 import { jingleRotateOwner, setJingleRotateOwner } from './broadcast/jingle-rotate.js';
 import { minTrackSeconds, peek, setCache } from './settings/store.js';
@@ -800,6 +802,7 @@ export async function load() {
     schedule,
     scheduleOverride,
     tts: {
+      voiceLevelling: ttsVoiceLevellingSchema.catch(DEFAULTS.tts.voiceLevelling).parse(stored.tts?.voiceLevelling),
       // Station-wide voice switch. Coerce missing/non-boolean (every settings.json
       // written before this key existed) to the default `true`, so an upgrade is
       // byte-identical. See DEFAULTS.tts.enabled.
@@ -1769,6 +1772,8 @@ export async function prepareUpdate(patch, { themeIds }: { themeIds?: ReadonlySe
   }
   if ('tts' in patch) {
     const t = patch.tts || {};
+    const levelling = parseSettingsPatchKey<TtsPatch>('tts', t);
+    if (levelling.voiceLevelling !== undefined) next.tts.voiceLevelling = levelling.voiceLevelling;
     if (t.defaultEngine !== undefined) {
       if (!TTS_ENGINES.includes(t.defaultEngine)) {
         throw new Error(`tts.defaultEngine must be one of: ${TTS_ENGINES.join(', ')}`);

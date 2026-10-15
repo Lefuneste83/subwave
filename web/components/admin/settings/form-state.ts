@@ -1,5 +1,5 @@
 import { normalizeStationLocale } from '../../../lib/format';
-import { normalizeGeminiSafety, SHORTLIST_PASSES_DEFAULT, TRANSITION_EFFECTS, type TransitionEffect } from '../../../lib/schemas.generated';
+import { normalizeGeminiSafety, SHORTLIST_PASSES_DEFAULT, TRANSITION_EFFECTS, ttsVoiceLevellingSchema, type TransitionEffect } from '../../../lib/schemas.generated';
 import type { FormState, SettingsData, LlmHeaderRow } from './shared';
 
 // The single client-side copy, read by both form hydration and the dirty-check.
@@ -129,6 +129,7 @@ export function settingsForm(v: NonNullable<SettingsData['values']>): FormState 
       // Absent (a settings.json predating the key) reads as ON, matching the
       // controller's own coercion in settings.load().
       enabled: v.tts?.enabled !== false,
+      voiceLevelling: ttsVoiceLevellingSchema.catch(false).parse(v.tts?.voiceLevelling),
       defaultEngine: v.tts?.defaultEngine ?? 'piper',
       // Absent block = off, matching the controller's normalizeTtsFallback().
       fallback: {

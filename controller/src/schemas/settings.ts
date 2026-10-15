@@ -876,6 +876,16 @@ export const djTalkOnlyBetweenTracksSchema = z.boolean({
   error: 'djTalkOnlyBetweenTracks must be a boolean',
 });
 
+export const ttsVoiceLevellingSchema = z.boolean({
+  error: 'tts.voiceLevelling must be a boolean',
+});
+
+// Only this new flag is stateless; the other TTS fields retain their merged-state validation.
+export const ttsPatchSchema = settingsBlockOf({
+  voiceLevelling: ttsVoiceLevellingSchema,
+});
+export type TtsPatch = z.infer<typeof ttsPatchSchema>;
+
 // The floor a rendered skill segment must clear before an opted-in show gives
 // it a real gap instead of a duck. settingsIntLike, like every other numeric
 // settings key: it accepts the admin form's string and truncates a float rather

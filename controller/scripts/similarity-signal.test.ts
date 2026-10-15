@@ -70,7 +70,8 @@ test('only measured-instrumental speaks; vocal tracks get no word', () => {
   // [] is a MEASUREMENT (Demucs found no vocals); null is its absence. And
   // "vocal" on ~80% of a library would be shared noise, so it stays silent.
   assert.deepEqual(soundDescriptors({ vocalRanges: [] }), ['instrumental']);
-  assert.deepEqual(soundDescriptors({ vocalRanges: [{ startMs: 0, endMs: 1000 }] }), []);
+  assert.deepEqual(soundDescriptors({ vocalRanges: [{ startMs: 0, endMs: 1000 }] }), ['instrumental']);
+  assert.deepEqual(soundDescriptors({ vocalRanges: [{ startMs: 0, endMs: 5000 }] }), []);
   assert.deepEqual(soundDescriptors({ vocalRanges: null }), []);
 });
 
@@ -136,7 +137,7 @@ test('a resolved era becomes a decade word on its own line, last', () => {
 });
 
 test('an empty index adopts the current format', () => {
-  // A fresh install is entirely v2, so it must never show the advisory.
+  // A fresh install uses the current format, so it never shows the advisory.
   assert.equal(resolveIndexTextFormat(null, 0), EMBED_TEXT_VERSION);
   assert.equal(resolveIndexTextFormat(1, 0), EMBED_TEXT_VERSION);
 });

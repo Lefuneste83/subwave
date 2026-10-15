@@ -302,7 +302,7 @@ test('applyStrictLocks NEVER returns its input array', () => {
 });
 
 // Vocal filters (#1300 FR 13) use the heavy analyzer's Demucs ranges:
-// [] is measured instrumental, [..] is measured vocal, null is never measured.
+// isInstrumental classifies measured sung duration; null is never measured.
 // Most libraries have no heavy analysis. Reading null as vocal would silently
 // reject the entire library for an instrumental show, so unknowns stay eligible
 // under soft filters and are refused only under hard filters.
@@ -376,7 +376,7 @@ test('strict locks skip the vocal step rather than empty the pool', () => {
 test('strict locks apply the vocal step when there is coverage', () => {
   const pool = [
     { id: 'a', energy: 'low', vocalRanges: [] as unknown[] },
-    { id: 'b', energy: 'low', vocalRanges: [{ startMs: 1000, endMs: 2000 }] },
+    { id: 'b', energy: 'low', vocalRanges: [{ startMs: 1000, endMs: 6000 }] },
   ];
   const out = applyStrictLocks(pool, { energies: ['low'], vocals: 'instrumental' }, { starve: false });
   assert.deepEqual(out, [pool[0]]);
@@ -385,6 +385,6 @@ test('strict locks apply the vocal step when there is coverage', () => {
 test('starve:true lets the vocal lock empty the pool', () => {
   // The agent-tool contract: a tool that ends up empty contributes nothing, and
   // a run with zero candidates fails into the pool picker.
-  const pool = [{ id: 'a', vocalRanges: [{ startMs: 1, endMs: 2 }] }];
+  const pool = [{ id: 'a', vocalRanges: [{ startMs: 1, endMs: 5001 }] }];
   assert.deepEqual(applyStrictLocks(pool, { vocals: 'instrumental' }, { starve: true }), []);
 });

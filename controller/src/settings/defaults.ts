@@ -294,6 +294,8 @@ export const DEFAULTS = {
     // jingleRatio: 0). Manual /dj/segment triggers stay exempt. Policy lives in
     // exactly one place: broadcast/voice-policy.ts.
     enabled: true,
+    // Opt-in so existing stations keep their calibrated voice mix on upgrade.
+    voiceLevelling: false,
     defaultEngine: 'piper',
     // Operator-chosen rescue voice — the TTS analogue of settings.llm.fallback.
     // Speaks when a persona's engine is known-unavailable up front or throws
@@ -376,9 +378,10 @@ export const DEFAULTS = {
     // Self-hosted TTS endpoint over HTTP (POST /speak → audio body, gated on a
     // /health probe) — the TTS equivalent of the LLM's custom base URL.
     remote: { url: '' },
-    // Per-engine trim (dB) applied via liq_amplify on every spoken segment, to
-    // level the loudness gap between engines. Stacks with each persona's own
-    // tts.gainDb. See TTS_GAIN_CLAMP_DB and audio/tts.ts:voiceGainDb().
+    // Per-engine trim (dB) applied via liq_amplify on every spoken segment.
+    // With voiceLevelling on, stacks on each clip's automatic trim at the
+    // handoff (audio/clip-level.ts). Stacks with each persona's own tts.gainDb.
+    // See TTS_GAIN_CLAMP_DB and audio/tts.ts:voiceGainDb().
     gainDb: { piper: 0, kokoro: 0, chatterbox: 0, 'pocket-tts': 0, cloud: 0, remote: 0 },
     // Per-engine speech-rate multiplier (0.5–2.0x), composed with each
     // persona's tts.speed and, on air, programme pacing. Piper, Kokoro, Cloud

@@ -155,8 +155,6 @@ export const blockRuleSchema = z.object({
   ),
 });
 
-export type BlockRulePatch = z.output<typeof blockRuleSchema>;
-
 // `POST /library/blocklist` — the id-entry create body. Two accepted forms, so
 // only `type` is required: `{type, trackId}` (server resolves the rest) or a
 // pre-resolved `{type, id, …}`. The route decides which arrived.
@@ -2231,7 +2229,6 @@ export function scheduleOverrideSchema(ctx: ScheduleOverrideContext) {
  * window every reader already understands.
  */
 export const TAKEOVER_UNTIL = ['fixed', 'schedule-change'] as const;
-export type TakeoverUntil = (typeof TAKEOVER_UNTIL)[number];
 
 // One string for four constraints, naming both ends whichever one a value missed.
 const OVERRIDE_MINUTES_MESSAGE =
@@ -3176,6 +3173,16 @@ export const djSpeakClockSchema = z.boolean({
 export const djTalkOnlyBetweenTracksSchema = z.boolean({
   error: 'djTalkOnlyBetweenTracks must be a boolean',
 });
+
+export const ttsVoiceLevellingSchema = z.boolean({
+  error: 'tts.voiceLevelling must be a boolean',
+});
+
+// Only this new flag is stateless; the other TTS fields retain their merged-state validation.
+export const ttsPatchSchema = settingsBlockOf({
+  voiceLevelling: ttsVoiceLevellingSchema,
+});
+export type TtsPatch = z.infer<typeof ttsPatchSchema>;
 
 // The floor a rendered skill segment must clear before an opted-in show gives
 // it a real gap instead of a duck. settingsIntLike, like every other numeric
@@ -4612,7 +4619,6 @@ export const SKILL_CRON_RE = /^\S+(?:\s+\S+){4,5}$/;
 // When a custom skill may air. 'commute' restricts it to the commute hours;
 // 'any' is the default and is NOT written to frontmatter.
 export const SKILL_WINDOWS = ['any', 'commute'] as const;
-export type SkillWindow = (typeof SKILL_WINDOWS)[number];
 
 // The "right now" context vocabulary a segment may weave in (#471). Homed here
 // because it is validated on both sides: the controller checks a submitted
@@ -4843,7 +4849,6 @@ export const skillCreateSchema = customSkillFileSchema.extend({
   name: skillSlugSchema,
 });
 
-export type SkillFileInput = z.input<typeof customSkillFileSchema>;
 export type SkillFileParsed = z.output<typeof builtinSkillFileSchema> &
   Partial<z.output<typeof customSkillFileSchema>>;
 

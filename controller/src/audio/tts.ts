@@ -4,6 +4,7 @@
 import * as piper from './piper.js';
 import * as kokoro from './kokoro.js';
 import { applyEdgeFades } from './wav-edges.js';
+import { measureClipLevel, voiceLevellingEnabled } from './clip-level.js';
 import * as chatterbox from './chatterbox.js';
 import * as pocketTts from './pocketTts.js';
 import { heavyColdEngines, heavyEnabledEngines } from './ttsHeavyClient.js';
@@ -167,8 +168,9 @@ function fallbackChain(primary: TtsTarget): RescueSlot[] {
 }
 
 // Voice level trim (dB) for a segment of `kind`: per-engine gain plus the
-// persona's own trim, clamped to ±TTS_GAIN_CLAMP_DB. 0 = unity. Applied
-// downstream by broadcast/queue.ts as a `liq_amplify` annotation. Uses the
+// persona's own trim, clamped to ±TTS_GAIN_CLAMP_DB. 0 = unity. The handoff to
+// the mixer optionally adds each clip's levelling trim and clamps the total to
+// the same range (audio/clip-level.ts) before stamping `liq_amplify`. Uses the
 // RESOLVED engine so the gain matches whichever engine actually speaks.
 export function voiceGainDb(kind: string, persona?: any): number {
   const personaTts = djPersonaTts(kind, persona);
@@ -384,6 +386,14 @@ export async function synthesizeSample(
   return speakWith(engine, sample, { speedScale: scale, language: language || '', soul: '', voiceStyle, lang, cloudModel: previewCloudModel, geminiModel, cloudVoiceSettings, fishSettings, signal }, personaTts);
 }
 
+// Every rendered clip, whichever engine made it: edge fades (WAV only), then
+// opt-in levelling, measured once here for the handoff to the mixer. A jingle
+// never takes that handoff (it airs from the playlist), so it is not measured.
+async function finishClip(path: string, kind?: string): Promise<void> {
+  await applyEdgeFades(path);
+  if (kind !== 'jingle' && voiceLevellingEnabled()) await measureClipLevel(path);
+}
+
 // Public entry point. Tries the configured engine; on failure falls back so the
 // DJ never goes silent. Every call is timed into the TTS ring buffer (stats.js).
 export async function speak(
@@ -451,7 +461,7 @@ export async function speak(
     // Bake 40ms edge fades in so hard file boundaries never reach the broadcast
     // compressor as a click. Render time is the only place the tail can be
     // faded. Best-effort: non-WAV output (cloud mp3) is left as-is.
-    if (typeof result === 'string') await applyEdgeFades(result);
+    if (typeof result === 'string') await finishClip(result, kind);
     recordTts({
       ...callBase, engine: primary, fellBack: primaryFellBack,
       ok: true, ms: Date.now() - started, t: new Date().toISOString(),
@@ -480,7 +490,7 @@ export async function speak(
         // slot's own override (null for hardcoded rungs, the operator's
         // engine+voice for their configured one), so probe and call agree.
         const result = await speakWith(fallback, rescueText, { outPath, speedScale: scale, language, soul, voiceStyle }, slot.personaTts);
-        if (typeof result === 'string') await applyEdgeFades(result);
+        if (typeof result === 'string') await finishClip(result, kind);
         recordTts({
           ...callBase, engine: fallback, fellBack: true,
           ok: true, ms: Date.now() - started, t: new Date().toISOString(),

@@ -1456,7 +1456,8 @@ def edge_fade(s) =
 end
 
 # Per-segment voice trim: the controller stamps `liq_amplify` per spoken clip
-# (settings.tts.gainDb + audio/tts.ts:voiceGainDb), the same mechanism as the
+# (settings.tts.gainDb + audio/tts.ts:voiceGainDb, plus the opt-in clip trim from
+# audio/clip-level.ts), the same mechanism as the
 # music bus. BEFORE mic_chain so the fixed-threshold compressor sees a levelled
 # input; the un-annotated lead-in plays at unity.
 voice = mic_chain(amplify(override="liq_amplify", 1., edge_fade(voice_queue)))

@@ -40,6 +40,16 @@ test('cold hydration preserves defaults and independent primary/fallback fields'
   assert.equal(shortlist.llm.segmentRuntime, 'direct');
 });
 
+test('voice levelling hydrates OFF for older stations and preserves the explicit operator choice', () => {
+  const baseline = settingsForm({});
+  assert.equal(baseline.tts.voiceLevelling, false);
+  assert.equal(settingsForm({ tts: { voiceLevelling: false } }).tts.voiceLevelling, false);
+  const enabled = settingsForm({ tts: { voiceLevelling: true } });
+  assert.equal(enabled.tts.voiceLevelling, true);
+  assert.deepEqual(dirtyPaths(enabled, baseline, ['tts']), ['tts']);
+  assert.equal(restorePaths(enabled, baseline, ['tts']).tts.voiceLevelling, false);
+});
+
 test('whole-block saves refuse blank numbers and preserve explicit zero and decimal coercion', () => {
   const form = settingsForm({ crossfadeDuration: 10 });
   form.stream.bufferSeconds = ' ';

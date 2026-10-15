@@ -567,12 +567,12 @@ test('the converted keys are exactly the ones with schemas', () => {
     'picker',
     'privacy', 'requests', 'schedule', 'scheduleOverride', 'scrobble', 'search',
     'sfx', 'shows', 'silenceTrim', 'station', 'stationDescription', 'stream',
-    'theme', 'timezone', 'transitions', 'ui', 'weather', 'weatherMoods',
+    'theme', 'timezone', 'transitions', 'tts', 'ui', 'weather', 'weatherMoods',
     'webhooks', 'webhooksPolicy',
   ]);
 });
 
-test('the SIX unconverted keys are the ones CLAUDE.md documents as resistant', () => {
+test('the five unconverted keys retain their state-dependent validation', () => {
   // Each resists because the rule is a function of state the patch does not carry
   // (a clamp against the stored value, a post-merge cross-field rule, a
   // write-through, an open map), plus two deliberately left alone.
@@ -587,7 +587,6 @@ test('the SIX unconverted keys are the ones CLAUDE.md documents as resistant', (
     // absent — a schema on it would refuse a body today's precedence ignores.
     'maxTrackMinutes',
     'skills',
-    'tts',
   ]);
 });
 

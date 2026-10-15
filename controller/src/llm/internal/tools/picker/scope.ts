@@ -116,6 +116,7 @@ export function pickerScope(partial: Partial<PickerScope> = {}): PickerScope {
 // builder, and the index-coverage flags the conditional tools gate on.
 type CollectOptions = {
   maxPerArtist?: number;
+  order?: 'source';
   preferredEnergy?: string;
   similarity?: { kind: 'audio' | 'text'; reference: string };
 };
@@ -126,6 +127,8 @@ export interface PickerContext {
   // id choice against this.
   seen: Map<string, any>;
   collect(list: any, cap?: number, opts?: CollectOptions): any[];
+  // Widen source fetches under strict show locks, before collect's hard filter.
+  candidateLimit(limit: number): number;
   emptyResult(matched: number, hint: string): { tracks: any[]; note: string; rule: string };
   seedSimilarity(songId: string, primary: 'audio' | 'text'): { tracks: any[]; matched: number; fellBack: boolean };
   // Id-level union of the recency sets, pushed INTO KNN queries. The key-based
@@ -150,6 +153,13 @@ export function buildPickerContext(scope: PickerScope): PickerContext {
   } = scope;
 
   const seen = new Map<string, any>();
+
+  // #1655: only ~7% of the reported library passed instrumental + low energy.
+  // A bounded 5x fetch gives the hard filters more neighbours to work with,
+  // without increasing the model's cap or adding retries.
+  // Unlocked/request runs retain their historical source sizes.
+  const hasDiscoveryLock = !!(genreLock?.length || eraLock?.length || moodLock?.length || energyLock?.length || vocalLock || playlistLock);
+  const candidateLimit = (limit: number) => hasDiscoveryLock ? limit * 5 : limit;
 
   // Pushed into every KNN query so a heavily-aired cluster answers with its next
   // neighbours out instead of thinning toward empty.
@@ -180,9 +190,12 @@ export function buildPickerContext(scope: PickerScope): PickerContext {
     // Ordering is a freshness-biased shuffle (music/airing.ts): a KNN tool's
     // top-60 must not reach the model in similarity order, or the cap of 8 pins
     // the same neighbours every pick. Randomness stays dominant; with no play
-    // history this is a plain shuffle.
+    // history this is a plain shuffle. recentByArtist keeps source order so
+    // its newest eligible releases survive the cap.
     const items: any[] = Array.isArray(list) ? list : [];
-    let pool = applyStrictLocks(freshnessBiasedOrder(intersectEpisodeSource(items, scope.episodeSource), library.lastAiredInfo(), Date.now()), {
+    const source = intersectEpisodeSource(items, scope.episodeSource);
+    const ordered = opts.order === 'source' ? source : freshnessBiasedOrder(source, library.lastAiredInfo(), Date.now());
+    let pool = applyStrictLocks(ordered, {
       genres: genreLock, eras: eraLock, moods: moodLock, energies: energyLock, vocals: vocalLock,
     }, { starve: true });
     // Minimum track length (#1573): hard, and BEFORE the playlist lock, so a
@@ -265,7 +278,7 @@ export function buildPickerContext(scope: PickerScope): PickerContext {
   // primary that matched but was filtered by recency keeps emptyResult, whose
   // note steers correctly and describes a different situation.
   const seedSimilarity = (songId: string, primary: 'audio' | 'text') => {
-    const K = 60;
+    const K = candidateLimit(60);
     const seed = library.get(songId);
     const reference = seed?.title
       ? `seed track: “${seed.title}”${seed.artist ? ` by ${seed.artist}` : ''}` : 'discovery seed';
@@ -292,5 +305,5 @@ export function buildPickerContext(scope: PickerScope): PickerContext {
     return { tracks: [] as any[], matched: 0, fellBack: false };
   };
 
-  return { scope, seen, collect, emptyResult, seedSimilarity, knnExclude, stats, hasTextEmbeddings, hasAudioEmbeddings, hasEmbeddingProvider, textIndexDegraded };
+  return { scope, seen, collect, candidateLimit, emptyResult, seedSimilarity, knnExclude, stats, hasTextEmbeddings, hasAudioEmbeddings, hasEmbeddingProvider, textIndexDegraded };
 }

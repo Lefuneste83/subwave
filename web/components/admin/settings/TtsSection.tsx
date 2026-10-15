@@ -41,6 +41,7 @@ import { ELEVENLABS_VS_DEFAULTS, FISH_TTS_DEFAULTS } from './form-state';
 import { decideCloudSave } from './cloudSavePayload';
 import { ModelCombobox } from '../llm/ModelCombobox';
 import { cn } from '../../../lib/cn';
+import { fieldAria } from '../../../lib/form';
 import {
   SectionHeader, SaveBar, NowBanner,
   KeyStatus, KeyTestResult, KEY_HINTS,
@@ -479,6 +480,7 @@ interface TtsSectionProps extends SectionProps {
 }
 
 export function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch, refresh }: TtsSectionProps) {
+  const levellingAria = fieldAria('tts-voice-levelling', undefined, { hasDescription: true });
   const [cloudKeyInput, setCloudKeyInput] = useState('');
   const [cloudKeyTest, setCloudKeyTest] = useState<{ ok: boolean; message: string; latencyMs: number } | null>(null);
   const [cloudKeyTesting, setCloudKeyTesting] = useState(false);
@@ -677,6 +679,7 @@ export function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch
         // Always sent — the server clamps and drops unknown keys. Keyed by engine
         // id, `pocket-tts` with the hyphen.
         gainDb: form.tts.gainDb,
+        voiceLevelling: form.tts.voiceLevelling,
         // Same contract as gainDb; inert for the engines that ignore speed.
         speed: form.tts.speed,
       },
@@ -740,6 +743,7 @@ export function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch
   };
   const savedTts: {
     enabled?: boolean;
+    voiceLevelling?: boolean;
     defaultEngine?: string;
     kokoro?: { voice?: string; lang?: string };
     chatterbox?: { referenceVoice?: string };
@@ -789,6 +793,7 @@ export function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch
     // Absent reads as ON, matching the controller's coercion — so an untouched
     // pre-upgrade settings.json never shows up as dirty.
     form.tts.enabled !== (savedTts.enabled !== false)
+    || form.tts.voiceLevelling !== (savedTts.voiceLevelling === true)
     || form.tts.defaultEngine !== savedEngine
     || (form.tts.kokoro?.voice || '') !== savedKokoroVoice
     || (form.kokoroLang || '') !== savedKokoroLang
@@ -929,6 +934,19 @@ export function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch
                 ? <>Engine changed. Hit "Save TTS settings" below to make <strong>{formEngineLabel}</strong> the new default.</>
                 : <>The station default. Renders jingles and is the fallback when a persona’s own engine fails. Per-segment voice still comes from the persona on air.</>}
             </div>
+          </div>
+
+          <div className="field">
+            <Label {...levellingAria.labelledByProps}>Voice levelling</Label>
+            <Seg
+              {...levellingAria.groupProps}
+              value={form.tts.voiceLevelling ? 'on' : 'off'}
+              options={[{ id: 'off', label: 'Off' }, { id: 'on', label: 'On' }]}
+              onChange={v => setForm(f => ({ ...f, tts: { ...f.tts, voiceLevelling: v === 'on' } }))}
+            />
+            <p {...levellingAria.descriptionProps} className="field-hint">
+              Lifts quiet takes and cuts loud ones toward -18 LUFS.
+            </p>
           </div>
 
         {form.tts.defaultEngine === 'piper' && (
