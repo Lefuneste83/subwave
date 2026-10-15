@@ -148,6 +148,7 @@ const STICKY_WINDOW_MS = 5 * 60_000;
 const STICKY_PROBE_EVERY_MS = 30_000;
 
 interface StickyState {
+  since: number;
   until: number;
   kind: 'unreachable' | 'exhausted' | 'hung';
   key: string;
@@ -169,7 +170,8 @@ let probeTimer: ReturnType<typeof setTimeout> | null = null;
 let stickyWindowMs = STICKY_WINDOW_MS;
 
 function startSticky(kind: StickyState['kind'], leg: Leg): void {
-  sticky = { until: Date.now() + stickyWindowMs, kind, key: stickyKey(leg) };
+  const now = Date.now();
+  sticky = { since: now, until: now + stickyWindowMs, kind, key: stickyKey(leg) };
   console.log(`[failover] primary LLM (${leg.label}) ${STICKY_VERDICT[kind]} — routing to the backup for ${Math.round(stickyWindowMs / 60_000)} min`);
   if (kind === 'unreachable') scheduleStickyProbe();
 }
@@ -208,6 +210,38 @@ function scheduleStickyProbe(): void {
     scheduleStickyProbe();
   }, STICKY_PROBE_EVERY_MS);
   probeTimer.unref?.();
+}
+
+// What /debug shows while the sticky window is sending calls to the backup.
+// Read-only: it never clears the window, so a poll cannot change routing.
+// It applies the same tests stickyHolds() would at the next call, because
+// that function only clears an expired or stale window when a call arrives;
+// on a quiet station the raw state would keep saying "routed" after the
+// window has ended. Null whenever the next unpinned call would try the
+// primary: no window, window over, primary switched in Settings, or no usable
+// backup to route to (sticky only ever routes TO a configured backup).
+export interface FailoverRouting {
+  kind: StickyState['kind'];
+  since: number;
+  until: number;
+  provider: string;
+  model: string;
+}
+
+export function failoverRoutingSnapshot(now: number = Date.now()): FailoverRouting | null {
+  if (!sticky || now >= sticky.until) return null;
+  let primary: Leg;
+  try { primary = primaryLeg(); } catch { return null; }
+  if (stickyKey(primary) !== sticky.key) return null;
+  const backup = fallbackLeg();
+  if (!backup) return null;
+  return {
+    kind: sticky.kind,
+    since: sticky.since,
+    until: sticky.until,
+    provider: String(backup.cfg?.provider || ''),
+    model: backup.label,
+  };
 }
 
 function isAgentDeadline(err: any): boolean {
