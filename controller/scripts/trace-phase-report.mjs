@@ -17,10 +17,11 @@ const args = process.argv.slice(2);
 const days = Math.max(1, Number(args[args.indexOf('--days') + 1]) || 2);
 const stateDir = process.env.STATE_DIR || '/var/sub-wave';
 
-// Event logs live at <STATE_DIR>/logs, or one station level down.
+// Event logs live at <STATE_DIR>/logs, or under stations/<id>/logs.
 const dirs = [join(stateDir, 'logs')];
-for (const d of existsSync(stateDir) ? readdirSync(stateDir, { withFileTypes: true }) : []) {
-  if (d.isDirectory()) dirs.push(join(stateDir, d.name, 'logs'));
+const stationsDir = join(stateDir, 'stations');
+for (const d of existsSync(stationsDir) ? readdirSync(stationsDir, { withFileTypes: true }) : []) {
+  if (d.isDirectory()) dirs.push(join(stationsDir, d.name, 'logs'));
 }
 const wanted = new Set(
   Array.from({ length: days }, (_, i) => new Date(Date.now() - i * 86_400_000).toISOString().slice(0, 10)),
@@ -50,7 +51,9 @@ for (const file of files) {
     const total = Number(e.ms) || 0;
     if (!byPhase.has(e.phase)) byPhase.set(e.phase, []);
     byPhase.get(e.phase).push([sync, total]);
-    if (e.traceId && e.phase.startsWith('pick.')) perPick.set(e.traceId, (perPick.get(e.traceId) ?? 0) + sync);
+    if (e.traceId && (e.phase.startsWith('pick.') || e.phase.startsWith('djAgentPick.'))) {
+      perPick.set(e.traceId, (perPick.get(e.traceId) ?? 0) + sync);
+    }
   }
 }
 
@@ -72,7 +75,7 @@ for (const [phase, v] of rows) {
 const picks = [...perPick.values()];
 if (picks.length) {
   console.log(
-    `\npicks: ${picks.length} — thread blocked per pick (sum of pick.* syncMs): ` +
+    `\npicks: ${picks.length} — thread blocked per pick (sum of preparation syncMs): ` +
       `p50 ${q(picks, 0.5)} ms, p95 ${q(picks, 0.95)} ms, max ${Math.max(...picks)} ms`,
   );
 }

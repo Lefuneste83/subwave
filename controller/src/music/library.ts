@@ -615,7 +615,7 @@ export async function consolidateScenes(
 export function labelOnlyShare(): number | null {
   if (!loaded) return null;
   try {
-    const embedded = db.stats().withEmbedding ?? 0;
+    const embedded = db.pickStats().withEmbedding;
     if (!embedded) return null;
     return db.labelOnlyVectorCount() / embedded;
   } catch {
