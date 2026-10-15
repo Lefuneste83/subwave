@@ -155,7 +155,6 @@ interface StickyState {
   until: number;
   kind: 'unreachable' | 'exhausted' | 'hung';
   key: string;
-  label: string;
 }
 
 const STICKY_WINDOW_MS: Record<StickyState['kind'], number> = {
@@ -192,37 +191,9 @@ function formatWindow(ms: number): string {
 
 function startSticky(kind: StickyState['kind'], leg: Leg): void {
   const windowMs = stickyWindowMs(kind);
-  sticky = { until: Date.now() + windowMs, kind, key: stickyKey(leg), label: leg.label };
+  sticky = { until: Date.now() + windowMs, kind, key: stickyKey(leg) };
   console.log(`[failover] primary LLM (${leg.label}) ${STICKY_VERDICT[kind]} — routing to the backup for ${formatWindow(windowMs)}`);
   if (kind === 'unreachable') scheduleStickyProbe();
-}
-
-// The routing state behind backup traffic. Calls made inside the window carry
-// a plain `via` and no primary failure record, so without this the operator
-// sees backup calls on /debug and /stats with no reason given.
-export interface FailoverStickySnapshot {
-  active: boolean;
-  kind?: StickyState['kind'];
-  verdict?: string;
-  primary?: string;
-  until?: string;
-  remainingMs?: number;
-  probing?: boolean;
-}
-
-export function failoverStickySnapshot(): FailoverStickySnapshot {
-  if (!sticky) return { active: false };
-  const remainingMs = sticky.until - Date.now();
-  if (remainingMs <= 0) return { active: false };
-  return {
-    active: true,
-    kind: sticky.kind,
-    verdict: STICKY_VERDICT[sticky.kind],
-    primary: sticky.label,
-    until: new Date(sticky.until).toISOString(),
-    remainingMs,
-    probing: sticky.kind === 'unreachable',
-  };
 }
 
 // The window holds only for the primary it judged. A different primary (the

@@ -167,17 +167,6 @@ export interface DebugLlm {
     retryPrimaryAt?: number;
   } | null;
   budget?: DebugBudget;
-  /** A primary marked down and routed around — the reason behind backup calls
-   * that carry no failover record of their own. */
-  failover?: {
-    active: boolean;
-    kind?: 'unreachable' | 'exhausted' | 'hung';
-    verdict?: string;
-    primary?: string;
-    until?: string;
-    remainingMs?: number;
-    probing?: boolean;
-  };
   recentCalls?: LlmCall[];
   /** Raw-request capture status — drives the toggle + file-path hint. */
   debug?: {

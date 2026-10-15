@@ -13,7 +13,6 @@ import {
   LLM_DEBUG_MAX,
   agentDoneRetryCount,
   generationHealthSnapshot,
-  failoverStickySnapshot,
   failoverRoutingSnapshot,
   llmCallExportFormat,
   llmCallExportFilename,
@@ -356,9 +355,6 @@ async function buildDebugSnapshot(req: express.Request): Promise<any> {
   // per expand, via GET /debug/state-tree below.
   out.llm = {
     generation: generationHealthSnapshot(),
-    // A down primary being routed around: backup calls in this window carry
-    // no failover record, so this is the only place their reason shows.
-    failover: failoverStickySnapshot(),
     provider: llmProvider.providerName(),
     activeModel: llmProvider.activeModelLabel(),
     // While calls go to the backup instead of the primary (any failover,

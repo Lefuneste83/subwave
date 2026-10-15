@@ -97,7 +97,7 @@ test('text timeout covers a body stalled after headers, records both legs, and l
   // The timed-out primary is marked down, and the doctor says why calls go to the backup.
   const routing = findings.find((r) => r.label === 'backup routing');
   assert.equal(routing?.status, 'warn');
-  assert.match(routing?.detail ?? '', /not answering — calls go to the backup for \d+ s more/);
+  assert.match(routing?.detail ?? '', /^primary generation timed out — 1 call sent to .+; primary tried again in \d+ s$/);
 });
 
 test('object timeout skips semantic recovery, while fallback and pinned requests remain independently bounded', async (t) => {

@@ -12,7 +12,7 @@ process.env.STATE_DIR = stateRoot;
 
 const store = await import('../src/settings/store.js');
 const settings = await import('../src/settings.js');
-const { withFailover, resetFailoverStickyForTest, failoverStickySnapshot } = await import('../src/llm/internal/core/failover.js');
+const { withFailover, resetFailoverStickyForTest, failoverRoutingSnapshot } = await import('../src/llm/internal/core/failover.js');
 const { withTransientRetry } = await import('../src/llm/internal/core/retry.js');
 const { recentCalls } = await import('../src/llm/internal/telemetry/log.js');
 const primaryLabel = 'ollama:qwen3.5:397b';
@@ -424,6 +424,13 @@ test('an agent deadline after the model DID answer is an overthinking model: pri
 
 const { withPermanentNotRetryable } = await import('../src/llm/internal/core/generation.js');
 
+// The sticky window is observed through N2's routing record: retryPrimaryAt is
+// set exactly while the window holds.
+const windowLeftMs = (): number | null => {
+  const at = failoverRoutingSnapshot()?.retryPrimaryAt;
+  return typeof at === 'number' ? at - Date.now() : null;
+};
+
 const quotaError = () => Object.assign(new Error('You exceeded your current quota, please check your plan and billing details'), { statusCode: 429, __via: 'test-primary' });
 
 for (const [name, make] of [['a retired model', retired], ['a spent quota', quotaError]] as const) {
@@ -437,7 +444,7 @@ for (const [name, make] of [['a retired model', retired], ['a spent quota', quot
       return { value: 'backup', via: 'test-backup' };
     });
     assert.equal(result, 'backup');
-    assert.equal(failoverStickySnapshot().active, false);
+    assert.equal(windowLeftMs(), null);
     await withFailover('no-window-test', failExtra, async (leg) => {
       attempts.push(leg.label);
       return { value: 'primary', via: 'test-primary' };
@@ -454,12 +461,14 @@ test('a primary success clears the window', async () => {
     if (leg.label === primaryLabel) throw refused();
     return { value: 'backup', via: 'test-backup' };
   });
-  assert.equal(failoverStickySnapshot().active, true);
+  assert.equal(windowLeftMs() !== null, true);
   // Same primary, backup switched off: the window still holds, but with
   // nowhere to route the primary gets its try — and serves.
   await configure({ ...fallback, enabled: false });
   await withFailover('clear-test', failExtra, async () => ({ value: 'primary', via: 'test-primary' }));
-  assert.equal(failoverStickySnapshot().active, false);
+  // Backup back on: the record would show again if the window had survived.
+  await configure();
+  assert.equal(failoverRoutingSnapshot(), null);
   resetFailoverStickyForTest();
 });
 
@@ -471,12 +480,8 @@ test('an exhausted primary holds a short window, an unreachable one the long pro
       if (leg.label === primaryLabel) throw make();
       return { value: 'backup', via: 'test-backup' };
     });
-    const snap = failoverStickySnapshot();
-    assert.equal(snap.active, true);
-    assert.equal(snap.kind, kind);
-    assert.equal(snap.primary, primaryLabel);
-    assert.ok(snap.remainingMs! <= maxMs && snap.remainingMs! > minMs, `${kind}: ${snap.remainingMs}`);
-    assert.equal(snap.probing, kind === 'unreachable');
+    const left = windowLeftMs();
+    assert.ok(left !== null && left <= maxMs && left > minMs, `${kind}: ${left}`);
   }
   resetFailoverStickyForTest();
 });
@@ -494,7 +499,7 @@ test('when the backup also fails inside the window, the window clears and the ne
     attempts.push(leg.label);
     throw backupError;
   }), (err) => err === backupError);
-  assert.equal(failoverStickySnapshot().active, false);
+  assert.equal(windowLeftMs(), null);
   await withFailover('both-down-test', failExtra, async (leg) => {
     attempts.push(leg.label);
     return { value: 'primary back', via: 'test-primary' };
@@ -515,7 +520,7 @@ test('a cancelled backup call inside the window leaves the window alone', async 
     ctl.abort();
     throw new Error('aborted');
   }, undefined, ctl.signal));
-  assert.equal(failoverStickySnapshot().active, true);
+  assert.equal(windowLeftMs() !== null, true);
   resetFailoverStickyForTest();
 });
 
@@ -551,7 +556,7 @@ test('a request timeout after the model DID answer fails this call over but does
       return { value: 'backup', via: 'test-backup' };
     });
     assert.equal(result, 'backup', 'this call still fails over');
-    assert.equal(failoverStickySnapshot().active, false);
+    assert.equal(windowLeftMs(), null);
     await withFailover('slow-step-test', failExtra, async (leg) => {
       attempts.push(leg.label);
       return { value: 'primary', via: 'test-primary' };
@@ -581,13 +586,13 @@ test('the probe clears an unreachable window once the primary port answers again
       if (leg.label === 'openai-compatible:stub') throw Object.assign(new Error(`connect ECONNREFUSED 127.0.0.1:${port}`), { code: 'ECONNREFUSED' });
       return { value: 'backup', via: 'test-backup' };
     });
-    assert.equal(failoverStickySnapshot().kind, 'unreachable');
+    assert.ok((windowLeftMs() ?? 0) > 290_000, 'an unreachable primary holds the long window');
     await new Promise((r) => setTimeout(r, 120));
-    assert.equal(failoverStickySnapshot().active, true, 'still refused: the probe keeps the window');
+    assert.equal(windowLeftMs() !== null, true, 'still refused: the probe keeps the window');
     await new Promise<void>((resolve) => up.listen(port, '127.0.0.1', () => resolve()));
     const deadline = Date.now() + 2000;
-    while (failoverStickySnapshot().active && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
-    assert.equal(failoverStickySnapshot().active, false, 'the probe saw the port answer and cleared the window');
+    while (windowLeftMs() !== null && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(windowLeftMs(), null, 'the probe saw the port answer and cleared the window');
   } finally {
     await new Promise<void>((resolve) => (up.listening ? up.close(() => resolve()) : resolve()));
     resetFailoverStickyForTest();

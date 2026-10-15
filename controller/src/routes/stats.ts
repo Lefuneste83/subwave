@@ -4,7 +4,7 @@
 // section is `transitions`, the seam record read back from library.db plays.
 import express from 'express';
 import { requireAdmin } from '../middleware/auth.js';
-import { recentCalls, generationHealthSnapshot, contextMeasurements, failoverStickySnapshot } from '../llm/log.js';
+import { recentCalls, generationHealthSnapshot, contextMeasurements, failoverRoutingSnapshot } from '../llm/log.js';
 import * as llmProvider from '../llm/provider.js';
 import * as settings from '../settings.js';
 import { ttsCalls, shortlistPicks, summarizeLlm, summarizeTts, summarizeDjLog, summarizeRequests, summarizeShortlistPicks } from '../stats.js';
@@ -37,7 +37,8 @@ router.get('/stats', requireAdmin, (req, res) => {
     llm.budget = budgetStatus();
     llm.contextWindows = contextMeasurements.snapshot();
     llm.generation = generationHealthSnapshot();
-    llm.failover = failoverStickySnapshot();
+    // Same record as /debug's routedToBackup; null under normal routing.
+    llm.routedToBackup = failoverRoutingSnapshot();
 
     res.json({
       t: new Date().toISOString(),

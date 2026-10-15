@@ -90,21 +90,12 @@ export default function DebugPanel() {
             v={data?.liquidsoapLog ? 'up' : '—'}
             sub="log last 100"
           />
-          {data?.llm?.failover?.active ? (
-            <HealthCell
-              label="LLM"
-              status="down"
-              v="on backup"
-              sub={`primary ${data.llm.failover.verdict} · ${Math.ceil((data.llm.failover.remainingMs ?? 0) / 1000)}s left${data.llm.failover.probing ? ', probing' : ''}`}
-            />
-          ) : (
-            <HealthCell
-              label="LLM"
-              status={data?.llm ? 'ok' : 'idle'}
-              v={data?.llm?.activeModel || '—'}
-              sub={data?.llm?.provider ? `provider ${data.llm.provider}` : '—'}
-            />
-          )}
+          <HealthCell
+            label="LLM"
+            status={data?.llm ? 'ok' : 'idle'}
+            v={data?.llm?.activeModel || '—'}
+            sub={data?.llm?.provider ? `provider ${data.llm.provider}` : '—'}
+          />
           <HealthCell
             label="Picker"
             status={data?.queue?.current ? 'ok' : 'idle'}
