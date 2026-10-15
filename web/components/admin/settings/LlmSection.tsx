@@ -157,8 +157,28 @@ export function HeaderRowsEditor({
 interface LlmSectionProps extends SectionProps {
   adminFetch: (path: string, init?: RequestInit) => Promise<Response>;
   refresh: () => void;
+  /** The LLM page has unsaved edits: the swap saves straight away from the
+   *  stored settings, so it would silently drop them. */
+  dirty?: boolean;
 }
-export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch, refresh, fieldErrors }: LlmSectionProps) {
+export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch, refresh, fieldErrors, dirty = false }: LlmSectionProps) {
+  const [swapOpen, setSwapOpen] = useState(false);
+  const [swapping, setSwapping] = useState(false);
+  // The swap is built and saved on the controller (settings/llm-swap.ts):
+  // headers only ever reach this page redacted, so the browser cannot move them.
+  const swapLegs = async () => {
+    setSwapping(true);
+    try {
+      await adminResponse(adminFetch, '/settings/llm/swap', { method: 'POST' });
+      notify.ok('swapped: the backup is now the primary');
+      refresh();
+    } catch (e) {
+      notify.err(`swap failed: ${errorMessage(e)}`);
+    } finally {
+      setSwapping(false);
+      setSwapOpen(false);
+    }
+  };
   const [resetCompatKey, setResetCompatKey] = useState(false);
   const [primaryKeyInput, setPrimaryKeyInput] = useState('');
   const [fallbackKeyInput, setFallbackKeyInput] = useState('');
@@ -1142,6 +1162,25 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
                   }
                 />
               </div>
+
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto] sm:items-center sm:gap-4">
+                <div>
+                  <div className="text-[13px] font-bold">Swap with primary</div>
+                  <div className="mt-0.5 max-w-[480px] text-[14px] leading-[1.5] text-muted">
+                    {dirty
+                      ? 'Save or discard your changes first: the swap saves straight away.'
+                      : 'Make this backup the primary, and the primary the backup. Each keeps its own settings, so swapping again restores the current setup.'}
+                  </div>
+                </div>
+                <Btn
+                  tone="accent"
+                  onClick={() => setSwapOpen(true)}
+                  disabled={dirty || busy || swapping}
+                  title={dirty ? 'Unsaved changes on this page' : undefined}
+                >
+                  {swapping ? 'Swapping…' : 'Swap with primary'}
+                </Btn>
+              </div>
             </>
           )}
         </div>
@@ -1337,6 +1376,25 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
           primaryKeyInput.trim() || fallbackKeyInput.trim()
           || compatKeyInput.trim() || compatFallbackKeyInput.trim()
         )}
+      />
+
+      <V3AlertDialog
+        open={swapOpen}
+        onOpenChange={(o) => { if (!o && !swapping) setSwapOpen(false); }}
+        title="Swap primary and backup LLM"
+        description={
+          <>
+            <strong>{llmProviderLabel(form.llm.fallback.provider)}</strong>
+            {form.llm.fallback.model ? <> / <code>{form.llm.fallback.model}</code></> : null}
+            {' '}becomes the primary, and{' '}
+            <strong>{llmProviderLabel(form.llm.provider)}</strong>
+            {form.llm.model ? <> / <code>{form.llm.model}</code></> : null}
+            {' '}the backup. Each keeps its own settings, and the change is saved at once.
+          </>
+        }
+        confirmLabel="swap"
+        cancelLabel="cancel"
+        onConfirm={() => { void swapLegs(); }}
       />
 
       <V3AlertDialog

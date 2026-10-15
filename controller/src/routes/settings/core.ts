@@ -27,6 +27,7 @@ import { saveSecrets, SECRET_ENV_KEYS } from '../../setup/secrets.js';
 import { taggerView } from '../../broadcast/tagger.js';
 import { currentMode as budgetCurrentMode } from '../../broadcast/dj-budget.js';
 import { skillCatalog } from '../../skills/_agent.js';
+import { buildLlmSwapPatch, LlmSwapError } from '../../settings/llm-swap.js';
 
 // Mounted onto the parent settings router in ../settings.ts.
 export const router = express.Router();
@@ -261,6 +262,31 @@ router.post('/settings', requireAdmin, validateSettingsBody(), async (req, res) 
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// "Swap with primary": the backup leg becomes the primary and vice versa, in
+// one save through settings.update(). Built here, not in the browser, because
+// the admin UI only ever sees a leg's headers redacted. settings/llm-swap.ts
+// owns what moves and what stays.
+router.post('/settings/llm/swap', requireAdmin, async (_req, res) => {
+  try {
+    await settings.load();
+    const patch = buildLlmSwapPatch(
+      settings.get(),
+      llmProvider.resolveEmbeddingCfg(),
+      !!process.env.EMBEDDING_API_KEY,
+    );
+    const result = await settings.update(patch);
+    const llm = result.saved.llm;
+    queue.log(
+      'scheduler',
+      `LLM legs swapped · primary → ${llm.provider}${llm.model ? ` / ${llm.model}` : ''} · backup → ${llm.fallback.provider}${llm.fallback.model ? ` / ${llm.fallback.model}` : ''}`,
+    );
+    void logCompatDetection();
+    res.json(result);
+  } catch (err) {
+    res.status(err instanceof LlmSwapError ? 409 : 400).json({ error: err.message });
   }
 });
 
