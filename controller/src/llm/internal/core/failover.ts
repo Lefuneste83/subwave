@@ -136,6 +136,13 @@ function logFailurePreview(kind: string, err: any) {
 //                 call that hit it is not resubmitted when its deadline is
 //                 spent), so the first verdict marks the primary down at once.
 //                 Expiry only, like exhausted: the server answers a probe.
+// The window length depends on the class. An unreachable host has a probe to
+// clear it early, so it can hold the long window. An exhausted or hung verdict
+// has only the expiry, and both are common on a self-hosted primary that will
+// serve again within a minute or two: a llama.cpp server answering 503 "Loading
+// model" while it starts, or a slow first token on a cold model running into
+// the agent deadline. Those hold a short window, so a recovered primary is not
+// left idle while a paid backup takes every call.
 // One verdict is enough for every class: waiting for a second failure would
 // let the next call pay the same detection again, which is the delay this
 // window exists to stop. The window is tied to the primary it judged (model
@@ -144,14 +151,18 @@ function logFailurePreview(kind: string, err: any) {
 // choice) and only ever routes TO a configured backup — with none, the primary
 // still gets its try.
 
-const STICKY_WINDOW_MS = 5 * 60_000;
-const STICKY_PROBE_EVERY_MS = 30_000;
-
 interface StickyState {
   until: number;
   kind: 'unreachable' | 'exhausted' | 'hung';
   key: string;
 }
+
+const STICKY_WINDOW_MS: Record<StickyState['kind'], number> = {
+  unreachable: 5 * 60_000,
+  exhausted: 90_000,
+  hung: 90_000,
+};
+const STICKY_PROBE_EVERY_MS = 30_000;
 
 function stickyKey(leg: Leg): string {
   return `${leg.label}|${legEndpoint(leg)}`;
@@ -165,12 +176,23 @@ const STICKY_VERDICT: Record<StickyState['kind'], string> = {
 
 let sticky: StickyState | null = null;
 let probeTimer: ReturnType<typeof setTimeout> | null = null;
-// Mutable copy so a test can shorten the window without touching the default.
-let stickyWindowMs = STICKY_WINDOW_MS;
+// Test seams: a window that overrides every class's length, and the probe
+// interval, so expiry and the probe can be observed in a test.
+let stickyWindowOverrideMs: number | null = null;
+let stickyProbeEveryMs = STICKY_PROBE_EVERY_MS;
+
+function stickyWindowMs(kind: StickyState['kind']): number {
+  return stickyWindowOverrideMs ?? STICKY_WINDOW_MS[kind];
+}
+
+function formatWindow(ms: number): string {
+  return ms >= 60_000 && ms % 60_000 === 0 ? `${ms / 60_000} min` : `${Math.round(ms / 1000)} s`;
+}
 
 function startSticky(kind: StickyState['kind'], leg: Leg): void {
-  sticky = { until: Date.now() + stickyWindowMs, kind, key: stickyKey(leg) };
-  console.log(`[failover] primary LLM (${leg.label}) ${STICKY_VERDICT[kind]} — routing to the backup for ${Math.round(stickyWindowMs / 60_000)} min`);
+  const windowMs = stickyWindowMs(kind);
+  sticky = { until: Date.now() + windowMs, kind, key: stickyKey(leg) };
+  console.log(`[failover] primary LLM (${leg.label}) ${STICKY_VERDICT[kind]} — routing to the backup for ${formatWindow(windowMs)}`);
   if (kind === 'unreachable') scheduleStickyProbe();
 }
 
@@ -206,7 +228,7 @@ function scheduleStickyProbe(): void {
       return;
     }
     scheduleStickyProbe();
-  }, STICKY_PROBE_EVERY_MS);
+  }, stickyProbeEveryMs);
   probeTimer.unref?.();
 }
 
@@ -284,12 +306,14 @@ function isAgentDeadline(err: any): boolean {
 }
 
 // Test seam: drop the sticky state (and any pending probe) between scenarios,
-// and optionally shorten the window so an expiry can be observed in a test.
-// A call without an argument restores the production default.
-export function resetFailoverStickyForTest(windowMs?: number): void {
+// and optionally shorten the window (every class) and the probe interval so an
+// expiry or a probe can be observed in a test. A call without arguments
+// restores the production defaults.
+export function resetFailoverStickyForTest(windowMs?: number, probeEveryMs?: number): void {
   clearSticky();
   backupRouting = null;
-  stickyWindowMs = windowMs ?? STICKY_WINDOW_MS;
+  stickyWindowOverrideMs = windowMs ?? null;
+  stickyProbeEveryMs = probeEveryMs ?? STICKY_PROBE_EVERY_MS;
 }
 
 // The shape a single per-leg attempt returns for recording.
@@ -369,6 +393,15 @@ export async function withFailover<T>(
         noteBackupFailed();
         logFailurePreview(kind, err2);
         recordFailure({ kind, started, via: err2?.__via || 'ai-sdk', model: backup.label, error: err2?.message, extra: failExtra(err2) });
+        // Both legs failing: routing to the backup no longer saves anything,
+        // and a primary that recovered would sit unused until expiry while
+        // every call fails. Clear the window so the next call tries the
+        // primary — at most one call is lost this way. A cancelled call says
+        // nothing about the backup, so it leaves the window alone.
+        if (!signal?.aborted) {
+          clearSticky();
+          console.log(`[failover] backup LLM (${backup.label}) failed too — the primary is tried again on the next call`);
+        }
         throw err2;
       }
     }
@@ -422,10 +455,13 @@ export async function withFailover<T>(
     // Only a host-down verdict starts the sticky window. A retired model or a
     // spent quota keeps the host healthy and its errors are immediate — there
     // is no detection cost worth remembering, and marking a healthy box down
-    // would steer calls away from it for nothing.
+    // would steer calls away from it for nothing. A request timeout reads the
+    // same way as an agent deadline: after an earlier step of this call got an
+    // answer, the model is slow (overthinking), not hung, so this call fails
+    // over but the next one still tries the primary.
     const stickyKind = reason === 'unreachable' ? 'unreachable'
       : reason === 'cannot serve (5xx after retries)' ? 'exhausted'
-      : reason === 'generation timed out' ? 'hung'
+      : reason === 'generation timed out' && !primaryAnswered ? 'hung'
       : null;
     if (stickyKind) startSticky(stickyKind, primary);
     throwIfCancelled(signal);

@@ -12,7 +12,7 @@ process.env.STATE_DIR = stateRoot;
 
 const store = await import('../src/settings/store.js');
 const settings = await import('../src/settings.js');
-const { withFailover, resetFailoverStickyForTest } = await import('../src/llm/internal/core/failover.js');
+const { withFailover, resetFailoverStickyForTest, failoverRoutingSnapshot } = await import('../src/llm/internal/core/failover.js');
 const { withTransientRetry } = await import('../src/llm/internal/core/retry.js');
 const { recentCalls } = await import('../src/llm/internal/telemetry/log.js');
 const primaryLabel = 'ollama:qwen3.5:397b';
@@ -418,4 +418,194 @@ test('an agent deadline after the model DID answer is an overthinking model: pri
     await new Promise<void>((resolve) => server.close(() => resolve()));
     resetFailoverStickyForTest();
   }
+});
+
+// ── D5 review follow-ups: window length, both legs down, timeouts, probe ──
+
+const { withPermanentNotRetryable } = await import('../src/llm/internal/core/generation.js');
+
+// The sticky window is observed through N2's routing record: retryPrimaryAt is
+// set exactly while the window holds.
+const windowLeftMs = (): number | null => {
+  const at = failoverRoutingSnapshot()?.retryPrimaryAt;
+  return typeof at === 'number' ? at - Date.now() : null;
+};
+
+const quotaError = () => Object.assign(new Error('You exceeded your current quota, please check your plan and billing details'), { statusCode: 429, __via: 'test-primary' });
+
+for (const [name, make] of [['a retired model', retired], ['a spent quota', quotaError]] as const) {
+  test(`${name} fails over but does not start the window: the next call tries the primary`, async () => {
+    resetFailoverStickyForTest();
+    await configure();
+    const attempts: string[] = [];
+    const result = await withFailover('no-window-test', failExtra, async (leg) => {
+      attempts.push(leg.label);
+      if (leg.label === primaryLabel) throw make();
+      return { value: 'backup', via: 'test-backup' };
+    });
+    assert.equal(result, 'backup');
+    assert.equal(windowLeftMs(), null);
+    await withFailover('no-window-test', failExtra, async (leg) => {
+      attempts.push(leg.label);
+      return { value: 'primary', via: 'test-primary' };
+    });
+    assert.deepEqual(attempts, [primaryLabel, backupLabel, primaryLabel]);
+    resetFailoverStickyForTest();
+  });
+}
+
+test('a primary success clears the window', async () => {
+  resetFailoverStickyForTest();
+  await configure();
+  await withFailover('clear-test', failExtra, async (leg) => {
+    if (leg.label === primaryLabel) throw refused();
+    return { value: 'backup', via: 'test-backup' };
+  });
+  assert.equal(windowLeftMs() !== null, true);
+  // Same primary, backup switched off: the window still holds, but with
+  // nowhere to route the primary gets its try — and serves.
+  await configure({ ...fallback, enabled: false });
+  await withFailover('clear-test', failExtra, async () => ({ value: 'primary', via: 'test-primary' }));
+  // Backup back on: the record would show again if the window had survived.
+  await configure();
+  assert.equal(failoverRoutingSnapshot(), null);
+  resetFailoverStickyForTest();
+});
+
+test('an exhausted primary holds a short window, an unreachable one the long probed window', async () => {
+  for (const [make, kind, maxMs, minMs] of [[bare500, 'exhausted', 90_000, 80_000], [refused, 'unreachable', 300_000, 290_000]] as const) {
+    resetFailoverStickyForTest();
+    await configure();
+    await withFailover('window-length-test', failExtra, async (leg) => {
+      if (leg.label === primaryLabel) throw make();
+      return { value: 'backup', via: 'test-backup' };
+    });
+    const left = windowLeftMs();
+    assert.ok(left !== null && left <= maxMs && left > minMs, `${kind}: ${left}`);
+  }
+  resetFailoverStickyForTest();
+});
+
+test('when the backup also fails inside the window, the window clears and the next call tries the primary', async () => {
+  resetFailoverStickyForTest();
+  await configure();
+  await withFailover('both-down-test', failExtra, async (leg) => {
+    if (leg.label === primaryLabel) throw bare500();
+    return { value: 'backup', via: 'test-backup' };
+  });
+  const backupError = Object.assign(new Error('backup down'), { __via: 'test-backup' });
+  const attempts: string[] = [];
+  await assert.rejects(withFailover('both-down-test', failExtra, async (leg) => {
+    attempts.push(leg.label);
+    throw backupError;
+  }), (err) => err === backupError);
+  assert.equal(windowLeftMs(), null);
+  await withFailover('both-down-test', failExtra, async (leg) => {
+    attempts.push(leg.label);
+    return { value: 'primary back', via: 'test-primary' };
+  });
+  assert.deepEqual(attempts, [backupLabel, primaryLabel], 'one lost call, then the recovered primary serves');
+  resetFailoverStickyForTest();
+});
+
+test('a cancelled backup call inside the window leaves the window alone', async () => {
+  resetFailoverStickyForTest();
+  await configure();
+  await withFailover('cancel-window-test', failExtra, async (leg) => {
+    if (leg.label === primaryLabel) throw bare500();
+    return { value: 'backup', via: 'test-backup' };
+  });
+  const ctl = new AbortController();
+  await assert.rejects(withFailover('cancel-window-test', failExtra, async () => {
+    ctl.abort();
+    throw new Error('aborted');
+  }, undefined, ctl.signal));
+  assert.equal(windowLeftMs() !== null, true);
+  resetFailoverStickyForTest();
+});
+
+test('a request timeout after the model DID answer fails this call over but does not mark the primary down', async () => {
+  resetFailoverStickyForTest();
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({
+        id: 'c1', object: 'chat.completion', created: 0, model: 'stub',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const port = (server.address() as any).port;
+  try {
+    writeFileSync(path.join(stateRoot, 'settings.json'), JSON.stringify({ llm: {
+      provider: 'openai-compatible', model: 'stub', baseUrl: `http://127.0.0.1:${port}/v1`, fallback,
+    } }));
+    store.setCache(null);
+    await settings.load();
+    const stubLabel = 'openai-compatible:stub';
+    const attempts: string[] = [];
+    const result = await withFailover('slow-step-test', failExtra, async (leg) => {
+      attempts.push(leg.label);
+      if (leg.label === stubLabel) {
+        await generateText({ model: leg.model, prompt: 'hello' }); // an earlier step answered
+        throw new ProviderRequestTimeoutError('req-2', { kind: 'slow-step-test', leg: 'primary', provider: 'openai-compatible', modelLabel: stubLabel, targetId: 't', timeoutMs: 300_000 });
+      }
+      return { value: 'backup', via: 'test-backup' };
+    });
+    assert.equal(result, 'backup', 'this call still fails over');
+    assert.equal(windowLeftMs(), null);
+    await withFailover('slow-step-test', failExtra, async (leg) => {
+      attempts.push(leg.label);
+      return { value: 'primary', via: 'test-primary' };
+    });
+    assert.deepEqual(attempts, [stubLabel, backupLabel, stubLabel], 'an answering primary is not marked down');
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    resetFailoverStickyForTest();
+  }
+});
+
+test('the probe clears an unreachable window once the primary port answers again', async () => {
+  // Find a free port, then leave it closed so the primary is refused.
+  const finder = http.createServer();
+  await new Promise<void>((resolve) => finder.listen(0, '127.0.0.1', () => resolve()));
+  const port = (finder.address() as any).port;
+  await new Promise<void>((resolve) => finder.close(() => resolve()));
+  resetFailoverStickyForTest(undefined, 40); // probe every 40 ms
+  writeFileSync(path.join(stateRoot, 'settings.json'), JSON.stringify({ llm: {
+    provider: 'openai-compatible', model: 'stub', baseUrl: `http://127.0.0.1:${port}/v1`, fallback,
+  } }));
+  store.setCache(null);
+  await settings.load();
+  const up = http.createServer((req, res) => { req.resume(); res.end('{}'); });
+  try {
+    await withFailover('probe-test', failExtra, async (leg) => {
+      if (leg.label === 'openai-compatible:stub') throw Object.assign(new Error(`connect ECONNREFUSED 127.0.0.1:${port}`), { code: 'ECONNREFUSED' });
+      return { value: 'backup', via: 'test-backup' };
+    });
+    assert.ok((windowLeftMs() ?? 0) > 290_000, 'an unreachable primary holds the long window');
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(windowLeftMs() !== null, true, 'still refused: the probe keeps the window');
+    await new Promise<void>((resolve) => up.listen(port, '127.0.0.1', () => resolve()));
+    const deadline = Date.now() + 2000;
+    while (windowLeftMs() !== null && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(windowLeftMs(), null, 'the probe saw the port answer and cleared the window');
+  } finally {
+    await new Promise<void>((resolve) => (up.listening ? up.close(() => resolve()) : resolve()));
+    resetFailoverStickyForTest();
+  }
+});
+
+test('a refused or unresolvable host is not retried inside the AI SDK either', () => {
+  for (const code of ['ECONNREFUSED', 'ENOTFOUND']) {
+    const err = Object.assign(new Error(`Cannot connect to API: connect ${code} 127.0.0.1:1`), { isRetryable: true, cause: Object.assign(new Error(code), { code }) });
+    withPermanentNotRetryable(err);
+    assert.equal(err.isRetryable, false, code);
+  }
+  const again = Object.assign(new Error('Cannot connect to API: getaddrinfo EAI_AGAIN locca'), { isRetryable: true, cause: Object.assign(new Error('EAI_AGAIN'), { code: 'EAI_AGAIN' }) });
+  withPermanentNotRetryable(again);
+  assert.equal(again.isRetryable, true, 'EAI_AGAIN keeps the SDK retries');
 });

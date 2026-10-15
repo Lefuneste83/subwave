@@ -22,7 +22,7 @@ import {
   type CompatDetection,
   type Leg,
 } from '../llm/provider.js';
-import { recentCalls, generationHealthSnapshot } from '../llm/log.js';
+import { recentCalls, generationHealthSnapshot, failoverRoutingSnapshot } from '../llm/log.js';
 import type { Finding, StationSettings } from './types.js';
 import { classifyModel, isSchemaFailure } from './util.js';
 import { settingsAgentRoutes } from '../schemas/settings.js';
@@ -105,6 +105,22 @@ export async function checkLlm(
       ? 'An observed generation is stale or recently timed out. Check the provider and requestTimeoutMs; client abort does not guarantee release of the remote inference slot. /doctor/llm has live target details.'
       : generation.status === 'idle' ? 'No observed generation failure; endpoint capacity is not measured.' : undefined,
   });
+
+  // Calls going to the backup instead of the primary — the same record /debug
+  // shows. Inside a sticky window those calls carry no failover record of
+  // their own, so this is where the operator learns why.
+  const routing = failoverRoutingSnapshot();
+  if (routing) {
+    const next = typeof routing.retryPrimaryAt === 'number'
+      ? `primary tried again in ${Math.max(1, Math.ceil((routing.retryPrimaryAt - Date.now()) / 1000))} s`
+      : 'the next call tries the primary first';
+    out.push({
+      label: 'backup routing',
+      status: 'warn',
+      detail: `${routing.reason} — ${routing.calls} call${routing.calls === 1 ? '' : 's'} sent to ${routing.model}${routing.lastOk ? '' : ', which failed too'}; ${next}`,
+      hint: 'Calls return to the primary as soon as it answers. A refused connection is probed every 30 s; a 5xx or a hung model is retried after 90 s, or at once if the backup also fails.',
+    });
+  }
 
   // Recent error rate from the in-memory ring.
   const recent = recentCalls.slice(0, 20);
