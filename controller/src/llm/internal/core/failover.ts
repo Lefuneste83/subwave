@@ -210,6 +210,75 @@ function scheduleStickyProbe(): void {
   probeTimer.unref?.();
 }
 
+// What /debug shows while LLM calls are not going where they should go first.
+// Every unpinned call runs through withFailover, so the routing it chose is
+// recorded there, in one place, whatever sent the call to the backup: D5's
+// sticky window, or a one-off failover (retired model, quota/auth refusal,
+// rate limit, overloaded upstream, unreachable host, 5xx). The record opens
+// on the first call routed to the backup and is cleared by the first call the
+// primary answers again. Pinned calls never touch it: an explicit leg choice
+// (the tagger pins both legs) is routing as intended.
+//
+// Read-only: a /debug poll never changes routing. The snapshot drops a record
+// the next call would not honour: the primary was switched in Settings (the
+// new one is tried at once) or no usable backup is configured any more.
+export interface FailoverRouting {
+  reason: string;          // why calls went to the backup (latest call's reason)
+  since: number;           // first call routed to the backup in this run
+  lastAt: number;          // latest call routed to the backup
+  calls: number;           // calls routed to the backup since `since`
+  lastOk: boolean;         // whether the backup answered the latest one
+  provider: string;        // the backup that took them
+  model: string;
+  // Set while D5's sticky window holds: when the primary will be tried again.
+  // Absent when the next call tries the primary first anyway.
+  retryPrimaryAt?: number;
+}
+
+interface BackupRoutingState {
+  primaryKey: string;
+  reason: string;
+  since: number;
+  lastAt: number;
+  calls: number;
+  lastOk: boolean;
+  provider: string;
+  model: string;
+}
+
+let backupRouting: BackupRoutingState | null = null;
+
+function noteRoutedToBackup(primary: Leg, backup: Leg, reason: string): void {
+  const now = Date.now();
+  const primaryKey = stickyKey(primary);
+  const same = backupRouting && backupRouting.primaryKey === primaryKey && backupRouting.model === backup.label;
+  backupRouting = {
+    primaryKey,
+    reason,
+    since: same ? backupRouting!.since : now,
+    lastAt: now,
+    calls: same ? backupRouting!.calls + 1 : 1,
+    lastOk: true,
+    provider: String(backup.cfg?.provider || ''),
+    model: backup.label,
+  };
+}
+
+function noteBackupFailed(): void {
+  if (backupRouting) backupRouting.lastOk = false;
+}
+
+export function failoverRoutingSnapshot(now: number = Date.now()): FailoverRouting | null {
+  if (!backupRouting) return null;
+  let primary: Leg;
+  try { primary = primaryLeg(); } catch { return null; }
+  if (stickyKey(primary) !== backupRouting.primaryKey) return null;
+  if (!fallbackLeg()) return null;
+  const { primaryKey: _key, ...shown } = backupRouting;
+  const holding = sticky && sticky.key === backupRouting.primaryKey && now < sticky.until;
+  return holding ? { ...shown, retryPrimaryAt: sticky!.until } : shown;
+}
+
 function isAgentDeadline(err: any): boolean {
   return err?.name === 'AgentDeadlineError' || err?.cause?.name === 'AgentDeadlineError';
 }
@@ -219,6 +288,7 @@ function isAgentDeadline(err: any): boolean {
 // A call without an argument restores the production default.
 export function resetFailoverStickyForTest(windowMs?: number): void {
   clearSticky();
+  backupRouting = null;
   stickyWindowMs = windowMs ?? STICKY_WINDOW_MS;
 }
 
@@ -290,11 +360,13 @@ export async function withFailover<T>(
     if (backup) {
       const started = Date.now();
       console.log(`[${kind}] primary LLM (${primary.label}) marked down — using ${backup.label} without retrying it`);
+      noteRoutedToBackup(primary, backup, `primary marked down: ${STICKY_VERDICT[sticky!.kind]}`);
       try {
         const r = await attempt(guardedLeg(backup, kind, 'fallback'));
         recordSuccess({ kind, started, via: r.via, model: backup.label, sampling: r.sampling, usage: r.usage, contextPeakInput: r.contextPeakInput, perf: r.perf, warnings: r.warnings, extra: r.extra });
         return r.value;
       } catch (err2: any) {
+        noteBackupFailed();
         logFailurePreview(kind, err2);
         recordFailure({ kind, started, via: err2?.__via || 'ai-sdk', model: backup.label, error: err2?.message, extra: failExtra(err2) });
         throw err2;
@@ -306,6 +378,7 @@ export async function withFailover<T>(
   try {
     const r = await attempt(guardedLeg(primary, kind, 'primary', () => { primaryAnswered = true; }));
     clearSticky(); // the primary served — whatever marked it down is gone
+    backupRouting = null; // and calls are going where they should go first again
     recordSuccess({ kind, started: primaryStarted, via: r.via, model: primary.label, sampling: r.sampling, usage: r.usage, contextPeakInput: r.contextPeakInput, perf: r.perf, warnings: r.warnings, extra: r.extra });
     return r.value;
   } catch (err: any) {
@@ -356,12 +429,14 @@ export async function withFailover<T>(
       : null;
     if (stickyKind) startSticky(stickyKind, primary);
     throwIfCancelled(signal);
+    noteRoutedToBackup(primary, backup, `primary ${reason}`);
     const backupStarted = Date.now();
     try {
       const r = await attempt(guardedLeg(backup, kind, 'fallback'));
       recordSuccess({ kind, started: backupStarted, via: r.via, model: backup.label, sampling: r.sampling, usage: r.usage, contextPeakInput: r.contextPeakInput, perf: r.perf, warnings: r.warnings, extra: r.extra });
       return r.value;
     } catch (err2: any) {
+      noteBackupFailed();
       logFailurePreview(kind, err2);
       recordFailure({ kind, started: backupStarted, via: err2?.__via || 'ai-sdk', model: backup.label, error: err2?.message, extra: failExtra(err2) });
       throw err2;

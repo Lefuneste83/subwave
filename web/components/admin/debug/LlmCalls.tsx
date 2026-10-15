@@ -17,6 +17,7 @@ import { oneLine } from './format';
 import { CallSection, FilterChip, JsonBlock, JsonOrText } from './bits';
 import { mapChatRole } from './TtsPanels';
 import { debugKeys } from './queries';
+import BackupRouteNote from './BackupRouteNote';
 
 function callUsesMusicalLeanings(call: {
   ok?: boolean;
@@ -189,7 +190,12 @@ export function LlmCalls({ llm }: { llm: DebugLlm | undefined }) {
   return (
     <Card
       title="LLM recent calls"
-      sub={`${calls.length} calls · ${llm?.provider || '—'} / ${llm?.activeModel || '—'}`}
+      sub={
+        <>
+          {`${calls.length} calls · ${llm?.provider || '—'} / ${llm?.activeModel || '—'}`}
+          {llm?.routedToBackup ? <>{' '}<BackupRouteNote routing={llm.routedToBackup} /></> : null}
+        </>
+      }
       right={
         <div className="flex flex-wrap items-center justify-end gap-1">
           <FilterChip active={filter === 'all'} onClick={() => setFilter('all')}>

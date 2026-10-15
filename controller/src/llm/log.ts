@@ -43,3 +43,8 @@ export {
 
 // Live process-local generation ages, separate from completed-call accounting.
 export { generationHealthSnapshot } from './internal/core/generation.js';
+
+// Whether LLM calls are currently going to the backup instead of the primary
+// (any failover, sticky or one-off), for /debug's "routed to backup" line.
+// Read-only; null = normal routing.
+export { failoverRoutingSnapshot, type FailoverRouting } from './internal/core/failover.js';

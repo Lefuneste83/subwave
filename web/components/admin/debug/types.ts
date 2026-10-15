@@ -155,6 +155,17 @@ interface LlmCall {
 export interface DebugLlm {
   activeModel?: string;
   provider?: string;
+  /** Set while LLM calls go to the backup instead of the primary (any failover); null/absent = normal routing. */
+  routedToBackup?: {
+    reason?: string;
+    since?: number;
+    lastAt?: number;
+    calls?: number;
+    lastOk?: boolean;
+    provider?: string;
+    model?: string;
+    retryPrimaryAt?: number;
+  } | null;
   budget?: DebugBudget;
   recentCalls?: LlmCall[];
   /** Raw-request capture status — drives the toggle + file-path hint. */

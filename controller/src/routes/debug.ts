@@ -13,6 +13,7 @@ import {
   LLM_DEBUG_MAX,
   agentDoneRetryCount,
   generationHealthSnapshot,
+  failoverRoutingSnapshot,
   llmCallExportFormat,
   llmCallExportFilename,
   serializeLlmCalls,
@@ -356,6 +357,9 @@ async function buildDebugSnapshot(req: express.Request): Promise<any> {
     generation: generationHealthSnapshot(),
     provider: llmProvider.providerName(),
     activeModel: llmProvider.activeModelLabel(),
+    // While calls go to the backup instead of the primary (any failover,
+    // sticky or one-off): which backup, why, since when. Null = normal routing.
+    routedToBackup: (() => { try { return failoverRoutingSnapshot(); } catch { return null; } })(),
     ollamaUrl: llmProvider.activeOllamaUrl(),
     // Today's usage vs the cap; enabled:false when no cap is set.
     budget: (() => { try { return budgetStatus(); } catch (err: any) { return { error: err.message }; } })(),
