@@ -65,11 +65,21 @@ plan=$(py prepare /work /repo)
 echo "   worker: $plan"
 read -r blend in_cue clip_sec < <(python3 -c 'import json,sys; p=json.loads(sys.argv[1]); print(p["blend_start_sec"], p["in_cue_sec"], p["clip_sec"])' "$plan")
 
+# STEM_SEAM_P_TRIMS: predecessor trims in samples, swept across a 20 ms frame
+# (882 samples at 44.1 kHz) so the seams land at different frame phases. A
+# 60 s predecessor ends on a frame boundary, the one phase where `cross` drops
+# no partial frame, so testing only that case hides the loss.
+trims="${STEM_SEAM_P_TRIMS:-0 1 44 221 441 661 881}"
+modes="${STEM_SEAM_MODES:-verbatim controller}"
+stations="${STEM_SEAM_STATIONS:-0 0.1 $default_cross}"
 verdict=0
-for station in 0 0.1 "$default_cross"; do
-  for mode in verbatim controller; do
-    name="$mode-$station"
-    echo "== $name: production station crossfade ${station}s"
+for trim in $trims; do
+py predecessor /work "$trim"
+export STEM_SEAM_P_TRIM="$trim"
+for station in $stations; do
+  for mode in $modes; do
+    name="$mode-$station-p$trim"
+    echo "== $name: production station crossfade ${station}s, predecessor ${trim} samples short"
     STATE_DIR="$WORK/controller-state" MUSIC_LIBRARY_PATH="$WORK" \
       "$TSX" "$ROOT/controller/scripts/stem-seam-fixture.ts" "$mode" "$station" "$blend" "$in_cue" > "$WORK/fixture-$name.json"
     py render-script /work "$name" "$station" "/work/fixture-$name.json"
@@ -87,6 +97,7 @@ for station in 0 0.1 "$default_cross"; do
       if [ "$mode" = controller ]; then verdict=1; fi
     fi
   done
+done
 done
 
 if [ "$verdict" = 0 ]; then
