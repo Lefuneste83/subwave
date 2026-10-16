@@ -12,10 +12,8 @@
 # Needs controller/node_modules (npm ci), Python with numpy + soundfile
 # (or ANALYZER_IMAGE), and savonet/liquidsoap:v2.4.6 (or LIQ_BIN).
 # Output: scripts/.fx-render/stemseam/ or STEM_SEAM_WORK.
-# Residual: on 2.4.5 the seam can hold up to one 20ms frame (and lose a whole
-# beat when the predecessor ends mid-frame, #5296); on 2.4.6 the sweep in
-# #1933 measures 0.3ms at every frame phase. SEAM_TOLERANCE_MS stays 25ms so
-# one invocation runs on either mixer version.
+# Residual: frame-boundary cross buffering can leave up to one 20ms frame
+# of beat error. SEAM_TOLERANCE_MS defaults to 25ms.
 set -euo pipefail
 
 IMAGE="${LIQ_IMAGE:-savonet/liquidsoap:v2.4.6}"
