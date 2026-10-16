@@ -5,6 +5,24 @@ Both the broadcast and AIO images run the stock upstream
 digest. Keep the `liquidsoap` stage identical in both Dockerfiles; CI compares
 the two executables.
 
+Two things travel with the base-image swap, both under the encoders:
+
+- **Icecast-KH comes back through deb-multimedia.** The 2.4.5 base image
+  shipped with the deb-multimedia repository configured, so the runtime's
+  `apt-get install icecast2` resolved to Icecast-KH. Stock 2.4.6 does not, and
+  the same line installs Debian's plain Icecast 2.4.4, which parses the
+  `<x-forwarded-for>` trusted-proxy list but ignores it: behind the edge proxy
+  every listener is recorded with the proxy's container address and countries
+  disappear. Both Dockerfiles now add the DMO source explicitly (keyring
+  hash-checked) and pin it to `icecast2` alone, and the build fails if the
+  installed Icecast is not KH.
+- **Liquidsoap's codec stack changes shape.** The old image decoded and encoded
+  through DMO's dynamically linked FFmpeg 7.1.4 (with DMO libfdk-aac 2.0.3);
+  the stock 2.4.6 executable bundles a static FFmpeg 8 and links no libav* at
+  all. The images' apt state is no longer part of Liquidsoap's codec behaviour,
+  and the DMO pin above keeps even that apt state on Debian's packages (the
+  AIO's CLI `ffmpeg` in particular).
+
 2.4.6 is the minimum, for two upstream fixes:
 
 - **Unifier growth** ([savonet/liquidsoap#5257](https://github.com/savonet/liquidsoap/pull/5257),
