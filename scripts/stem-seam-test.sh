@@ -12,11 +12,12 @@
 # Needs controller/node_modules (npm ci), Python with numpy + soundfile
 # (or ANALYZER_IMAGE), and savonet/liquidsoap:v2.4.6 (or LIQ_BIN).
 # Output: scripts/.fx-render/stemseam/ or STEM_SEAM_WORK.
-# Frame-boundary buffering: `cross` can buffer a frame (20ms) less than a
-# seam's stamp. radio.liq's clip seam alignment absorbs that, so the beat grid
-# must hold to SEAM_TOLERANCE_MS (default 5ms) across both seams; a mixer
-# without it shows one ~20ms interval per seam and fails. The buffer-size
-# check tolerates the frame and the alignment slack separately.
+
+# Residual: on 2.4.5 the seam can hold up to one 20ms frame (and lose a whole
+# beat when the predecessor ends mid-frame, #5296); on 2.4.6 the sweep in
+# #1933 measures 0.3ms at every frame phase. SEAM_TOLERANCE_MS stays 25ms so
+# one invocation runs on either mixer version.
+2926228 (docs(broadcast): correct the review findings on the 2.4.6 image)
 set -euo pipefail
 
 IMAGE="${LIQ_IMAGE:-savonet/liquidsoap:v2.4.6}"

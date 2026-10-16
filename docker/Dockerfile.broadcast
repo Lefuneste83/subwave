@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # SUB/WAVE broadcast image — Icecast2 + Liquidsoap in one container.
 # icecast2 serves listeners on :7702; liquidsoap connects over loopback and
 # exposes telnet on :1234 (internal). broadcast-entrypoint.sh resolves the
@@ -26,8 +27,9 @@ USER root
 # features: stock Icecast 2.4.4 boots, streams and ignores them, so every
 # listener shows the edge's container IP and loses its country. KH comes from
 # deb-multimedia, which the 2.4.5 base image happened to configure and 2.4.6
-# does not. Pinned to icecast2 alone: the rest of DMO (its ffmpeg libraries)
-# must not replace the Debian ones the stock liquidsoap executable links.
+# does not. Pinned to icecast2 alone so the rest of DMO cannot replace Debian
+# packages (the AIO's CLI ffmpeg in particular); the stock 2.4.6 liquidsoap
+# bundles its own static FFmpeg and links none of them.
 ADD --checksum=sha256:8dc6cbb266c701cfe58bd1d2eb9fe2245a1d6341c7110cfbfe3a5a975dcf97ca \
     https://www.deb-multimedia.org/pool/main/d/deb-multimedia-keyring/deb-multimedia-keyring_2024.9.1_all.deb \
     /tmp/deb-multimedia-keyring.deb

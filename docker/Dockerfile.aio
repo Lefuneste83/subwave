@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # SUB/WAVE all-in-one image — the entire stack in one container, supervised by
 # docker/aio/supervisor.sh behind a loopback Caddy on :80. Exists because
 # Unraid's Community Applications catalogue is one container per template (also
@@ -58,8 +59,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 # features: stock Icecast 2.4.4 boots, streams and ignores them, so every
 # listener shows the edge's container IP and loses its country. KH comes from
 # deb-multimedia, which the 2.4.5 base image happened to configure and 2.4.6
-# does not. Pinned to icecast2 alone: the rest of DMO (its ffmpeg libraries)
-# must not replace the Debian ones the stock liquidsoap executable links.
+# does not. Pinned to icecast2 alone so the rest of DMO cannot replace Debian
+# packages (the AIO's CLI ffmpeg in particular); the stock 2.4.6 liquidsoap
+# bundles its own static FFmpeg and links none of them.
 ADD --checksum=sha256:8dc6cbb266c701cfe58bd1d2eb9fe2245a1d6341c7110cfbfe3a5a975dcf97ca \
     https://www.deb-multimedia.org/pool/main/d/deb-multimedia-keyring/deb-multimedia-keyring_2024.9.1_all.deb \
     /tmp/deb-multimedia-keyring.deb
@@ -88,7 +90,8 @@ RUN apt-get update -qq \
  && icecast2 -v 2>&1 | grep -q -- '-kh' \
  && rm -rf /var/lib/apt/lists/*
 
-# Node.js 22 — lifted from the official image (same bookworm libc) rather than
+# Node.js 22 — lifted from the official image (a bookworm build copied into a
+# trixie runtime: Node's non-glibc parts make the cross-distro copy fine) rather than
 # NodeSource's apt repo, whose CDN serves per-IP 403s
 # (nodesource/distributions#1844) and took out the v1.1.0 publish run.
 COPY --from=nodebin /usr/local/bin/node /usr/local/bin/node
