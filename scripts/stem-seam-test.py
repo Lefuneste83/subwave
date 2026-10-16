@@ -7,6 +7,10 @@
       worker (controller/scripts/analyze_worker.py render_transition). Prints
       the worker's blend_start_sec / in_cue_sec / clip_sec as JSON.
 
+  stem-seam-test.py predecessor <work-dir> <trim-samples>
+      Rewrites P shortened by <trim-samples> at its end, so X starts (and so
+      every later seam lands) at a different phase within a 20 ms frame.
+
   stem-seam-test.py analyse <wav> <seam-x> <seam-y> [tolerance-ms]
       Finds the click onsets in a Liquidsoap render and checks the beat grid
       around the two clip seams. Exit 0 = every interval is one beat, within
@@ -42,6 +46,12 @@ Y_DUR = 60.0
 OUTRO_SECONDS = 20.0  # analyze_worker default: tail window = decoded dur - 20 s
 HEAD_SECONDS = 40.0   # analyze_worker default ANALYZE_SECONDS
 WIND_DOWN = 54.0      # X's outro "wind-down" start: the last usable bar ends here
+
+# P's length in samples, less this trim (STEM_SEAM_P_TRIM). A predecessor of
+# exactly 60 s ends on a frame boundary, and so does every seam after it; a
+# trim moves the whole render off the frame grid, which is where `cross` loses
+# a partial frame.
+P_TRIM = int(os.environ.get("STEM_SEAM_P_TRIM", "0"))
 
 SEAM_WINDOW = 2.5     # seconds either side of a seam that are checked
 # A clip seam's buffer may fall up to one frame short of its stamp (`cross`
@@ -121,6 +131,13 @@ def prepare(work, repo):
         print(json.dumps(res))
         sys.exit(1)
     print(json.dumps({k: res[k] for k in ("blend_start_sec", "in_cue_sec", "clip_sec")}))
+
+
+def predecessor(work, trim):
+    data, sr = sf.read(os.path.join(work, "x.flac"), dtype="float32", always_2d=True)
+    if trim:
+        data = data[:-trim]
+    sf.write(os.path.join(work, "p.flac"), data, sr, subtype="PCM_16", format="FLAC")
 
 
 def onsets(path):
@@ -238,11 +255,14 @@ def analyse_render(path, log_path, fixture_path, clip_sec, tol_ms):
         fixture = json.load(f)
     overlaps = {}
     for a, b in (("P", "X"), ("X", "clip"), ("clip", "Y")):
-        values = re.findall(rf'STEMSEAM: {a} -> {b} overlap=([0-9.]+)', log)
+        values = re.findall(rf'STEMSEAM: {a} -> {b} overlap=([0-9.]+(?:[eE][-+]?[0-9]+)?)', log)
         if len(values) != 1:
             raise ValueError(f"Expected exactly one {a} -> {b} transition, got {values}")
         overlaps[a] = float(values[0])
-    seam_x = X_DUR - overlaps["P"] + fixture["outCueSec"] - overlaps["X"]
+    # seam_x is where the X -> clip BUFFER starts. The clip itself enters
+    # b_delay later (radio.liq delays the incoming side to the cue lead); the
+    # 2.5 s analysis window spans both, so the window is not moved.
+    seam_x = X_DUR - P_TRIM / SR - overlaps["P"] + fixture["outCueSec"] - overlaps["X"]
     seam_y = seam_x + clip_sec - overlaps["clip"]
     for a in ("X", "clip"):
         off_ms = (overlaps[a] - fixture["crossSec"]) * 1000
@@ -257,6 +277,8 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "prepare":
         prepare(sys.argv[2], sys.argv[3])
+    elif cmd == "predecessor":
+        predecessor(sys.argv[2], int(sys.argv[3]))
     elif cmd == "analyse":
         analyse(sys.argv[2], float(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5]) if len(sys.argv) > 5 else 5.0)
     elif cmd == "mixer":

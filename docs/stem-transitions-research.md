@@ -260,10 +260,22 @@ where the clip takes over. The outgoing track and the clip therefore
 carry the cue lead as `liq_clip_lead`; `cross_stamps` buffers those seams
 `clip_seam_slack` (0.1s) past the lead, and `dj_transition` delays the
 incoming side by whatever was buffered beyond it, so the clip starts
-exactly one lead before X's cut whatever the frame phase. The harness now
-holds the beat grid to 5ms (`SEAM_TOLERANCE_MS`); buffer sizes may sit
-one frame under the stamp or up to the slack over it. A mixer without the
-alignment ignores the key and keeps the old frame residual.
+exactly one lead before X's cut whatever the frame phase. Both fades run over
+the lead from the clip's entry, so the seam holds unity level. On Liquidsoap
+2.4.6 the harness holds the beat grid to 5ms (`SEAM_TOLERANCE_MS`) at every
+frame phase it sweeps: X -> clip 0.2ms and clip -> Y 2.9ms at predecessor
+trims of 0, 1, 44, 221, 441, 661 and 881 samples, station crossfades 0, 0.1
+and the default. Buffer sizes may sit one frame under the stamp or up to the
+slack over it; a buffer past lead + slack + one frame is left unaligned and
+logged. **On 2.4.5 the delay is not sample-accurate**: `blank()` counts the
+partial first frame of a transition that starts mid-frame as a whole one, so
+the clip enters early by the unused part of that frame — 20/19/15/10ms at
+trims 1/44/221/441, 0.2ms only where X starts on a frame boundary. That is
+the same 2.4.5 partial-frame family as savonet/liquidsoap#5296, and 2.4.6
+fixes both (a standalone `blank(duration=0.08)` after a track ending
+mid-frame gives 67.0ms of silence on 2.4.5, 80.0ms on 2.4.6). The clip -> Y
+seam holds 2.9ms on both. A mixer without the alignment ignores the key and
+keeps the old frame residual.
 
 For combined validation before either PR is merged, fetch the final #1774
 commit and run `STEM_SEAM_RADIO_REF=<commit-sha> bash scripts/stem-seam-test.sh`.

@@ -11,6 +11,7 @@ const settings = await import('../src/settings.js');
 const { setCache } = await import('../src/settings/store.js');
 const { queue } = await import('../src/broadcast/queue.js');
 const { config } = await import('../src/config.js');
+const { CLIP_SEAM_CROSS_SEC } = await import('../src/broadcast/stem-seam.js');
 type Item = Parameters<typeof queue.removeUpcomingItem>[0];
 
 async function stage(outSec: number, inSec: number) {
@@ -96,6 +97,10 @@ test('a published outgoing blend commits its successor across a live mode change
     await draining;
     await waitUntil(() => consumed.length === 3);
     assert.deepEqual(queue.upcoming, [outgoing, incoming]);
+    // Both sides of the X -> clip seam carry the cue lead radio.liq aligns on.
+    const lead = `liq_clip_lead="${CLIP_SEAM_CROSS_SEC}"`;
+    assert.ok(consumed[0].includes(lead), 'the outgoing track carries the clip lead');
+    assert.ok(consumed[1].includes(lead), 'the clip carries the clip lead');
     assert.ok(consumed[1].includes('subwave_clip="1"'));
     assert.ok(consumed[2].includes('liq_cue_in="20"'));
     assert.ok(!consumed[2].includes('liq_cue_out="1200'));

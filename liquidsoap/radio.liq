@@ -508,18 +508,30 @@ def dj_transition(a, b) =
   # starts `d` before its end, the incoming side waits `d - lead`, and both
   # reach the same instant of the music whatever whole number of frames
   # `cross` buffered. Without it each clip seam was off by the frame cross
-  # dropped (~20ms flam, scripts/stem-seam-test.sh). The incoming fade runs
-  # over the lead, so both fades still end together and never sum above unity.
+  # dropped (~20ms flam, scripts/stem-seam-test.sh). Both fades run over the
+  # lead, from the clip's entry, so they end together and sum to unity.
+  # The delay is a blank(), which is sample-accurate on 2.4.6 only: on 2.4.5 a
+  # transition that starts mid-frame counts its partial first frame whole, so
+  # the clip arrives up to one frame early (savonet/liquidsoap#5296's family).
   clip_meta =
     if b.metadata["subwave_clip"] == "1" then b.metadata
     elsif a.metadata["subwave_clip"] == "1" then a.metadata
     else [] end
   clip_lead = float_of_string(default=-1., clip_meta["liq_clip_lead"])
-  b_delay = if clip_lead >= 0. and d > clip_lead then d - clip_lead else 0. end
+  # Bounded: cross_stamps buffers a clip seam lead + slack, give or take one
+  # frame. A larger buffer means the seam was sized by something else (a
+  # non-clip stamp between X and the clip would hold the clip back ~9.7s), so
+  # it is logged and left as a plain crossfade rather than delayed.
+  clip_max_d = clip_lead + clip_seam_slack + frame.duration()
+  b_delay =
+    if clip_lead >= 0. and d > clip_lead and d <= clip_max_d then d - clip_lead
+    else 0. end
   if clip_lead >= 0. then
     log(label="clip.seam", level=3, "buffered #{d}s, cue lead #{clip_lead}s: incoming waits #{b_delay}s")
     if d < clip_lead then
       log(label="clip.seam", level=2, "buffer #{d}s is shorter than the cue lead #{clip_lead}s — this seam is #{clip_lead - d}s off")
+    elsif d > clip_max_d then
+      log(label="clip.seam", level=2, "buffer #{d}s is past the cue lead #{clip_lead}s + slack — not aligned, plain crossfade")
     end
   end
   # EFFECT ARMING. Every effect is APPLIED to the outgoing branch, but which
@@ -564,15 +576,20 @@ def dj_transition(a, b) =
   # stab at full level. Loop takes NO fader here: it captures the raw outgoing
   # bar and applies its own complementary ride after the cascade; the hot fade
   # made every loop transition jump in level at its start.
+  # A delayed clip seam (b_delay > 0) fades the outgoing side over the lead
+  # too, so both fades start where the clip enters and sum to unity; over the
+  # full d it was already down to (d - b_delay)/d when the clip came in (0.75,
+  # -2.5 dB, at the 0.4s/0.3s clip seam; arithmetic for linear fades).
+  a_fade = d - b_delay
   a_source =
     if washing then
-      fade.out(duration=d, type="exp", initial_metadata=a.metadata, a.source)
+      fade.out(duration=a_fade, type="exp", initial_metadata=a.metadata, a.source)
     elsif sweeping or chopping then
-      fade.out(duration=d, type="log", initial_metadata=a.metadata, a.source)
+      fade.out(duration=a_fade, type="log", initial_metadata=a.metadata, a.source)
     elsif looping then
       a.source
     else
-      fade.out(duration=d, initial_metadata=a.metadata, a.source)
+      fade.out(duration=a_fade, initial_metadata=a.metadata, a.source)
     end
   # SWEEP ENVELOPE — riding the filter out of a track. Cutoffs move in
   # LOG-frequency space (pow) throughout; linear Hz ramps read as
