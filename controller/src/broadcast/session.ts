@@ -11,6 +11,7 @@ import * as settings from '../settings.js';
 import { logEvent } from '../observability/events.js';
 import type { getFullContext } from '../context.js';
 import { promptMemoryEntries, type PromptMemoryEntry } from './prompt-memory.js';
+import { stripClockPhrases } from './clock-phrases.js';
 import { snapshotBoothCarry, type BoothCarry } from './booth-carry.js';
 import { BOUNDARY_MAX_HORIZON_SEC, nextShowBoundaryMs, showKeyAt, showRunContinues, showTakeoverStartedAt } from './show-boundary.js';
 import type { Persona } from './queue/types.js';
@@ -878,7 +879,9 @@ export function windowMessages() {
     // from model history, including sessions written before this guard existed.
     const promptText = m.role === 'dj' && m.kind === 'pick'
       ? leaningsBlindPickReason(m.text, { title: m.meta?.title, artist: m.meta?.artist })
-      : m.text;
+      // Aired lines replay as the model's OWN untimed turns, the strongest
+      // invitation to repeat a clock that has since moved on (M1).
+      : m.role === 'segment' ? stripClockPhrases(m.text) : m.text;
     const text = m.meta?.promptSuffix ? `${promptText}${m.meta.promptSuffix}` : promptText;
     const content = (m.role === 'dj' && m.kind === 'pick')
       ? `(pick note to self — not aired) ${text}`
