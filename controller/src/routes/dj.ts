@@ -722,7 +722,9 @@ router.post('/dj/say', requireAdmin, async (req, res) => {
         recentOpeners: queue.getRecentOpeners(),
       });
     }
-    await queue.announce(spoken, kind);
+    // Operator text is a manual action: its words air as typed, a stated time
+    // included (queue.clockChecked).
+    await queue.announce(spoken, kind, { verbatim: true });
     if (sfxName) void queue.playSfx(sfxName, { underVoice: true });
     res.json({ ok: true, mode, kind, spoken, sfx: sfxName || null });
   } catch (err) {

@@ -1,4 +1,5 @@
 import { VOICE_KINDS, DEDUPE_KINDS } from './queue/kinds.js';
+import { stripClockPhrases } from './clock-phrases.js';
 
 // Pure selection policy for the speech memory injected into DJ prompts. The
 // booth log is station-wide; editorial continuity belongs to the current
@@ -66,7 +67,12 @@ export function promptRecapEntries(
       if (kinds.has(entry.kind)) continue;
       kinds.add(entry.kind);
     }
-    const message = typeof entry.message === 'string' ? entry.message.replace(/\s+/g, ' ').trim() : '';
+    // A stated clock in an aired line is stale by the next prompt, and small
+    // models copy it word for word (M1: "just after ten" airing at 11:48).
+    // The recap exists to prevent repetition, so it never needs the time.
+    const message = typeof entry.message === 'string'
+      ? stripClockPhrases(entry.message.replace(/\s+/g, ' ').trim())
+      : '';
     if (!message) continue;
     picked.push({ ...entry, message: message.length > maxChars ? message.slice(0, maxChars - 1) + '…' : message });
     if (picked.length >= limit) break;
