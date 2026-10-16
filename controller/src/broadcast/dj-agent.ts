@@ -803,6 +803,7 @@ async function pickViaSelectionRoute(queue, ctx, { wantLink, audioWaypoint = nul
     seen: extras.seen,
     // Every queue read stays here; the policy module is handed values only.
     recentRoots: neighbourRoots,
+    recentDistances: queue.neighbourArtistDistances?.(varietyWindow),
     window: varietyWindow,
     repick: guardRepick,
     poolRescue: (avoidArtist, avoidAnchorArtist) => pickViaPool(
