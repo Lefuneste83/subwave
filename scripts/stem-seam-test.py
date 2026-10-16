@@ -259,6 +259,9 @@ def analyse_render(path, log_path, fixture_path, clip_sec, tol_ms):
         if len(values) != 1:
             raise ValueError(f"Expected exactly one {a} -> {b} transition, got {values}")
         overlaps[a] = float(values[0])
+    # seam_x is where the X -> clip BUFFER starts. The clip itself enters
+    # b_delay later (radio.liq delays the incoming side to the cue lead); the
+    # 2.5 s analysis window spans both, so the window is not moved.
     seam_x = X_DUR - P_TRIM / SR - overlaps["P"] + fixture["outCueSec"] - overlaps["X"]
     seam_y = seam_x + clip_sec - overlaps["clip"]
     for a in ("X", "clip"):

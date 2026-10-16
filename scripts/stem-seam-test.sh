@@ -74,36 +74,37 @@ modes="${STEM_SEAM_MODES:-verbatim controller}"
 stations="${STEM_SEAM_STATIONS:-0 0.1 $default_cross}"
 verdict=0
 for trim in $trims; do
-py predecessor /work "$trim"
-export STEM_SEAM_P_TRIM="$trim"
-for station in $stations; do
-  for mode in $modes; do
-    name="$mode-$station-p$trim"
-    echo "== $name: production station crossfade ${station}s, predecessor ${trim} samples short"
-    STATE_DIR="$WORK/controller-state" MUSIC_LIBRARY_PATH="$WORK" \
-      "$TSX" "$ROOT/controller/scripts/stem-seam-fixture.ts" "$mode" "$station" "$blend" "$in_cue" > "$WORK/fixture-$name.json"
-    py render-script /work "$name" "$station" "/work/fixture-$name.json"
-    rm -f "$WORK/seam-$name.wav"
-    if ! liq "seam-$name.liq" > "$WORK/seam-$name.log"; then
-      tail -20 "$WORK/seam-$name.log"
-      echo "STEMSEAM FAIL: Liquidsoap failed ($name)"
-      exit 1
-    fi
-    grep -E 'STEMSEAM:|clip\.seam' "$WORK/seam-$name.log"
-    if py analyse-render "/work/seam-$name.wav" "/work/seam-$name.log" "/work/fixture-$name.json" "$clip_sec" "${SEAM_TOLERANCE_MS:-5}"; then
-      echo "   $name: beat grid intact"
-    else
-      echo "   $name: wrong buffer or broken beat grid"
-      if [ "$mode" = controller ]; then verdict=1; fi
-    fi
+  py predecessor /work "$trim"
+  export STEM_SEAM_P_TRIM="$trim"
+  for station in $stations; do
+    for mode in $modes; do
+      name="$mode-$station-p$trim"
+      echo "== $name: production station crossfade ${station}s, predecessor ${trim} samples short"
+      STATE_DIR="$WORK/controller-state" MUSIC_LIBRARY_PATH="$WORK" \
+        "$TSX" "$ROOT/controller/scripts/stem-seam-fixture.ts" "$mode" "$station" "$blend" "$in_cue" > "$WORK/fixture-$name.json"
+      py render-script /work "$name" "$station" "/work/fixture-$name.json"
+      rm -f "$WORK/seam-$name.wav"
+      if ! liq "seam-$name.liq" > "$WORK/seam-$name.log"; then
+        tail -20 "$WORK/seam-$name.log"
+        echo "STEMSEAM FAIL: Liquidsoap failed ($name)"
+        exit 1
+      fi
+      grep -E 'STEMSEAM:|clip\.seam' "$WORK/seam-$name.log"
+      if py analyse-render "/work/seam-$name.wav" "/work/seam-$name.log" "/work/fixture-$name.json" "$clip_sec" "${SEAM_TOLERANCE_MS:-5}"; then
+        echo "   $name: beat grid intact"
+      else
+        echo "   $name: wrong buffer or broken beat grid"
+        if [ "$mode" = controller ]; then verdict=1; fi
+      fi
+    done
   done
-done
 done
 
 if [ "$verdict" = 0 ]; then
-  echo "STEMSEAM PASS: controller cues passed 0, 0.1 and default station crossfades"
+  echo "STEMSEAM PASS: controller cues held ${SEAM_TOLERANCE_MS:-5}ms at station crossfades [$stations], predecessor trims [$trims] ($IMAGE)"
 else
-  echo "STEMSEAM FAIL: use #1774's mixer fix before shipping these cues at short crossfades"
+  echo "STEMSEAM FAIL: controller cues missed ${SEAM_TOLERANCE_MS:-5}ms ($IMAGE; the clip seam's blank() delay is sample-accurate on Liquidsoap 2.4.6 only)"
 fi
 echo "Renders and logs: $WORK"
+exit "$verdict"
 exit "$verdict"
