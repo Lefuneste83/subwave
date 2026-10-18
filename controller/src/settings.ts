@@ -1226,6 +1226,10 @@ export async function load() {
       stemCacheGb: Number.isFinite(stored.audio?.stemCacheGb) && stored.audio.stemCacheGb > 0
         ? stored.audio.stemCacheGb
         : DEFAULTS.audio.stemCacheGb,
+      stemOrphanPurgeEnabled:
+        typeof stored.audio?.stemOrphanPurgeEnabled === 'boolean'
+          ? stored.audio.stemOrphanPurgeEnabled
+          : DEFAULTS.audio.stemOrphanPurgeEnabled,
       analyzeQuietOnly:
         typeof stored.audio?.analyzeQuietOnly === 'boolean'
           ? stored.audio.analyzeQuietOnly
@@ -2424,6 +2428,7 @@ export async function prepareUpdate(patch, { themeIds }: { themeIds?: ReadonlySe
       'stemCacheGb',
       'analyzeQuietOnly',
       'analyzeQuietMinutes',
+      'stemOrphanPurgeEnabled',
     ] as const) {
       if (au[k] !== undefined) (next.audio as Record<string, unknown>)[k] = au[k];
     }
