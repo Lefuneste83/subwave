@@ -183,6 +183,96 @@ test('find: a bare "after midnight" is a stretch of the night, not a clock', () 
   assert.equal(findClockPhrases('it is just after midnight on Friday Drive').length, 1);
 });
 
+test('T1 find: half-past midnight is a clock phrase', () => {
+  const phrases = findClockPhrases('it is half-past midnight on a Sunday here');
+  assert.equal(phrases.length, 1);
+  assert.equal(phrases[0].text, 'half-past midnight');
+  assert.deepEqual([phrases[0].lo, phrases[0].hi], [20, 40]);
+});
+
+test('T2 find: half past noon', () => {
+  const phrases = findClockPhrases('half past noon');
+  assert.equal(phrases.length, 1);
+  assert.deepEqual([phrases[0].lo, phrases[0].hi], [20, 40]);
+});
+
+test('T3 find: quarter past midnight', () => {
+  const phrases = findClockPhrases("It's a quarter past midnight.");
+  assert.equal(phrases.length, 1);
+  assert.equal(phrases[0].text, 'quarter past midnight');
+  assert.deepEqual([phrases[0].lo, phrases[0].hi], [10, 20]);
+});
+
+test('T4 find: quarter to midnight', () => {
+  const phrases = findClockPhrases('quarter to midnight');
+  assert.equal(phrases.length, 1);
+  assert.deepEqual([phrases[0].lo, phrases[0].hi], [-20, -10]);
+});
+
+test('T5 find: deictic "it is past midnight"', () => {
+  const phrases = findClockPhrases('It is past midnight on a Cretan Sunday, and we turn to Lambchop.');
+  assert.equal(phrases.length, 1);
+  assert.equal(phrases[0].text, 'past midnight');
+  assert.deepEqual([phrases[0].lo, phrases[0].hi], [0, 59]);
+});
+
+test('T6 find: "it\'s gone midnight" and "it is now past noon"', () => {
+  const a = findClockPhrases("it's gone midnight here");
+  assert.equal(a.length, 1);
+  assert.equal(a[0].text, 'gone midnight');
+  const b = findClockPhrases('it is now past noon');
+  assert.equal(b.length, 1);
+  assert.equal(b[0].text, 'past noon');
+});
+
+test('T7 find: "it is just past midnight" yields exactly ONE phrase', () => {
+  const phrases = findClockPhrases('it is just past midnight');
+  assert.equal(phrases.length, 1);
+  assert.equal(phrases[0].text, 'just past midnight');
+  assert.deepEqual([phrases[0].lo, phrases[0].hi], [0, 25]);
+});
+
+test('T8 find: bare after/past midnight with no deictic anchor stays unmatched', () => {
+  assert.deepEqual(findClockPhrases('it is Saturday after midnight on Friday Drive'), []);
+  assert.deepEqual(findClockPhrases('we play records long past midnight'), []);
+  assert.deepEqual(findClockPhrases('music after midnight'), []);
+});
+
+test('T9 reconcile: replace deictic "past midnight" at 03:09', () => {
+  const r = reconcileClockPhrases(
+    'It is past midnight on a Cretan Sunday, and we turn to Lambchop.',
+    { airHhmm: '03:09', supplied: 'just after 3am' }
+  );
+  assert.equal(r.text, 'It is just after 3am on a Cretan Sunday, and we turn to Lambchop.');
+  assert.equal(r.changes.length, 1);
+  assert.deepEqual(r.changes[0], { from: 'past midnight', to: 'just after 3am', offMin: 130 });
+});
+
+test('T10 reconcile keep: "past midnight" at 00:41 within tolerance', () => {
+  const r = reconcileClockPhrases(
+    'It is past midnight on a Cretan Sunday, and we turn to Lambchop.',
+    { airHhmm: '00:41', supplied: 'just after 3am' }
+  );
+  assert.equal(r.text, 'It is past midnight on a Cretan Sunday, and we turn to Lambchop.');
+  assert.deepEqual(r.changes, []);
+});
+
+test('T11 reconcile keep: "half-past midnight" at 00:43 under tolerance', () => {
+  const r = reconcileClockPhrases(
+    'it is half-past midnight on a Sunday here',
+    { airHhmm: '00:43', supplied: 'approaching 1am' }
+  );
+  assert.equal(r.text, 'it is half-past midnight on a Sunday here');
+  assert.deepEqual(r.changes, []);
+});
+
+test('T12 strip: half-past midnight removed', () => {
+  assert.equal(
+    stripClockPhrases('it is half-past midnight on a Sunday here'),
+    'it is on a Sunday here'
+  );
+});
+
 test('find: a time the line refers back or ahead to is not the time now', () => {
   assert.deepEqual(findClockPhrases('It has been humming through the show since half past seven; now it plays.'), []);
   assert.deepEqual(findClockPhrases('Stay with us until nine o\'clock.'), []);
