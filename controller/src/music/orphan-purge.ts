@@ -31,6 +31,7 @@ import { readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
 import * as stemCache from './stem-cache.js';
+import { writeNameSidecar, type OrphanTrackName } from './orphan-names.js';
 import {
   planOrphanPurge,
   planQuarantinePurge,
@@ -122,6 +123,11 @@ export async function runOrphanPurge(opts: {
   inFlightMs?: number;
   quarantineDir?: string;
   graceMs?: number;
+  /** Optional: display names for the dirs being quarantined. Called lazily
+   *  once (only when a confirmed pass will actually move something), and what
+   *  it returns is stamped into each quarantine as `.track-meta.json` so the
+   *  name outlives the log retention that produced it. */
+  resolveNames?: (ids: string[]) => Promise<ReadonlyMap<string, OrphanTrackName>>;
 }): Promise<PurgeReport> {
   const now = opts.now ?? Date.now();
   const empty: PurgeReport = {
@@ -206,6 +212,9 @@ export async function runOrphanPurge(opts: {
     }
     // 3. Orphans: move into quarantine (same-filesystem rename; no merge).
     await mkdirSafe(qu);
+    const names = opts.resolveNames && plan.quarantine.length
+      ? await opts.resolveNames(plan.quarantine.map(q => q.name))
+      : undefined;
     for (const { name } of plan.quarantine) {
       const from = path.join(root, name);
       const to = path.join(qu, name);
@@ -219,6 +228,7 @@ export async function runOrphanPurge(opts: {
         try {
           if (existingAge >= freshAge) { await rm(from, { recursive: true, force: true }); }
           else { await rm(to, { recursive: true, force: true }); await rename(from, to); await stampQuarantine(to, now); }
+          await writeNameSidecar(to, names?.get(name), now);
           report.quarantined += 1;
         } catch { report.failed += 1; }
         continue;
@@ -226,6 +236,7 @@ export async function runOrphanPurge(opts: {
       try {
         await rename(from, to);
         await stampQuarantine(to, now);
+        await writeNameSidecar(to, names?.get(name), now);
         report.quarantined += 1;
       } catch { report.failed += 1; }
     }

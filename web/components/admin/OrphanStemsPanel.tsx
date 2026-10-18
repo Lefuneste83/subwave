@@ -7,7 +7,13 @@
 // into the library gets its dirs released rather than re-separated.
 // The daily cron behind the toggle is off by default — deleting operator
 // files is opt-in, and a first pass should be read, not trusted (#1570 rule).
+// The dirs are named by track id and the library no longer knows them, so
+// raw ids told an operator nothing: "Show tracks" pulls the readable list
+// (GET /stems/orphans/tracks resolves title/artist/album from the plays
+// snapshot, the recent-plays sidecar and the event logs) into a fold under
+// the stats.
 
+import { useState } from 'react';
 import { useAdminAuth } from '../../lib/adminAuth';
 import { useAdminMutation, useAdminQuery } from '../../lib/admin-query';
 import type { AdminFetch } from '../../lib/admin-query';
@@ -41,6 +47,18 @@ interface OrphanPayload {
   report: OrphanReport;
 }
 
+interface OrphanTrackRow {
+  id: string;
+  state: 'orphan' | 'quarantined';
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+}
+
+interface OrphanTracks {
+  tracks: OrphanTrackRow[];
+}
+
 const orphanKeys = { all: ['stems', 'orphans'] as const, state: () => [...orphanKeys.all, 'state'] };
 
 function useOrphanState(adminFetch: AdminFetch, enabled: boolean) {
@@ -50,6 +68,18 @@ function useOrphanState(adminFetch: AdminFetch, enabled: boolean) {
     enabled,
     request: (fetch, signal) =>
       fetch('/stems/orphans', { signal }).then(r => r.json() as Promise<OrphanState>),
+  });
+}
+
+// Lazy: the event-log tail behind the name resolution costs real I/O, so the
+// list fetches on the first open of the fold, not on every panel paint.
+function useOrphanTracks(adminFetch: AdminFetch, enabled: boolean) {
+  return useAdminQuery<OrphanTracks>({
+    key: [...orphanKeys.all, 'tracks'],
+    adminFetch,
+    enabled,
+    request: (fetch, signal) =>
+      fetch('/stems/orphans/tracks', { signal }).then(r => r.json() as Promise<OrphanTracks>),
   });
 }
 
@@ -70,20 +100,60 @@ function useOrphanMutation(adminFetch: AdminFetch) {
 
 const mb = (bytes: number) => `${Math.round(bytes / (1024 * 1024))} MB`;
 
+function TrackRow({ track }: { track: OrphanTrackRow }) {
+  return (
+    <div className="grid grid-cols-[1fr_auto] items-baseline gap-x-3 border-b border-[var(--separator-soft)] py-1.5 last:border-0">
+      <div className="min-w-0">
+        {track.title ? (
+          <span className="text-[13px]">
+            {track.title}
+            {track.artist ? <span className="text-muted"> — {track.artist}</span> : null}
+            {track.album ? <span className="text-muted"> · {track.album}</span> : null}
+          </span>
+        ) : (
+          <span className="text-[13px] text-muted">Unknown track — no name recorded before it left</span>
+        )}
+      </div>
+      <code className="mono-num text-[11px] break-all text-muted">{track.id}</code>
+    </div>
+  );
+}
+
+function TrackGroup({ label, tracks }: { label: string; tracks: OrphanTrackRow[] }) {
+  return (
+    <div className="mb-2">
+      <p className="py-1 text-[11px] tracking-wide text-muted uppercase">{label}</p>
+      {tracks.map(t => <TrackRow key={t.id} track={t} />)}
+    </div>
+  );
+}
+
 export default function OrphanStemsPanel() {
   const { adminFetch, needsAuth, hydrated } = useAdminAuth();
   const ready = hydrated && !needsAuth;
   const stateQuery = useOrphanState(adminFetch, ready);
+  const [showTracks, setShowTracks] = useState(false);
+  const tracksQuery = useOrphanTracks(adminFetch, ready && showTracks);
   const mutation = useOrphanMutation(adminFetch);
   const report = stateQuery.data?.report;
   const enabled = stateQuery.data?.enabled === true;
 
   const act = (vars: { confirm?: boolean; setEnabled?: boolean }) =>
-    mutation.mutate(vars, { onSuccess: () => { void stateQuery.refetch(); } });
+    mutation.mutate(vars, {
+      onSuccess: () => {
+        void stateQuery.refetch();
+        // If the fold is open, moved dirs must not keep showing as orphans.
+        if (showTracks) void tracksQuery.refetch();
+      },
+    });
+
+  const rows = tracksQuery.data?.tracks ?? [];
+  const orphanRows = rows.filter(t => t.state === 'orphan');
+  const quarantinedRows = rows.filter(t => t.state === 'quarantined');
 
   return (
     <Card
-      title="Orphan stem cleanup"
+      title="Orphan stems cleanup"
       sub="A track that leaves the library keeps its Demucs stem dirs until the byte budget evicts them. This finds those dirs, parks them in a quarantine for a week (a track that walks back gets them released, not re-separated), and deletes what ages out."
     >
       {!ready || stateQuery.isLoading ? (
@@ -119,13 +189,15 @@ export default function OrphanStemsPanel() {
               <> <strong className="mono-num">{report.failed}</strong> failed — check ownership/permissions on the stems share.</>
             )}
           </p>
-          {report.quarantinedNames.length > 0 && (
-            <p className="mono-num text-[12px] break-all text-muted">
-              {report.quarantinedNames.join(', ')}
-              {report.quarantined > report.quarantinedNames.length ? ' …' : ''}
-            </p>
-          )}
           <div className="flex flex-wrap items-center gap-2">
+            <Btn
+              sm
+              disabled={mutation.isPending}
+              onClick={() => setShowTracks(v => !v)}
+              title="The dirs by track name — resolved from play history and the event log; ids with no surviving name stay listed, unknown."
+            >
+              {showTracks ? 'Hide tracks' : `Show tracks (${report.quarantined + report.agingCount})`}
+            </Btn>
             <Btn
               sm
               tone="solid"
@@ -147,6 +219,20 @@ export default function OrphanStemsPanel() {
               Daily pass: {enabled ? 'on' : 'off'}
             </Btn>
           </div>
+          {showTracks && (
+            <div className="max-h-80 overflow-y-auto rounded border border-[var(--separator-soft)] px-3 py-1">
+              {tracksQuery.isLoading ? (
+                <p className="py-2 text-sm text-muted">Resolving names — this scans the recent event logs…</p>
+              ) : orphanRows.length === 0 && quarantinedRows.length === 0 ? (
+                <p className="py-2 text-sm text-muted">Nothing in the cache root or the quarantine.</p>
+              ) : (
+                <>
+                  {orphanRows.length > 0 && <TrackGroup label="Orphaned — will move to quarantine" tracks={orphanRows} />}
+                  {quarantinedRows.length > 0 && <TrackGroup label="Already in quarantine" tracks={quarantinedRows} />}
+                </>
+              )}
+            </div>
+          )}
           <p className="text-[12px] text-muted">
             Quarantine holds each orphan for 7 days under <code>.orphan-quarantine</code> at the cache
             root — a move, not a copy, and invisible to every walk. This report is a dry run: nothing
