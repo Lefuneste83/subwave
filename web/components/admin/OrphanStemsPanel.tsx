@@ -227,8 +227,10 @@ export default function OrphanStemsPanel() {
               /* tone="ink" carries the visible border — the default badge border is
                  --separator-strong at ~10% alpha, which on a card reads as a
                  border-less float next to the bordered action buttons. The state
-                 colour rides on text/dot only. */
-              className={enabled ? 'text-emerald-500' : 'text-muted-foreground'}
+                 colour rides on text/dot only, and follows the theme's accent —
+                 the same figure the "on air" / stem-cache header metrics light
+                 with — so "on" is one colour across the page, not a second green. */
+              className={enabled ? 'text-[color:var(--accent)]' : 'text-muted-foreground'}
             >
               Daily pass {enabled ? 'on' : 'off'}
             </Pill>
