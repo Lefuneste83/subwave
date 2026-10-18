@@ -207,17 +207,26 @@ export default function OrphanStemsPanel() {
               {mutation.isPending ? 'Working…'
                 : report.quarantined > 0 ? `Move ${report.quarantined} to quarantine` : 'Nothing to move'}
             </Btn>
-            <Btn sm disabled={mutation.isPending} onClick={() => { void stateQuery.refetch(); }}>
-              Re-scan
-            </Btn>
             <Btn
               sm
+              disabled={mutation.isPending || stateQuery.isFetching}
+              onClick={() => { void stateQuery.refetch(); }}
+              title="Re-reads the cache root and the quarantine (a few seconds on a big share)."
+            >
+              {stateQuery.isFetching ? 'Scanning…' : 'Re-scan'}
+            </Btn>
+            <Pill
+              dot
+              pressed={enabled}
               disabled={mutation.isPending}
               onClick={() => act({ setEnabled: !enabled })}
-              title="The daily pass only quarantines; a quarantine is only deleted once it has aged a week."
+              title={enabled
+                ? 'The daily pass quarantines new orphans once a day; entries delete themselves after a week. Click to turn it off.'
+                : 'The daily pass quarantines new orphans once a day; entries delete themselves after a week. Click to turn it on.'}
+              className={enabled ? 'text-emerald-500' : 'text-muted-foreground'}
             >
-              Daily pass: {enabled ? 'on' : 'off'}
-            </Btn>
+              Daily pass {enabled ? 'on' : 'off'}
+            </Pill>
           </div>
           {showTracks && (
             <div className="max-h-80 overflow-y-auto rounded border border-[var(--separator-soft)] px-3 py-1">
