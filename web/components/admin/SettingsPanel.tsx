@@ -25,6 +25,7 @@ import { cn } from '../../lib/cn';
 import { fieldAria } from '../../lib/form';
 import ArchivesPanel from './ArchivesPanel';
 import BackupPanel from './BackupPanel';
+import OrphanStemsPanel from './OrphanStemsPanel';
 import {
   SETTINGS_AAC_BITRATES,
   SETTINGS_MP3_BITRATES,
@@ -708,6 +709,7 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
           </>
         )}
         {activeSection === 'backup' && <BackupPanel />}
+        {activeSection === 'orphans' && <OrphanStemsPanel />}
         {activeSection === 'broadcast' && (
           <>
             <SectionHeader

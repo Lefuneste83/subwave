@@ -5,6 +5,7 @@ import {
   Radio, Palette, Cpu, Mic, Library, Search, ListMusic,
   Archive, Save, RadioTower, Heart, Music2, BrainCircuit,
   MessageCircle,
+  FolderX,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -119,6 +120,11 @@ export const SECTIONS = [
   {
     id: 'backup', group: 'operations', label: 'Backup',
     hint: 'export · restore', icon: Save,
+    formKeys: [],
+  },
+  {
+    id: 'orphans', group: 'operations', label: 'Orphan stems',
+    hint: 'stale stem dirs', icon: FolderX,
     formKeys: [],
   },
   {
