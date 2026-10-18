@@ -1,6 +1,7 @@
 // Use absolute-floor silence measurements for cues, never relative intro/outro estimates that
 // can mistake quiet music for silence. Bound trims with the minimum gap, edge margins, and
-// per-edge ceilings (MAX_LEAD_TRIM_SEC, MAX_TAIL_TRIM_SEC); unknown measurements preserve the whole track.
+// per-edge ceilings (MAX_LEAD_TRIM_SEC, MAX_TAIL_TRIM_SEC); unknown measurements preserve the
+// whole track.
 
 import * as settings from '../settings.js';
 import * as library from './library.js';
@@ -10,15 +11,18 @@ import * as library from './library.js';
 const MARGIN_MS = 250;
 
 // Hard ceiling on what a single edge may lose, whatever the measurement says.
-// The head keeps 30 s: music after a long lead-in is still to come, so a bad
+// The head keeps 30 s: music still follows a long lead-in, so a bad
 // measurement there costs the start of the song.
 const MAX_LEAD_TRIM_SEC = 30;
-// The tail is measured back from the proven end of the file to the last frame
-// above the absolute floor, so everything it cuts is the file's own trailing
-// silence: nothing plays after it. The analyzer searches up to 600 s for that
-// frame (ANALYZE_TAIL_SEARCH_SECONDS), and real files end in more than 30 s
-// of it (hidden-track gaps, DJ sets): 33 of 50 measured on one library ran
-// 30-456 s, all of it dead air under a 30 s ceiling.
+// The tail is measured back from the file's proven end to the last frame above
+// the absolute floor, so all of it is trailing silence with nothing after it.
+// Real files end in far more than 30 s of it (hidden-track gaps, DJ sets — 33
+// of 50 such endings on one library ran 30-456 s, measured outside the
+// analyzer, which cannot see past its window). 600 s bounds a wider tail
+// search. With the default analyzer it never binds: the tail window is
+// ANALYZE_OUTRO_SECONDS (20 s) and a gap that fills it is stored as no
+// measurement. It acts only when that window is raised past ~30 s, or a
+// header understates the decodable file by more than ~10 s.
 const MAX_TAIL_TRIM_SEC = 600;
 
 export interface SilenceTrimTrack {

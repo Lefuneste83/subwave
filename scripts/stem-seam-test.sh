@@ -16,9 +16,7 @@
 # seam's stamp. radio.liq's clip seam alignment absorbs that, so the beat grid
 # must hold to SEAM_TOLERANCE_MS (default 5ms) across both seams; a mixer
 # without it shows one ~20ms interval per seam and fails. The buffer-size
-# check tolerates the frame and the alignment slack separately. The alignment's
-# blank() delay is sample-accurate on 2.4.6 only: on 2.4.5 X -> clip misses by
-# up to a frame at mid-frame phases, so the sweep fails there by design.
+# check tolerates the frame and the alignment slack separately.
 set -euo pipefail
 
 IMAGE="${LIQ_IMAGE:-savonet/liquidsoap:v2.4.6}"
@@ -108,5 +106,4 @@ else
   echo "STEMSEAM FAIL: controller cues missed ${SEAM_TOLERANCE_MS:-5}ms ($IMAGE; the clip seam's blank() delay is sample-accurate on Liquidsoap 2.4.6 only)"
 fi
 echo "Renders and logs: $WORK"
-exit "$verdict"
 exit "$verdict"

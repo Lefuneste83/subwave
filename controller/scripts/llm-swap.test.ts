@@ -5,29 +5,40 @@
 //   - every per-leg field moves, and swapping twice is the identity — run
 //     through the REAL settings.update(), because its leg patch MERGES
 //     providerBaseUrls and resolves redacted headers against the target leg;
-//   - LLM_LEG_FIELDS covers every field applyLlmLegPatch writes, so a new
-//     per-leg field cannot be added and left out of the swap;
+//   - LLM_LEG_FIELDS is exactly the set of keys applyLlmLegPatch READS (a
+//     recording Proxy, not a hand-written fixture), and every per-leg DEFAULTS
+//     entry, so a new per-leg field cannot be added and left out of the swap;
 //   - API keys and station-wide fields stay put (keys are per PROVIDER);
 //   - an embedding leg that inherits from the primary keeps its connection,
-//     while one the operator set in the Library tagger is untouched;
-//   - no enabled backup refuses the swap.
+//     inline key included, while one the operator set in the Library tagger is
+//     untouched;
+//   - an inherited inline key longer than embedding.apiKey holds is NOT pinned
+//     (and says so) instead of the whole swap being refused over it;
+//   - the route: no enabled backup is a 409 that writes nothing, the response
+//     is the receipt alone (never update()'s raw `saved` with its secrets), and
+//     the fit preview names exactly the pins the swap then writes.
 //
 // No credentials and no external host.
 
 import assert from 'node:assert/strict';
 import { createTempDir } from './test-utils/temp-dir.js';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
 const stateRoot = createTempDir(path.join(tmpdir(), 'subwave-llm-swap-'));
 process.env.STATE_DIR = stateRoot;
+process.env.ADMIN_USER = 'test-admin';
+process.env.ADMIN_PASS = 'test-pass';
 delete process.env.EMBEDDING_API_KEY;
 
 const settings = await import('../src/settings.js');
-const { applyLlmLegPatch } = await import('../src/settings/vocab.js');
-const { buildLlmSwapPatch, LLM_LEG_FIELDS, LlmSwapError } = await import('../src/settings/llm-swap.js');
-const { resolveEmbeddingCfg } = await import('../src/llm/provider.js');
+const { DEFAULTS } = await import('../src/settings/defaults.js');
+const { applyLlmLegPatch, EMBEDDING_API_KEY_MAX } = await import('../src/settings/vocab.js');
+const { buildLlmSwapPatch, planLlmSwap, LLM_LEG_FIELDS, LlmSwapError } = await import('../src/settings/llm-swap.js');
+const { resolveEmbeddingCfg, embeddingInfoOf, embeddingBaseUrl } = await import('../src/llm/provider.js');
 
 const PRIMARY = {
   provider: 'ollama',
@@ -115,18 +126,22 @@ test('API keys and station-wide fields stay put', async () => {
   assert.equal(after.agentTimeoutMs, 60000);
 });
 
-test('LLM_LEG_FIELDS covers every field applyLlmLegPatch writes', () => {
-  const full = {
-    provider: 'openai-compatible', model: 'm', compatibleMode: 'local', ollamaUrl: 'http://x',
-    providerBaseUrls: { 'openai-compatible': 'http://y' }, baseUrl: 'http://y', headers: { 'x-a': 'b' },
-    reasoning: true, numCtx: 8192, repeatPenalty: 1.2, geminiSafety: {}, discoverySteps: 2, toolChoice: 'auto',
-    apiKey: 'k',
-  };
-  const target: Record<string, unknown> = {};
-  applyLlmLegPatch(target, full, 'llm');
-  const derived = new Set(['baseUrl']);
-  const missing = Object.keys(target).filter(k => !derived.has(k) && !(LLM_LEG_FIELDS as readonly string[]).includes(k));
-  assert.deepEqual(missing, [], 'a per-leg field the swap would leave behind');
+test('LLM_LEG_FIELDS is every field applyLlmLegPatch reads, less the derived baseUrl', () => {
+  // Record what the patch handler LOOKS AT: it writes a key only when the patch
+  // carries it, so a hand-written fixture would miss a field added to the
+  // handler but not to the fixture.
+  const read = new Set<string>();
+  const recorder = new Proxy({}, {
+    get(_t, key) { if (typeof key === 'string') read.add(key); return undefined; },
+    has(_t, key) { if (typeof key === 'string') read.add(key); return false; },
+  });
+  applyLlmLegPatch({}, recorder, 'llm');
+  read.delete('baseUrl');
+  assert.deepEqual([...read].sort(), [...LLM_LEG_FIELDS].sort(), 'a per-leg field the swap would leave behind');
+
+  // The three-edits rule gives every per-leg field a DEFAULTS entry too.
+  const perLeg = Object.keys(DEFAULTS.llm.fallback).filter(k => !['enabled', 'apiKey', 'baseUrl'].includes(k));
+  assert.deepEqual(perLeg.sort(), [...LLM_LEG_FIELDS].sort());
 });
 
 test('an embedding leg inheriting the primary keeps its connection', async () => {
@@ -152,10 +167,128 @@ test('an embedding leg set in the Library tagger is untouched', async () => {
   assert.deepEqual(e.headers, own.headers);
 });
 
-test('no enabled backup refuses the swap and writes nothing', async () => {
+test('no enabled backup refuses to build a swap', async () => {
   await reset();
   await settings.update({ llm: { fallback: { enabled: false } } });
-  const before = structuredClone(settings.get().llm);
   assert.throws(() => buildLlmSwapPatch(settings.get(), resolveEmbeddingCfg()), LlmSwapError);
-  assert.deepEqual(settings.get().llm, before);
+});
+
+// The backup (an openai-compatible gateway) made primary, with an inline key
+// and an embedding leg that inherits all of it.
+async function gatewayPrimary(key: string) {
+  await reset();
+  await swap();
+  await settings.update({
+    llm: { apiKey: key },
+    embedding: { provider: '', ollamaUrl: '', apiKey: '', headers: {}, providerBaseUrls: { 'openai-compatible': '', ollama: '' } },
+  });
+  const before = resolveEmbeddingCfg();
+  assert.equal(before.provider, 'openai-compatible');
+  assert.equal(before.apiKey, key, 'the embedding leg is using the chat leg\'s inline key');
+  return before;
+}
+
+test('an inherited inline key is pinned with the rest of the connection', async () => {
+  const before = await gatewayPrimary('sk-chat');
+  const plan = planLlmSwap(settings.get(), resolveEmbeddingCfg());
+  assert.deepEqual(plan.pinned, ['provider', 'providerBaseUrls', 'headers', 'apiKey']);
+  assert.equal(plan.keyNotPinned, false);
+  await settings.update(plan.patch);
+  assert.equal(settings.get().llm.provider, 'ollama');
+  const after = resolveEmbeddingCfg();
+  assert.equal(after.apiKey, 'sk-chat');
+  assert.equal(after.baseUrl, before.baseUrl);
+  assert.deepEqual(after.headers, before.headers);
+});
+
+test('an inherited key longer than embedding.apiKey holds is skipped, not a refused swap', async () => {
+  const long = 'k'.repeat(EMBEDDING_API_KEY_MAX + 100);
+  await gatewayPrimary(long);
+  const plan = planLlmSwap(settings.get(), resolveEmbeddingCfg());
+  assert.equal(plan.keyNotPinned, true);
+  assert.ok(!plan.pinned.includes('apiKey'));
+  // update() caps embedding.apiKey, so pinning this key threw and lost the swap.
+  await settings.update(plan.patch);
+  assert.equal(settings.get().llm.provider, 'ollama', 'the swap went through');
+  assert.equal(settings.get().embedding.apiKey, '');
+  assert.equal(settings.get().embedding.provider, 'openai-compatible', 'the rest is still pinned');
+});
+
+// --- the route --------------------------------------------------------------
+const express = (await import('express')).default;
+const { router } = await import('../src/routes/settings/core.js');
+const app = express();
+app.use(express.json());
+app.use(router);
+const server = createServer(app);
+await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+server.unref();
+const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+const authorization = `Basic ${Buffer.from('test-admin:test-pass').toString('base64')}`;
+
+test('POST /settings/llm/swap with no enabled backup is a 409 that writes nothing', async () => {
+  await reset();
+  await settings.update({ llm: { fallback: { enabled: false } } });
+  const before = structuredClone(settings.get());
+  const res = await fetch(`${base}/settings/llm/swap`, { method: 'POST', headers: { authorization } });
+  assert.equal(res.status, 409);
+  assert.match(((await res.json()) as { error: string }).error, /no backup LLM is enabled/);
+  assert.deepEqual(settings.get().llm, before.llm);
+  assert.deepEqual(settings.get().embedding, before.embedding);
+});
+
+test('POST /settings/llm/swap answers the receipt alone, never the raw saved settings', async () => {
+  await gatewayPrimary('sk-chat');
+  const res = await fetch(`${base}/settings/llm/swap`, { method: 'POST', headers: { authorization } });
+  const text = await res.text();
+  assert.equal(res.status, 200, text);
+  const body = JSON.parse(text) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(body).sort(), ['keyNotPinned', 'pinned', 'requiresRestart']);
+  assert.ok(!text.includes('sk-chat') && !text.includes('secret-session'), 'no key or header value in the response');
+  assert.equal(settings.get().llm.provider, 'ollama');
+});
+
+test('GET /settings/llm/swap/fit previews exactly the pins the swap writes', async () => {
+  await gatewayPrimary('k'.repeat(EMBEDDING_API_KEY_MAX + 1));
+  const fit = await fetch(`${base}/settings/llm/swap/fit`, { headers: { authorization } });
+  assert.equal(fit.status, 200);
+  const preview = ((await fit.json()) as { embedding: { pinned: string[]; keyNotPinned: boolean } }).embedding;
+  const swapped = await fetch(`${base}/settings/llm/swap`, { method: 'POST', headers: { authorization } });
+  const receipt = (await swapped.json()) as { pinned: string[]; keyNotPinned: boolean };
+  assert.deepEqual(preview, { pinned: receipt.pinned, keyNotPinned: receipt.keyNotPinned });
+  assert.deepEqual(preview, { pinned: ['provider', 'providerBaseUrls', 'headers'], keyNotPinned: true });
+});
+
+// A blank server URL reaches a built-in default only when a call is made, so
+// the embedding leg was "inheriting" a server no setting names. Left blank by
+// the pin, it would follow whatever server the incoming primary names.
+test('an inherited blank Ollama URL is pinned to the default server it reaches', async () => {
+  await reset();
+  await settings.update({
+    llm: {
+      ollamaUrl: '',
+      fallback: { provider: 'ollama', model: 'qwen3:14b', ollamaUrl: 'http://other-box:11434', compatibleMode: 'local' },
+    },
+  });
+  const before = embeddingInfoOf(resolveEmbeddingCfg());
+  assert.equal(before.provider, 'ollama');
+  const res = await fetch(`${base}/settings/llm/swap`, { method: 'POST', headers: { authorization } });
+  assert.equal(res.status, 200, await res.text());
+  assert.equal(settings.get().llm.ollamaUrl, 'http://other-box:11434', 'the backup host is the primary now');
+  assert.equal(embeddingInfoOf(resolveEmbeddingCfg()).ollamaUrl, before.ollamaUrl, 'embeddings stay on their server');
+});
+
+test('an inherited blank locca URL is pinned to the default embed server it reaches', async () => {
+  await reset();
+  await settings.update({
+    llm: {
+      provider: 'locca', model: 'chat-a', providerBaseUrls: { locca: '' },
+      fallback: { provider: 'locca', model: 'chat-b', providerBaseUrls: { locca: 'http://other-box:8080/v1' }, compatibleMode: 'local' },
+    },
+  });
+  const before = embeddingBaseUrl(resolveEmbeddingCfg());
+  const res = await fetch(`${base}/settings/llm/swap`, { method: 'POST', headers: { authorization } });
+  assert.equal(res.status, 200, await res.text());
+  assert.equal(settings.get().llm.baseUrl, 'http://other-box:8080/v1', 'the backup server is the primary now');
+  assert.equal(embeddingBaseUrl(resolveEmbeddingCfg()), before, 'embeddings stay on their server');
 });

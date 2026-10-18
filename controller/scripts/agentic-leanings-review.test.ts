@@ -27,6 +27,7 @@ const {
   agenticLeaningsSelectionReason,
   compactAgenticReviewCandidate,
   eligibleAgenticLeanings,
+  plainAgenticSelectionReason,
   resolveAgenticLeaningsUsage,
   selectAgenticReviewCandidates,
   validateAgenticLeaningsReplacement,
@@ -463,4 +464,90 @@ test('Agentic presentation never attaches one track\'s note to another track', (
     ),
     "Thundercat featuring Steve Lacy, Steve Arrington & Childish Gambino with Black Qualls fits the current low-energy vibe.",
   );
+});
+
+test('an Agentic note that names the core of a credited title is kept', () => {
+  const khaled = { id: 'khaled', title: 'Final Warning (feat. Bun B, Shawty Lo, Bloodraw, Ace Hood, Brisco, Bali, Lil Scrappy, R. City)', artist: 'DJ Khaled' };
+  const named = 'DJ Khaled — Final Warning keeps the posse-cut energy rolling out of the last record.';
+  assert.equal(agenticSelectionReason(khaled, named), named, 'a bracketed feature list need not be repeated');
+  const bohemia = { id: 'bohemia', title: 'Bumpin My Song Feat. J.Hind', artist: 'Bohemia' };
+  const bumpin = '“Bumpin My Song” by Bohemia carries the Punjabi rap thread forward.';
+  assert.equal(agenticSelectionReason(bohemia, bumpin), bumpin, 'an inline Feat. credit need not be repeated');
+  const kendrick = { id: 'alien', title: 'Alien Girl (Today W/ Her)', artist: 'Kendrick Lamar' };
+  const alien = 'Kendrick Lamar’s Alien Girl slows the tempo into something dreamier.';
+  assert.equal(agenticSelectionReason(kendrick, alien), alien, 'an edition tag in brackets need not be repeated');
+  const remaster = { id: 'rm', title: 'Heroes - 2017 Remaster', artist: 'David Bowie' };
+  const heroes = 'David Bowie — Heroes lifts the room with its slow-building wall of sound.';
+  assert.equal(agenticSelectionReason(remaster, heroes), heroes, 'a dashed edition suffix need not be repeated');
+  const featArtist = { id: 'fa', title: 'Tadow', artist: 'Masego feat. FKJ' };
+  const tadow = 'Masego — Tadow keeps the late-night sax glow going.';
+  assert.equal(agenticSelectionReason(featArtist, tadow), tadow, 'an artist credit\'s feature need not be repeated');
+});
+
+test('the core-title match still refuses a note about another track', () => {
+  const khaled = { id: 'khaled', title: 'Final Warning (feat. Bun B)', artist: 'DJ Khaled' };
+  assert.equal(
+    agenticSelectionReason(khaled, 'DJ Khaled — All I Do Is Win keeps the posse-cut energy rolling.'),
+    '“Final Warning (feat. Bun B)” by DJ Khaled offers a strong musical fit with the current flow.',
+    'naming the artist alone with another title is still plain copy',
+  );
+  const up = { id: 'up', title: 'Up (Radio Edit)', artist: 'Shania Twain' };
+  assert.equal(
+    agenticSelectionReason(up, 'Shania Twain — an upbeat country-pop lift for the hour.'),
+    plainAgenticSelectionReason(up),
+    'a short one-word core is not matched inside another word, or on its own',
+  );
+  assert.equal(
+    agenticSelectionReason(
+      { id: 'sam', title: 'How Do You Sleep? (Acoustic)', artist: 'Sam Smith' },
+      'Porcupine Tree — Of the New Day keeps the atmosphere moving.',
+    ),
+    '“How Do You Sleep? (Acoustic)” by Sam Smith offers a strong musical fit with the current flow.',
+  );
+});
+
+test('a discarded Agentic note is recorded with what the model wrote', () => {
+  assert.match(pickSource, /object\.reason === plainAgenticSelectionReason\(song\)\) \{\n\s+logEvent\('pick\.notePlain', \{ agent: 'pick', to: song\.id \?\? null, note: note\.slice\(0, 400\) \}\);/,
+    'the first answer\'s note is logged when it becomes plain copy');
+});
+
+// The notes below are the model's own words from a live station's
+// pick.notePlain events: accurate notes the capitalised-name read discarded.
+test('an Agentic note naming known names keeps its reasoning', () => {
+  const refs = ['Bejeweled (Mixed)', 'Taylor Swift', 'Sunday Slow Cooker', 'Punjabi', 'Indian Folk', 'Indian Pop', 'Soul', 'Regional Indian'];
+  const kept = (track: any, note: string) => {
+    const out = agenticDiscoverySelectionReason(track, note, refs);
+    assert.ok(out.endsWith(/[.!?]$/.test(note) ? note : `${note}.`), `${note} → ${out}`);
+    assert.doesNotMatch(out, /strong musical fit/);
+  };
+  kept({ title: 'Chunni (From "Lahoriye" Soundtrack)', artist: 'Amrinder Gill & Jatinder Shah', genre: 'Punjabi' },
+    'Warm, rarely aired Amrinder Gill softens the set after two punchy tracks');
+  kept({ title: 'Home Care', artist: 'MXRCI & Kahlon', genre: 'Regional Indian' },
+    'Rarely aired calm Regional Indian track, eases down after the bright pop burst');
+  kept({ title: 'Laayi Rakhin Sohneya', artist: 'Avkash Mann, Noor Chahal, Happy Raikoti & Bilal Wajid', genre: 'Punjabi' },
+    'unaired film song, softer warmth after the Taylor Swift and club-leaning detour');
+  kept({ title: 'Jhelum Naina', artist: 'Babul Supriyo & Jeet Gannguli', album: 'Very Best of Coke Studio Vol. 1', genre: 'Indian Pop' },
+    'Matching 89.1 bpm, Coke Studio soulful texture, rarely heard artist');
+  kept({ title: 'Athru Te Akhan', artist: 'Hustinder, Punam Gill, Manwinder Mann & Savraj', genre: 'Punjabi' },
+    'Fresh Punjabi artists, low-energy reflective romance, long and unhurried for the slow cooker.');
+  kept({ title: 'Mera Pind', artist: 'Gagan Kokri, Bohemia, MXRCI & Rym Gill', genres: ['Punjabi'] },
+    'Fresh Punjabi voices, low energy, gentle tempo drop from a frantic-feeling predecessor');
+});
+
+test('a capitalised name nothing accounts for still becomes plain copy', () => {
+  const refs = ['Sunday Slow Cooker', 'Punjabi', 'Regional Indian'];
+  const track = { title: 'Pyaar', artist: 'SIDAK', genre: 'Punjabi' };
+  const plain = plainAgenticSelectionReason(track);
+  assert.equal(agenticDiscoverySelectionReason(track, 'Elliott Smith’s Rose Parade is calm and reflective, with a close key.', refs), plain,
+    'a recalled track the model never searched is not attached to the pick');
+  assert.equal(agenticDiscoverySelectionReason(track, 'Massive Attack keeps the late-night hush going after the last record.', refs), plain,
+    'a sentence-opening act is not excused by its capital');
+  assert.equal(agenticDiscoverySelectionReason(track, 'Warm Regional Indian lift, closer to Diljit Dosanjh than the last pick.', refs), plain,
+    'a known genre does not excuse an unknown act in the same note');
+  assert.equal(agenticDiscoverySelectionReason(track, 'Fresh Punjabi warmth with a softer “Teardrop” hush to it.', refs), plain,
+    'a quoted title is still a claim');
+});
+
+test('the Agentic route hands the capitalised-name read its context names', () => {
+  assert.match(pickSource, /agenticDiscoverySelectionReason\(song, note, pickNoteReferences\(queue, pickAnchor, activeShow\)\)/);
 });

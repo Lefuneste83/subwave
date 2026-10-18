@@ -153,6 +153,8 @@ import {
 } from './queue/voice-io.js';
 import { awaitIntroRender, IntroRenderTracker } from './queue/intro-render.js';
 import { notifyQueued, notifySpoken } from './voice-events.js';
+import { createHandoverEdge, notifyCoastHandover, type HandoverReason } from './coast-handover.js';
+import { picksAllowed } from './dj-budget.js';
 
 // Everything the outside world is told about ONE spoken segment, held in a
 // single value because it is now read twice — once when the clip is committed
@@ -403,6 +405,7 @@ class Queue {
   _emptyDjQueueStreak = 0;      // consecutive reconcile checks seeing an empty dj_queue while sent items remain — see reconcileWithDjQueue
   _resolveFailStreak = 0;       // consecutive pushes Liquidsoap never resolved — re-pick budget, see onPushResolveFailed
   _deadlinePickAt = 0;          // last deadline-pick ATTEMPT (ms epoch) — failure-retry cooldown, see maybeDeadlinePick
+  _coastHandover = createHandoverEdge(); // armed by a queued track starting, fired by the first moment picking stops (#1975, #1992)
   _pendingVoice: PendingVoice | null = null; // one boundary-deferred segment awaiting the next track start — see announceAtNextTrack
   _handoffBoundaryTimer: NodeJS.Timeout | null = null;
   _handoffGenerationTimer: NodeJS.Timeout | null = null;
@@ -3481,6 +3484,9 @@ class Queue {
       const introPublication = this._introPublications.get(item);
       if (introPublication) this.trackIntroPublication(this.current, introPublication);
       this.log('playing', `${np.title} — ${np.artist}`, { requestedBy: item.requestedBy, source });
+      // Something the queue put on air: a coast that predates it can hold it,
+      // so the next moment picking stops checks the file (#1992).
+      this._coastHandover.aired();
       // A tracked item matched → controller and Liquidsoap are in sync; clear any
       // dj_queue-empty desync streak accumulated from prior untracked plays.
       this._emptyDjQueueStreak = 0;
@@ -3644,9 +3650,38 @@ class Queue {
     // watcher still gets onTrackStarted events for those auto tracks, so the
     // first transition after a listener returns re-enters this block.
     const isAutonomous = this.current.source === 'auto' || this.current.source === 'ai';
-    if (this.autoPick && this.upcoming.length === 0 && !this.pickerBusy && djCallsAllowed()) {
-      this.runPickCycle({ isAutonomous });
+    if (this.upcoming.length === 0 && !this.pickerBusy) {
+      const closed = this.pickGateClosed();
+      if (!closed) this.runPickCycle({ isAutonomous });
+      // Closed: the coast takes over when this track ends, so the scheduler can
+      // check the fallback is not holding what the queue just aired (#1975).
+      else this.handOverToCoast(closed);
     }
+  }
+
+  // Why the auto-DJ will not pick into an empty slot now, or null when it will:
+  // the one gate every empty-slot path asks (#1992). The daily token cap's hard
+  // tier is not here: the cycle still runs under it (session roll, programme,
+  // handoff) and only its pick stands down, so runPickCycle reports that one.
+  pickGateClosed(): HandoverReason | null {
+    if (!this.autoPick) return 'auto-pick-off';
+    return djCallsAllowed() ? null : 'listeners';
+  }
+
+  // Picking has stopped with nothing queued, so the coast takes over when the
+  // track on air ends. Reports it once per stretch: the edge fires only if a
+  // queued track started since the last report (#1975, #1992).
+  handOverToCoast(reason: HandoverReason) {
+    if (this._coastHandover.held()) notifyCoastHandover(reason);
+  }
+
+  // The operator's auto-pick switch (POST /auto-pick). Turned off with nothing
+  // queued and no pick in flight, the track on air is already the last thing
+  // the queue will play, and no boundary comes before the coast (#1992). A pick
+  // in flight reports it from its own tail if it ends without one.
+  setAutoPick(on: boolean) {
+    this.autoPick = on;
+    if (!on && this.upcoming.length === 0 && !this.pickerBusy) this.handOverToCoast('auto-pick-off');
   }
 
   async runArmedBoundaryHandoff({
@@ -3734,6 +3769,7 @@ class Queue {
     }
     this.pickerBusy = true;
     (async () => {
+      let outcome: 'capped' | undefined;
       try {
         // The pick made now airs when the track it FOLLOWS ends, so near a show
         // boundary the rules to pick by are the NEXT show's. PICK_SHOW_LOOKAHEAD
@@ -3830,7 +3866,7 @@ class Queue {
         } catch (err) {
           this.log('error', `Programme episode hook failed: ${(err as Error).message}`);
         }
-        await djAgent.runTrackEvent(this, pickCtx, {
+        outcome = await djAgent.runTrackEvent(this, pickCtx, {
           // The mic-pass owns this seam; an outgoing link cannot follow it.
           wantLink: wantLink && !finalTrackHandoff,
           showAt,
@@ -3841,6 +3877,15 @@ class Queue {
         this.log('error', `DJ track event failed: ${(err as Error).message}`);
       } finally {
         this.pickerBusy = false;
+        // Ended with nothing queued after picking stopped: the hard cap stood
+        // this pick down, or the gate closed while it was in flight and it
+        // ended without one, thrown or not. No boundary comes before the coast,
+        // so this is the moment. A held anchor airs first and re-arms the edge
+        // itself; a pick that failed with the gate open reports nothing (#1992).
+        if (this.upcoming.length === 0) {
+          const stopped = outcome === 'capped' ? 'token-cap' : this.pickGateClosed();
+          if (stopped) this.handOverToCoast(stopped);
+        }
       }
     })();
   }
@@ -3857,7 +3902,7 @@ class Queue {
   // away. Past the hard deadline the window closes and drainToLiquidsoap's
   // intrinsic path owns the endgame.
   maybeDeadlinePick() {
-    if (!this.autoPick || this.pickerBusy || !djCallsAllowed()) return;
+    if (this.pickerBusy || this.pickGateClosed()) return;
     if (!this.pairDrainActive()) return;
     const rem = this.remainingSecOnAir();
     if (!shouldDeadlinePick(rem)) return;
@@ -3954,18 +3999,30 @@ class Queue {
     // A whole origin being down fails every re-pick the same way, and each one
     // costs an LLM call to queue a track that cannot air. Past the budget the
     // auto playlist keeps the station on air until the next natural pick.
-    if (!repickAfterFailure(this._resolveFailStreak)) {
+    const repick = repickAfterFailure(this._resolveFailStreak);
+    if (!repick) {
       this.log('scheduler',
         `${this._resolveFailStreak} unresolvable picks in a row — holding off on re-picks; the auto playlist covers the slot until the next track boundary`);
-      return;
     }
 
     // Same gate as onTrackStarted's auto-DJ block: only re-pick when the slot is
-    // genuinely empty, no pick is already running, and DJ calls are allowed.
-    if (this.autoPick && this.upcoming.length === 0 && !this.pickerBusy && djCallsAllowed()) {
+    // genuinely empty, no pick is already running, and the gate is open; the
+    // re-pick budget is a test inside the open arm. Closed, the dropped item was
+    // the last one queued, so the coast takes over when the track on air ends,
+    // budget or not: the handover onTrackStarted reports at a boundary (#1975).
+    // A pick in flight reports it from its own tail instead.
+    if (this.upcoming.length > 0 || this.pickerBusy) return;
+    const closed = this.pickGateClosed();
+    if (closed) {
+      this.handOverToCoast(closed);
+    } else if (repick) {
       this._deadlinePickAt = Date.now();  // this IS a pick attempt — stamp the backstop's cooldown
       const isAutonomous = this.current?.source === 'auto' || this.current?.source === 'ai';
       this.runPickCycle({ isAutonomous });
+    } else if (!picksAllowed()) {
+      // Past the budget at the hard cap: no capped cycle runs to report the
+      // cap, so the drop is the handover moment too (#1992).
+      this.handOverToCoast('token-cap');
     }
   }
 
@@ -4323,6 +4380,22 @@ class Queue {
     };
   }
 
+  // What the queue, not the coast, put on air at or after `sinceMs`: the
+  // on-air track and every play behind it, newest first. Coast plays are left
+  // out on purpose — the coast plays its own file as a shuffle pass and does not
+  // repeat inside one — so the scheduler's handover check (#1975) asks only
+  // about the DJ's picks, requests and studio pushes. Bounded by the 50-play
+  // history, which outlasts the hourly rebuild by about two hours of music.
+  airedFromQueueSince(sinceMs: number): CandidateLike[] {
+    const aired: CandidateLike[] = [];
+    if (this.current?.track && this.current.source !== 'auto') aired.push(this.current.track);
+    for (const item of this.history) {
+      if (Date.parse(item.endedAt ?? '') < sinceMs) break;
+      if (item.track && item.source !== 'auto') aired.push(item.track);
+    }
+    return aired;
+  }
+
   queuedIds(): Set<string> {
     const ids = new Set<string>();
     if (this.current?.track?.id) ids.add(this.current.track.id);
@@ -4388,19 +4461,20 @@ class Queue {
     return new Set(this.neighbourArtistCredits(n).flatMap(artist => creditedActKeys({ artist })));
   }
 
-  // The same window as display credits, one per lead-artist key (first seen
-  // wins), so the Agentic pick event can name exactly the artists the guard
-  // will refuse. One walk serves both, so the named list and the guard's set
-  // cannot drift apart.
-  neighbourArtistCredits(n = 0): string[] {
-    const out = new Map<string, string>();
+  // The window's slots, walked ONCE for every reader below: up to n
+  // queued-and-unaired tracks in queue order, the track on air, then the last n
+  // distinct plays newest first. `slot` is how many slots before the NEW pick
+  // each was heard — 1 is the queue tail the pick will follow — so a reader
+  // that only needs the credits ignores it. One walk, so the guard's set, the
+  // named list and the distances cannot disagree about which plays are in it.
+  private neighbourArtistSlots(n: number): { artist: string | null | undefined; slot: number }[] {
     if (!Number.isFinite(n) || n <= 0) return [];
-    const add = (artist: string | null | undefined) => {
-      const key = artistRootKey({ artist });
-      if (key && !out.has(key)) out.set(key, String(artist).trim());
-    };
-    for (const item of this.upcoming.slice(-n)) add(item?.track?.artist);
-    add(this.current?.track?.artist);
+    const queued = this.upcoming.slice(-n);
+    const out: { artist: string | null | undefined; slot: number }[] = queued.map(
+      (item, i) => ({ artist: item?.track?.artist, slot: queued.length - i }),
+    );
+    let slot = queued.length;
+    out.push({ artist: this.current?.track?.artist, slot: ++slot });
     // Distinct TRACKS, not rows — the sidecar can hold two entries for one play
     // (see recentlyPlayedByCount), and a duplicate row must not burn a slot.
     const seenIds = new Set<string>();
@@ -4413,39 +4487,37 @@ class Queue {
       distinct++;
       if (p.id) seenIds.add(p.id);
       if (k) seenKeys.add(k);
-      add(p.artist);
+      out.push({ artist: p.artist, slot: ++slot });
+    }
+    return out;
+  }
+
+  // The same window as display credits, one per lead-artist key (first seen
+  // wins), so the Agentic pick event can name exactly the artists the guard
+  // will refuse. One walk serves both, so the named list and the guard's set
+  // cannot drift apart.
+  neighbourArtistCredits(n = 0): string[] {
+    const out = new Map<string, string>();
+    for (const { artist } of this.neighbourArtistSlots(n)) {
+      const key = artistRootKey({ artist });
+      if (key && !out.has(key)) out.set(key, String(artist).trim());
     }
     return [...out.values()];
   }
 
-  // The same window as neighbourArtistRoots, as how many slots before the NEW
-  // pick each act was heard: 1 is the queue tail the pick will follow, then
-  // back through the queue, the track on air and the distinct recent plays.
-  // The nearest occurrence wins. The artist guard reads it to relax onto the
-  // artist heard LONGEST ago when every candidate is inside the window (L3).
+  // The same window as how many slots before the NEW pick each act was heard,
+  // the nearest occurrence winning. The artist guard reads it to relax onto
+  // the artist heard LONGEST ago when every candidate is inside the window
+  // (L3). Every slot's credit counts, so its keys are a SUPERSET of
+  // neighbourArtistRoots, which keys only the first credit per lead act: a
+  // later "Daljit Chahal & Karan Aujla" behind "Daljit Chahal & Amantej Hundal"
+  // adds Karan Aujla here and not there. The swap only runs when every
+  // candidate is already in the roots, so the extra keys can only make a
+  // distance nearer, never invent one.
   neighbourArtistDistances(n = 0): Map<string, number> {
     const out = new Map<string, number>();
-    if (!Number.isFinite(n) || n <= 0) return out;
-    let slot = 0;
-    const add = (artist: string | null | undefined) => {
-      slot++;
-      for (const key of creditedActKeys({ artist })) if (!out.has(key)) out.set(key, slot);
-    };
-    for (const item of this.upcoming.slice(-n).reverse()) add(item?.track?.artist);
-    add(this.current?.track?.artist);
-    const seenIds = new Set<string>();
-    const seenKeys = new Set<string>();
-    // Walked exactly as neighbourArtistCredits walks it, so the two windows
-    // cover the same plays; a play counted twice only offsets older slots.
-    let distinct = 0;
-    for (const p of this._recentPlays) {
-      if (distinct >= n) break;
-      const k = trackKey(p);
-      if ((p.id && seenIds.has(p.id)) || (k && seenKeys.has(k))) continue;
-      distinct++;
-      if (p.id) seenIds.add(p.id);
-      if (k) seenKeys.add(k);
-      add(p.artist);
+    for (const { artist, slot } of this.neighbourArtistSlots(n)) {
+      for (const key of creditedActKeys({ artist })) out.set(key, Math.min(slot, out.get(key) ?? Infinity));
     }
     return out;
   }

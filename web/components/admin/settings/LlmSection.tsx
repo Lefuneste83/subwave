@@ -20,6 +20,7 @@ import { ModelCombobox } from '../llm/ModelCombobox';
 import { LLM_ENV_VARS, llmProviderLabel } from '../llm/providerMeta';
 import { Advanced } from './section-chrome';
 import { COMPAT_MODE_OPTIONS, compatDetectedNote, effectiveCompatMode, type CompatMode } from './compat-mode';
+import { pinnedFieldNames, type SwapEmbeddingPreview } from './llm-swap-copy';
 import {
   SectionHeader, SaveBar, KeyStatus, KeyTestResult, KEY_HINTS, NowBanner,
   headerMap,
@@ -157,11 +158,15 @@ export function HeaderRowsEditor({
 interface LlmSectionProps extends SectionProps {
   adminFetch: (path: string, init?: RequestInit) => Promise<Response>;
   refresh: () => void;
-  /** The LLM page has unsaved edits: the swap saves straight away from the
-   *  stored settings, so it would silently drop them. */
-  dirty?: boolean;
+  /** Settings holds unsaved edits in ANY section, not just this one. The swap
+   *  saves straight away from the stored settings, and while anything is
+   *  unsaved the panel holds the post-swap read back from the form. */
+  unsavedChanges?: boolean;
+  /** POST /settings/llm/swap through the panel, which adopts the swapped legs
+   *  from the authoritative read (SettingsPanel swapLlmLegs). */
+  swapLegs: () => Promise<boolean>;
 }
-export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch, refresh, fieldErrors, dirty = false }: LlmSectionProps) {
+export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch, refresh, fieldErrors, unsavedChanges = false, swapLegs }: LlmSectionProps) {
   const [swapOpen, setSwapOpen] = useState(false);
   const [swapping, setSwapping] = useState(false);
   // What the backup may not suit once primary, for the agentic routes set in
@@ -172,6 +177,7 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
     setSwapFit(null);
     setSwapOpen(true);
     try {
+      // admin-query-imperative: llm-swap-fit-preview
       const r = await adminResponse(adminFetch, '/settings/llm/swap/fit');
       setSwapFit(await r.json() as SwapFit);
     } catch {
@@ -180,14 +186,10 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
   };
   // The swap is built and saved on the controller (settings/llm-swap.ts):
   // headers only ever reach this page redacted, so the browser cannot move them.
-  const swapLegs = async () => {
+  const confirmSwap = async () => {
     setSwapping(true);
     try {
-      await adminResponse(adminFetch, '/settings/llm/swap', { method: 'POST' });
-      notify.ok('swapped: the backup is now the primary');
-      refresh();
-    } catch (e) {
-      notify.err(`swap failed: ${errorMessage(e)}`);
+      await swapLegs();
     } finally {
       setSwapping(false);
       setSwapOpen(false);
@@ -413,6 +415,7 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
           headers: headerMap(form.llm.fallback.headers),
           compatibleMode: form.llm.fallback.compatibleMode,
           reasoning: form.llm.fallback.reasoning,
+          toolChoice: form.llm.fallback.toolChoice,
           ...(INLINE_KEY_PROVIDERS.includes(activeFallbackProvider) && compatFallbackKeyInput.trim()
             ? { apiKey: compatFallbackKeyInput.trim() }
             : {}),
@@ -1155,6 +1158,29 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
                 <KeyStatus envVar={fallbackKeyVar} present={!!data.env?.[fallbackKeyVar]} />
               )}
 
+              {form.llm.fallback.provider === 'openai-compatible' && (
+                <div className="field">
+                  <Label>Backup forced tool calls</Label>
+                  <Seg
+                    accent
+                    value={form.llm.fallback.toolChoice === 'auto' ? 'auto' : 'required'}
+                    options={[
+                      { id: 'required', label: 'Required' },
+                      { id: 'auto', label: 'Auto' },
+                    ]}
+                    onChange={v =>
+                      setForm(f => ({ ...f, llm: { ...f.llm, fallback: { ...f.llm.fallback, toolChoice: v } } }))
+                    }
+                  />
+                  <div className="field-hint">
+                    The backup&rsquo;s own setting, as for the primary above: <code>Required</code>{' '}
+                    (default) is the reliable path for local models; switch to <code>Auto</code> only
+                    if this backup&rsquo;s server crashes on a tool call. It moves with the leg when
+                    you swap the primary and backup.
+                  </div>
+                </div>
+              )}
+
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto] sm:items-center sm:gap-4">
                 <div>
                   <div className="text-[13px] font-bold">Backup chain-of-thought</div>
@@ -1181,16 +1207,16 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
                 <div>
                   <div className="text-[13px] font-bold">Swap with primary</div>
                   <div className="mt-0.5 max-w-[480px] text-[14px] leading-[1.5] text-muted">
-                    {dirty
-                      ? 'Save or discard your changes first: the swap saves straight away.'
-                      : 'Make this backup the primary, and the primary the backup. Each keeps its own settings, so swapping again restores the current setup.'}
+                    {unsavedChanges
+                      ? 'Save or discard your unsaved settings changes first (on any page of Settings): the swap saves straight away.'
+                      : 'Make this backup the primary, and the primary the backup. Each keeps its own settings, so swapping again swaps the two back.'}
                   </div>
                 </div>
                 <Btn
                   tone="accent"
                   onClick={() => { void openSwap(); }}
-                  disabled={dirty || busy || swapping}
-                  title={dirty ? 'Unsaved changes on this page' : undefined}
+                  disabled={unsavedChanges || busy || swapping}
+                  title={unsavedChanges ? 'Unsaved changes in Settings' : undefined}
                 >
                   {swapping ? 'Swapping…' : 'Swap with primary'}
                 </Btn>
@@ -1406,10 +1432,10 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
             {' '}the backup. Each keeps its own settings, and the change is saved at once.
           </>
         }
-        details={<SwapFitNotice fit={swapFit} />}
+        details={<><SwapFitNotice fit={swapFit} /><SwapPinNotice fit={swapFit} /></>}
         confirmLabel="swap"
         cancelLabel="cancel"
-        onConfirm={() => { void swapLegs(); }}
+        onConfirm={() => { void confirmSwap(); }}
       />
 
       <V3AlertDialog
@@ -1440,11 +1466,48 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
   );
 }
 
-/** GET /settings/llm/swap/fit (controller settings/llm-swap-fit.ts). */
+/** GET /settings/llm/swap/fit (controller settings/llm-swap-fit.ts, plus the
+ *  route's preview of the embedding pins). */
 interface SwapFit {
   agenticRoutes: string[];
   target: { provider: string; model: string };
   warnings: { check: string; detail: string }[];
+  embedding?: SwapEmbeddingPreview;
+}
+
+/** The swap dialog's Library-tagger line. A pin is written once and stays:
+ *  swapping back restores the two LLM legs, not the embedding leg's
+ *  inheritance, so the operator is told before it happens. */
+function SwapPinNotice({ fit }: { fit: SwapFit | 'error' | null }) {
+  if (fit === null) return null;
+  if (fit === 'error' || !fit.embedding) {
+    return (
+      <div className="mt-3 text-[12px] leading-[1.5] text-muted">
+        Library tagger values inherited from the primary are pinned to their current values, so the
+        library&rsquo;s vectors keep their model.
+      </div>
+    );
+  }
+  const { pinned, keyNotPinned } = fit.embedding;
+  if (!pinned.length && !keyNotPinned) return null;
+  return (
+    <div role="note" className="mt-3 text-[12px] leading-[1.5]">
+      {pinned.length > 0 && (
+        <div>
+          The Library tagger follows the primary for its {pinnedFieldNames(pinned)}. The swap
+          pins {pinned.length === 1 ? 'it' : 'them'} to today&rsquo;s values so the library&rsquo;s
+          vectors keep their model. Swapping back does not undo this: clear the field in Library
+          tagger to follow the primary again.
+        </div>
+      )}
+      {keyNotPinned && (
+        <div className={pinned.length > 0 ? 'mt-1' : undefined}>
+          The primary&rsquo;s API key is too long for the Library tagger to store, so it is not
+          pinned. If embeddings stop working after the swap, set an embedding key in Library tagger.
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** The swap dialog's warning: which agentic routes the incoming primary may

@@ -6,27 +6,23 @@
 // confirm dialog.
 //
 // It WARNS, never blocks: the same engine would already take those routes on a
-// failover, so refusing the swap would protect nothing. And it judges with the
-// checks DJ Doc already applies to the live primary, never new ones — the
-// context-window floor, the model-class heuristic, the agent deadline against
-// measured latency — plus the provider's tool-calling behaviour from
-// capabilities.ts. The output cap (maxOutputTokens) is station-wide and does
-// not move with a swap, so it is DJ Doc's to report, not this dialog's.
+// failover, so refusing the swap would protect nothing. And it judges with
+// exactly the checks DJ Doc applies to the live primary — the context-window
+// floor, the model-class heuristic, the agent deadline against measured
+// latency — through the shared predicates in doctor/agent-fit.ts, so the
+// incoming primary is held to the outgoing one's bar and the two cannot drift.
+// Nothing here is a judgement DJ Doc does not also make. The output cap
+// (maxOutputTokens) is station-wide and does not move with a swap, so it is DJ
+// Doc's to report, not this dialog's.
 //
-// Pure apart from its inputs: the caller passes the stored llm block and the
-// recent call telemetry.
+// Pure apart from its inputs: the caller passes the stored llm block, the
+// recent call telemetry and the two legs' telemetry labels (llm/provider.js
+// legLabel()).
 import { settingsAgentRoutes } from '../schemas/settings.js';
-import { classifyModel } from '../doctor/util.js';
-import { forcedToolChoice, thinkingMandatoryModel } from '../llm/internal/provider/capabilities.js';
-
-/** Smallest Ollama context window an agent tool loop fits in: the system
- *  prompt, tool definitions and candidates are truncated below it. Shared with
- *  DJ Doc's `context window` finding (doctor/checks-station.ts). */
-export const AGENT_NUM_CTX_FLOOR = 8192;
-
-/** A model below this many billions of parameters is flagged for Agentic Tools
- *  (DJ Doc's `model class` finding uses the same figure). */
-export const AGENT_PICKS_MIN_SIZE_B = 11;
+import {
+  AGENT_DEADLINE_WARN_RATIO, AGENT_NUM_CTX_FLOOR,
+  agentDeadlineRatio, contextWindowTooSmall, latencyP90, modelClassConcern,
+} from '../doctor/agent-fit.js';
 
 export interface SwapFitWarning {
   /** Short name of the check, e.g. "context window". */
@@ -43,15 +39,16 @@ export interface SwapFit {
   warnings: SwapFitWarning[];
 }
 
+/** The `provider:modelId` each leg's telemetry rows carry (legLabel()). */
+export interface SwapFitLabels {
+  backup?: string;
+  primary?: string;
+}
+
 type Leg = Record<string, unknown> | undefined;
 type Call = { ok?: boolean; ms?: number; model?: string } | null | undefined;
 
-/** True when a telemetry row was served by `model` (rows carry either the bare
- *  model id or a leg label that contains it). */
-function servedBy(call: Call, model: string): boolean {
-  const m = typeof call?.model === 'string' ? call.model : '';
-  return !!model && (m === model || m.includes(model));
-}
+const UNSET = ':(unset)';
 
 /**
  * What the backup (about to become primary) may not suit, for every agentic
@@ -60,6 +57,7 @@ function servedBy(call: Call, model: string): boolean {
 export function llmSwapFit(
   llm: { trackSelection?: unknown; requestMatching?: unknown; segmentRuntime?: unknown; agentTimeoutMs?: unknown; fallback?: Leg } | null | undefined,
   recentCalls: readonly Call[] = [],
+  labels: SwapFitLabels = {},
 ): SwapFit {
   const routes = settingsAgentRoutes(llm);
   const agenticRoutes = [
@@ -73,56 +71,46 @@ export function llmSwapFit(
   const out: SwapFit = { agenticRoutes, target: { provider, model }, warnings: [] };
   if (!routes.any) return out;
 
-  // Context window (Ollama only; 0/absent means the provider default).
-  const nc = Number(leg.numCtx);
-  if (provider === 'ollama' && Number.isFinite(nc) && nc > 0 && nc < AGENT_NUM_CTX_FLOOR) {
+  // The resolved label names a blank-model leg (an Ollama leg on
+  // config.ollama.model) the way its calls do; DJ Doc classifies the live
+  // primary by its label too.
+  const backupLabel = labels.backup && !labels.backup.endsWith(UNSET) ? labels.backup : '';
+  const shown = model || (backupLabel.startsWith(`${provider}:`) ? backupLabel.slice(provider.length + 1) : '');
+
+  const nc = contextWindowTooSmall(provider, leg.numCtx);
+  if (nc !== null) {
     out.warnings.push({
       check: 'context window',
       detail: `its context window is ${nc} tokens, under the ${AGENT_NUM_CTX_FLOOR} an agent tool loop needs, so prompts and tool definitions get truncated`,
     });
   }
 
-  // Model class, by name (a heuristic, as in DJ Doc).
-  const cls = classifyModel(model);
-  if (cls.code) {
+  const concern = modelClassConcern(backupLabel || model, routes.picks);
+  if (concern?.kind === 'code') {
     out.warnings.push({
       check: 'model class',
-      detail: `${model} looks code-specialised, which tends to fail structured picks and tool calls`,
+      detail: `${shown} looks code-specialised, which tends to fail structured picks and tool calls`,
     });
-  } else if (cls.sizeB !== null && cls.sizeB < AGENT_PICKS_MIN_SIZE_B && routes.picks) {
+  } else if (concern?.kind === 'small') {
     out.warnings.push({
       check: 'model class',
-      detail: `${model} looks like a ~${cls.sizeB}B model; Agentic Tools track selection wants a ~12B-class or capable cloud model`,
+      detail: `${shown} looks like a ~${concern.sizeB}B model; Agentic Tools track selection wants a ~12B-class or capable cloud model`,
     });
   }
 
-  // Tool calling: the agent loop corners the model with a forced tool. A
-  // thinking-mandatory model, or a leg set to toolChoice 'auto', is only asked.
-  if (thinkingMandatoryModel(model)) {
-    out.warnings.push({
-      check: 'tool calling',
-      detail: `${model} rejects forced tool calls, so the agent loop can only ask it to call its tools and more runs fall back`,
-    });
-  } else if (forcedToolChoice(leg) === 'auto') {
-    out.warnings.push({
-      check: 'tool calling',
-      detail: 'this leg sends tool choice "auto", so the agent loop cannot force a tool call and more runs fall back',
-    });
-  }
-
-  // Agent deadline against what this model has measured (it served calls as
-  // the backup). Same p90 and 80 % threshold as DJ Doc.
-  const deadlineMs = Number(llm?.agentTimeoutMs);
-  const lat = recentCalls
-    .filter((c) => c && c.ok !== false && Number.isFinite(c.ms) && (c.ms as number) > 0 && servedBy(c, model))
-    .map((c) => c!.ms as number)
-    .sort((a, b) => a - b);
-  if (lat.length >= 5 && Number.isFinite(deadlineMs) && deadlineMs > 0) {
-    const p90 = lat[Math.min(lat.length - 1, Math.floor(lat.length * 0.9))];
-    if (p90 >= 0.8 * deadlineMs) {
+  // Agent deadline against what this leg has measured while it served calls as
+  // the backup. Rows carry only the leg LABEL, so they are matched to it
+  // exactly (a substring would also count `gpt-5-mini` rows as `gpt-5`'s), and
+  // when both legs share one label (the same model on two hosts) no row can be
+  // told apart: the check stays silent rather than charge the primary's
+  // latency to the backup.
+  if (backupLabel && backupLabel !== labels.primary) {
+    const p90 = latencyP90(recentCalls, c => c.model === backupLabel);
+    const ratio = p90 === null ? null : agentDeadlineRatio(p90, llm?.agentTimeoutMs);
+    if (p90 !== null && ratio !== null && ratio >= AGENT_DEADLINE_WARN_RATIO) {
       out.warnings.push({
         check: 'agent deadline',
-        detail: `its recent calls ran ${(p90 / 1000).toFixed(1)}s at p90 against the ${Math.round(deadlineMs / 1000)}s agent deadline, so agent runs would time out into their fallbacks`,
+        detail: `its recent calls ran ${(p90 / 1000).toFixed(1)}s at p90 against the ${Math.round(Number(llm?.agentTimeoutMs) / 1000)}s agent deadline, so agent runs would time out into their fallbacks`,
       });
     }
   }

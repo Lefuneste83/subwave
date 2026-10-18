@@ -12,14 +12,22 @@
 // code, and the node:test shape reporting per assertion. Prefer node:test for
 // anything new.
 //
-// Concurrency defaults to 1, and CI keeps that. Parallel runs are opt-in: every
-// file already runs in its own process, so env vars and module state are never
-// shared, and test-utils/state-dir.ts (preloaded below) gives each process its
-// own STATE_DIR, so a file that never sets one no longer lands in the repo's
-// state/ dir alongside every other such file.
+// STATE_DIR is always a fresh temp dir, whatever the calling shell exports.
+// Most files set their own before importing the controller, but one that does
+// not falls through config.ts to the repo-local state/ — which on a host
+// running the station is the live state root, and the Navidrome migration
+// writes there on import. Overriding rather than defaulting means an exported
+// STATE_DIR pointing at a real station cannot leak in either.
+//
+// Concurrency defaults to 1, and CI keeps that. Parallel runs are opt-in, and
+// they are safe because nothing is shared between files: each runs in its own
+// process (env vars and module state stay apart), and test-utils/state-dir.ts,
+// preloaded below, gives each process its OWN temp STATE_DIR on top of the
+// run's one. Without that preload every file would share the run's dir, and
+// parallel files would race on its settings.json, library.db and handoffs.
 
-import { readdirSync } from 'node:fs';
-import { availableParallelism } from 'node:os';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { availableParallelism, tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -69,6 +77,8 @@ console.log(`Running ${files.length} test file(s)${filter ? ` matching "${filter
 // `--import tsx` loads .ts directly and is inherited by each subprocess, as is
 // the state-dir preload. The spec reporter is forced so a non-TTY doesn't fall
 // back to TAP.
+const stateDir = mkdtempSync(join(tmpdir(), 'subwave-test-state-'));
+
 const { status } = spawnSync(
   process.execPath,
   [
@@ -81,7 +91,8 @@ const { status } = spawnSync(
     '--test-reporter=spec',
     ...files.map((f) => join(scriptsDir, f)),
   ],
-  { stdio: 'inherit' },
+  { stdio: 'inherit', env: { ...process.env, STATE_DIR: stateDir } },
 );
 
+rmSync(stateDir, { recursive: true, force: true });
 process.exit(status ?? 1);
