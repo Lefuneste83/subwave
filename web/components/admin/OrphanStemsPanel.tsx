@@ -217,12 +217,17 @@ export default function OrphanStemsPanel() {
             </Btn>
             <Pill
               dot
+              tone="ink"
               pressed={enabled}
               disabled={mutation.isPending}
               onClick={() => act({ setEnabled: !enabled })}
               title={enabled
                 ? 'The daily pass quarantines new orphans once a day; entries delete themselves after a week. Click to turn it off.'
                 : 'The daily pass quarantines new orphans once a day; entries delete themselves after a week. Click to turn it on.'}
+              /* tone="ink" carries the visible border — the default badge border is
+                 --separator-strong at ~10% alpha, which on a card reads as a
+                 border-less float next to the bordered action buttons. The state
+                 colour rides on text/dot only. */
               className={enabled ? 'text-emerald-500' : 'text-muted-foreground'}
             >
               Daily pass {enabled ? 'on' : 'off'}
