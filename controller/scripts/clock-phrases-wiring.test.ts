@@ -89,13 +89,28 @@ function expectedFix(): string | null {
 
 // ── prompt memory ────────────────────────────────────────────────────────────
 
-test('the recap carries the line without its clock phrase', () => {
+test('the recap drops the sentence that states a clock, and keeps the rest', () => {
   const t = new Date(Date.now() - 12 * 60_000).toISOString();
   const [entry] = promptRecapEntries(
-    [{ t, kind: 'link', message: 'The Free Electron rolls through Plakias just after ten on a Monday.' }],
+    [{ t, kind: 'link', message: 'The Free Electron rolls through Plakias just after ten on a Monday. Here is Len Faki.' }],
     { limit: 10, withinMinutes: 120, maxChars: 140 },
   );
-  assert.equal(entry.message, 'The Free Electron rolls through Plakias on a Monday.');
+  assert.equal(entry.message, 'Here is Len Faki.');
+});
+
+// The fragment the old phrase-level strip left ("in the afternoon on The Free
+// Electron.") is what qwythos re-aired on 18 Oct; no fragment may reach the
+// recap at all.
+test('a recap line whose only sentence states the clock is dropped, never left as a fragment', () => {
+  const t = new Date(Date.now() - 5 * 60_000).toISOString();
+  const picked = promptRecapEntries(
+    [
+      { t, kind: 'hourly-check', message: 'One down for our afternoon on The Free Electron and just gone four.' },
+      { t, kind: 'station-id', message: 'Southern Star.' },
+    ],
+    { limit: 10, withinMinutes: 120, maxChars: 140 },
+  );
+  assert.deepEqual(picked.map(e => e.message), ['Southern Star.']);
 });
 
 test('a recap line that was only a clock is dropped, not kept empty', () => {
@@ -108,7 +123,7 @@ test('a recap line that was only a clock is dropped, not kept empty', () => {
 });
 
 test('the opener list never names the old time', () => {
-  session.appendTurn({ role: 'segment', kind: 'link', text: 'Just after ten on a proper Monday, here is Steve Miller.', meta: { personaId: HOST.id } });
+  session.appendTurn({ role: 'segment', kind: 'link', text: 'Just after ten on a proper Monday. Here is Steve Miller.', meta: { personaId: HOST.id } });
   const openers = queue.getRecentOpeners();
   assert.ok(openers.length >= 1);
   assert.ok(openers.every(o => !/after ten/i.test(o)), openers.join(' | '));
@@ -116,10 +131,18 @@ test('the opener list never names the old time', () => {
 
 test('the agent chat window replays aired lines without their clock', () => {
   session.appendTurn({ role: 'event', kind: 'pick', text: 'Pick the track to play next.' });
-  session.appendTurn({ role: 'segment', kind: 'station-id', text: 'Southern Star Plakias Radio, just after two on a proper Monday.', meta: { personaId: HOST.id } });
+  session.appendTurn({ role: 'segment', kind: 'station-id', text: 'Southern Star Plakias Radio. It is just after two on a proper Monday.', meta: { personaId: HOST.id } });
   const aired = session.windowMessages().filter(m => m.role === 'assistant').map(m => m.content).join('\n');
   assert.match(aired, /Southern Star Plakias Radio/);
-  assert.doesNotMatch(aired, /after two/);
+  assert.doesNotMatch(aired, /after two|on a proper Monday/);
+});
+
+test('an aired line that was only a clock adds no empty turn to the chat window', () => {
+  session.appendTurn({ role: 'event', kind: 'pick', text: 'Pick the track to play next.' });
+  session.appendTurn({ role: 'segment', kind: 'hourly-check', text: 'Just gone four in the afternoon.', meta: { personaId: HOST.id } });
+  const msgs = session.windowMessages();
+  assert.ok(msgs.every(m => m.content.trim().length > 0), JSON.stringify(msgs));
+  assert.ok(msgs.every(m => !/in the afternoon/.test(m.content)), JSON.stringify(msgs));
 });
 
 test('the session file keeps the words that aired, clock included', () => {

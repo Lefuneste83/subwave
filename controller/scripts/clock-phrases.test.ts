@@ -61,19 +61,59 @@ test('find: inside quotes -> no phrase', () => {
   assert.equal(findClockPhrases('the song "Half Past Ten"').length, 0);
 });
 
-test('strip: production examples and identity', () => {
+// The recap drops the whole SENTENCE that states a time, never just the
+// phrase: cutting the phrase out left a fragment ("in the afternoon on The
+// Free Electron.") that small models copied onto air as an opener or as a
+// whole line (18 Oct: 27 of 218 spoken lines; 0 on the three days before).
+test('strip: the sentence holding a clock goes, the others stay', () => {
   assert.equal(
     stripClockPhrases(
       "The Free Electron rolls through Plakias just after ten on a Monday, and right now we're diving in."
     ),
-    "The Free Electron rolls through Plakias on a Monday, and right now we're diving in."
+    ''
   );
   assert.equal(
-    stripClockPhrases("Tuesday at half-past eleven on The Free Electron, I'm vibrating."),
-    'Tuesday on The Free Electron, I\'m vibrating.'
+    stripClockPhrases('Southern Star Plakias Radio. It is just past four on a proper Monday. Here is Len Faki.'),
+    'Southern Star Plakias Radio. Here is Len Faki.'
   );
   const plain = 'Hello world, no clock here.';
   assert.equal(stripClockPhrases(plain), plain);
+});
+
+test('strip: the 18 Oct production lines leave no fragment behind', () => {
+  for (const line of [
+    'One down for our afternoon on The Free Electron and just gone four.',
+    'just gone one in the afternoon on The Free Electron.',
+    'Just past seven in the evening here in Plakias, and if you\'ve found yourself tuning in this late on a Sunday, then welcome to the after-party.',
+    'It is getting close to seven pm here on this quiet Sunday evening, and I am thinking about that EP called Importante.',
+  ]) assert.equal(stripClockPhrases(line), '', line);
+});
+
+test('strip: two clocks in two sentences both go, a third sentence stays', () => {
+  assert.equal(
+    stripClockPhrases('Half past three on a lazy Sunday. Bar.ba is up next. Approaching four, we keep it deep.'),
+    'Bar.ba is up next.'
+  );
+});
+
+// A dot inside a name or an abbreviation is not a sentence end: the replay of
+// 17-18 Oct aired lines left "ba drop Push The Button…" (Bar.ba) and "here on
+// Sunday inside The Free Electron…" (four p.m.) behind before this.
+test('strip: a dot inside a name or an abbreviation does not end the sentence', () => {
+  assert.equal(stripClockPhrases('Sunday approaching 2pm on The Free Electron, Packim and Bar.ba drop Push The Button from their 2024 EP.'), '');
+  assert.equal(stripClockPhrases('It is approaching four p.m. here on Sunday inside The Free Electron, so here is Deny Fate.'), '');
+  assert.equal(
+    stripClockPhrases('Just gone eleven with Hoom Side of the Moon, Vol. 04 by Dowden. Stay close.'),
+    'Stay close.'
+  );
+});
+
+test('reconcile drop: an abbreviation inside the sentence is dropped with it', () => {
+  const r = reconcileClockPhrases('It is approaching four p.m. here on Sunday. Here is Deny Fate.', {
+    airHhmm: '09:00',
+    supplied: null,
+  });
+  assert.equal(r.text, 'Here is Deny Fate.');
 });
 
 test('reconcile keep: within tolerance leaves text unchanged', () => {
@@ -266,11 +306,53 @@ test('T11 reconcile keep: "half-past midnight" at 00:43 under tolerance', () => 
   assert.deepEqual(r.changes, []);
 });
 
-test('T12 strip: half-past midnight removed', () => {
+test('T12 strip: half-past midnight removed with its sentence', () => {
+  assert.equal(stripClockPhrases('it is half-past midnight on a Sunday here'), '');
   assert.equal(
-    stripClockPhrases('it is half-past midnight on a Sunday here'),
-    'it is on a Sunday here'
+    stripClockPhrases('Southern Star. it is half-past midnight on a Sunday here.'),
+    'Southern Star.'
   );
+});
+
+// "Getting close to seven pm" was not a clock at all: never stripped from the
+// recap, never checked on air, so it re-aired at 19:12 and 19:31 on 18 Oct.
+test('find: "getting close to seven pm" is an approach reading', () => {
+  const line = 'It is getting close to seven pm here on this quiet Sunday evening.';
+  const phrases = findClockPhrases(line);
+  assert.equal(phrases.length, 1);
+  assert.equal(phrases[0].text, 'getting close to seven pm');
+  assert.deepEqual([phrases[0].lo, phrases[0].hi], [395, 420]);
+  assert.equal(clockOffMinutes(phrases[0], '19:31'), 31);
+  assert.equal(clockOffMinutes(phrases[0], '18:51'), 0);
+});
+
+test('find: the other approach words', () => {
+  for (const [line, text] of [
+    ['We are close to nine pm on Future Frequencies.', 'close to nine pm'],
+    ['Closing in on eight here in Plakias.', 'Closing in on eight'],
+    ["It's approaching seven pm here.", 'approaching seven pm'],
+  ] as const) {
+    const p = findClockPhrases(line);
+    assert.equal(p.length, 1, line);
+    assert.equal(p[0].text, text, line);
+  }
+});
+
+test('find: "close to" a quantity or a person is not a clock', () => {
+  for (const line of [
+    'Close to ten thousand plays on this station.',
+    'We feel close to one another tonight.',
+    'He came close to two decades of releases.',
+  ]) assert.deepEqual(findClockPhrases(line), [], line);
+});
+
+test('reconcile: "getting close to seven pm" at 19:31 is replaced whole, pm included', () => {
+  const r = reconcileClockPhrases(
+    'It is getting close to seven pm here on this quiet Sunday evening.',
+    { airHhmm: '19:31', supplied: 'around half past 7pm' },
+  );
+  assert.equal(r.text, 'It is around half past 7pm here on this quiet Sunday evening.');
+  assert.deepEqual(r.changes, [{ from: 'getting close to seven pm', to: 'around half past 7pm', offMin: 31 }]);
 });
 
 test('find: a time the line refers back or ahead to is not the time now', () => {
