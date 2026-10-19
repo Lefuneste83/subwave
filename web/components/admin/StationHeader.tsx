@@ -163,8 +163,8 @@ export interface StationHeaderProps {
   busy: string | null;
   onSkip: () => void;
   /** The playing file's own format line ("FLAC · 44.1 kHz · 16-bit"),
-   *  shown as plain muted text after the artist; null while unknown, so
-   *  nothing renders. */
+   *  shown after the artist in the caption style of the album · DJ line
+   *  below it; null while unknown, so nothing renders. */
   fileFormat?: string | null;
   /** O2 — opens the never-play confirm for the track on air. Absent, no button. */
   onNeverPlay?: () => void;
@@ -285,7 +285,7 @@ export default function StationHeader({
               <div className="text-[18px] leading-[1.2] font-bold tracking-[-0.01em]">
                 {np.title} <span className="font-semibold text-muted">— {np.artist}</span>
                 {fileFormat && (
-                  <span className="ml-2 text-[13px] font-normal tracking-normal text-muted" title="Format of the file on air, from Navidrome">
+                  <span className="caption ml-2 align-middle" title="Format of the file on air, from Navidrome">
                     · {fileFormat}
                   </span>
                 )}
