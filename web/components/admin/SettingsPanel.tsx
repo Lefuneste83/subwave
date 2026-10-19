@@ -57,7 +57,9 @@ import {
   useLlmSwapMutation,
   useSettingsMutation,
   useSettingsQuery,
+  useStemUsageQuery,
 } from './settings/queries';
+import { fmtGb, fmtMeasured, stemBudgetImpact } from './settings/stem-budget';
 import {
   cloudSaveSnapshot, cloudSaveReadReady, rebaselineSavedPatch, reconcileSavedCloud,
   adoptServerPaths, committedReadReady, LLM_SWAP_FORM_KEYS,
@@ -129,6 +131,10 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
   });
   const data = settingsQuery.data ?? null;
   const err = settingsQuery.error ? errorMessage(settingsQuery.error) : null;
+  // The stem cache's stored size, for the budget field's "cache used"
+  // line and the lowered-budget warning. The snapshot, never a walk.
+  const stemUsage = useStemUsageQuery({ adminFetch, enabled: hydrated && !needsAuth }).data?.usage ?? null;
+  const [confirmStemBudget, setConfirmStemBudget] = useState(false);
   const [commandBusy, setBusy] = useState(false);
   const [form, setForm] = useState<FormState | null>(null);
   const formBaselineRef = useRef<FormState | null>(null);
@@ -362,6 +368,19 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
 
   const saveBroadcast = () => {
     if (form) saveBlock(dangerSavePayload(form));
+  };
+  // The budget's save path: a budget lowered under what the cache holds
+  // makes the next hourly sweep delete the difference, so that save asks
+  // first. An unchanged budget (even one already under the cache) and a
+  // raised one save straight through.
+  const stemBudgetCut = form
+    && formBaselineRef.current
+    && Number(form.transitions.stemCacheGb) < Number(formBaselineRef.current.transitions.stemCacheGb)
+    ? stemBudgetImpact(stemUsage, Number(form.transitions.stemCacheGb))
+    : null;
+  const saveBroadcastGuarded = () => {
+    if (stemBudgetCut) setConfirmStemBudget(true);
+    else saveBroadcast();
   };
 
   const activeSpec = sectionById(activeSection);
@@ -803,9 +822,37 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
                         tracks
                       </span>
                     </div>
+                    {(() => {
+                      if (!stemUsage) {
+                        return (
+                          <div className="field-hint">
+                            Cache used: not measured yet (the hourly sweep records it).
+                          </div>
+                        );
+                      }
+                      const impact = stemBudgetImpact(stemUsage, Number(form.transitions.stemCacheGb));
+                      const at = fmtMeasured(stemUsage.measuredAt);
+                      return (
+                        <>
+                          <div className="field-hint">
+                            Cache used: <span className="mono-num">{fmtGb(stemUsage.bytes)}</span>
+                            {' '}&middot; {stemUsage.dirs.toLocaleString('en-GB')} tracks
+                            {at ? ` (measured ${at}${stemUsage.fresh ? '' : stemUsage.passRunning ? ', analysis pass adding more' : ', over a day old'})` : ''}
+                          </div>
+                          {impact && (
+                            <div className="field-hint text-destructive" role="status">
+                              This budget is below what the cache holds: the next hourly sweep
+                              deletes about <strong>{fmtGb(impact.deleteBytes)}</strong>, the stems
+                              of ~{impact.deleteTracks.toLocaleString('en-GB')} tracks (lowest
+                              stem priority first), keeping ~{impact.keepTracks.toLocaleString('en-GB')}.
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
                     <div className="field-hint">
                       How much disk the stem cache may use before the oldest entries are evicted
-                      (1&ndash;500&nbsp;GB). A blend only fires when BOTH tracks of a pair are
+                      (1&ndash;1,000&nbsp;GB). A blend only fires when BOTH tracks of a pair are
                       cached, so a budget well under your library size means most seams stay
                       plain crossfades. The backfill stops once the budget is full rather than
                       separating tracks it would immediately evict.
@@ -844,7 +891,7 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
             <SaveBar
               note="Stem cache, budget and blend settings apply to the next pick — no restart."
               busy={busy}
-              onSave={saveBroadcast}
+              onSave={saveBroadcastGuarded}
               saveLabel="Save stems"
               errors={fieldErrors}
               ownedKeys={['transitions', 'audio']}
@@ -1744,6 +1791,17 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
         </SectionChromeProvider>
       </div>
 
+      <V3AlertDialog
+        open={confirmStemBudget}
+        onOpenChange={setConfirmStemBudget}
+        title="Lower the stem cache budget"
+        description={stemBudgetCut
+          ? `The cache holds ${fmtGb(stemUsage?.bytes ?? 0)}. At ${form?.transitions.stemCacheGb} GB, the next hourly sweep deletes about ${fmtGb(stemBudgetCut.deleteBytes)}: the stems of ~${stemBudgetCut.deleteTracks.toLocaleString('en-GB')} tracks, lowest stem priority first. Re-separating them later takes hours of analysis.`
+          : ''}
+        confirmLabel="save and delete"
+        danger
+        onConfirm={saveBroadcast}
+      />
       <V3AlertDialog
         open={confirmRestart}
         onOpenChange={setConfirmRestart}
