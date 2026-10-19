@@ -914,6 +914,9 @@ export function windowMessages() {
       // Aired lines replay as the model's OWN untimed turns, the strongest
       // invitation to repeat a clock that has since moved on (M1).
       : m.role === 'segment' ? stripClockPhrases(m.text) : m.text;
+    // A line whose every sentence stated the time strips to nothing: no turn,
+    // rather than an empty assistant message a provider may reject.
+    if (!promptText.trim()) continue;
     const text = m.meta?.promptSuffix ? `${promptText}${m.meta.promptSuffix}` : promptText;
     const content = (m.role === 'dj' && m.kind === 'pick')
       ? `(pick note to self — not aired) ${text}`
