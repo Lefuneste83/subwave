@@ -100,6 +100,9 @@ export interface DerivedFacet {
   version: number;
   reason: string | null;
   attempts: number;
+  // The version was READ from the measurement's own column, not assumed from
+  // FACET_VERSIONS — a re-derive takes it as is instead of keeping the lower.
+  measuredVersion?: boolean;
 }
 
 export interface DeriveOpts {
@@ -132,7 +135,10 @@ export function deriveFacetRows(
 
   // A window figure stays at v1 (due for the whole-file pass); the whole-file
   // one carries its own version.
-  if (row.has_loudness) ok('loudness', null, row.loudness_version || 1);
+  if (row.has_loudness) {
+    ok('loudness', null, row.loudness_version || 1);
+    out[out.length - 1]!.measuredVersion = true;
+  }
   else if (analysed) unmeasurable('loudness', 'not-measured');
 
   // An outro proves the tail was decoded, even when its window held no
@@ -229,6 +235,9 @@ export interface SyncOpts extends DeriveOpts {
   // Without this a version bump never settles for a still-unmeasurable track.
   tried?: readonly Facet[];
   source?: FacetSource;
+  // A whole-table re-derive (resyncAllFacets): a version read from the
+  // measurement's own column is taken as is. A live write keeps the lower one.
+  rederive?: boolean;
 }
 
 // Re-derive one track's facet rows from its columns and store the difference.
@@ -282,7 +291,7 @@ function syncTrackFacetsOn(d: Database.Database, id: string, opts: SyncOpts): vo
     // reason. A failure's reason is the latest error.
     if (!isFresh && prev && prev.status === r.status && r.status !== 'failed' && r.facet !== 'vocal') r.reason = prev.reason;
     const version =
-      isFresh || !prev || (prev.status !== r.status && unmeasurable[r.facet] == null)
+      isFresh || (opts.rederive && r.measuredVersion) || !prev || (prev.status !== r.status && unmeasurable[r.facet] == null)
         ? r.version : Math.min(prev.version, r.version);
     // 'seed' is reserved for rows the seed wrote; a live write that creates a
     // row without measuring it (a failure, a re-derive) records what it knows.
@@ -311,8 +320,10 @@ function syncTrackFacetsOn(d: Database.Database, id: string, opts: SyncOpts): vo
 export function facetDerivationStamp(): string {
   // Revision 1 mirrors failure counts on kept measurements and repairs vocal
   // reasons from the columns. Re-derive earlier tables once, without promoting
-  // their measurement versions.
-  return JSON.stringify({ revision: 1, analysis: ANALYSIS_VERSION, facets: FACET_VERSIONS });
+  // their measurement versions. Revision 2 takes a version read from the
+  // measurement's own column (loudness_version) as is, so a whole-file figure
+  // stored before its facet row knew about it is promoted once.
+  return JSON.stringify({ revision: 2, analysis: ANALYSIS_VERSION, facets: FACET_VERSIONS });
 }
 
 function readFacetStamp(d: Database.Database): string | null {
@@ -336,7 +347,7 @@ export function resyncAllFacets(d: Database.Database): number {
     d.prepare('DELETE FROM track_facet_status WHERE track_id NOT IN (SELECT id FROM tracks)').run();
     const ids = (d.prepare('SELECT id FROM tracks').all() as Array<{ id: string }>).map(r => r.id);
     for (const id of ids) {
-      syncTrackFacetsOn(d, id, {});
+      syncTrackFacetsOn(d, id, { rederive: true });
       synced += 1;
     }
     writeFacetStamp(d);

@@ -143,3 +143,23 @@ test('step 29 re-runs safely on a database that already has the columns', async 
   assert.equal(cols('whole').loudness_version, 2);
   consistent();
 });
+
+test('a stored whole-file figure promotes a stale loudness row on re-derive', () => {
+  // A station that measured whole-file loudness before this facet existed has
+  // loudness_version = 2 on the track but a facet row derived at v1. The
+  // column IS the measurement's version, so a re-derive must take it, or every
+  // such track is planned for a loudness re-read it does not need.
+  db.upsertTrackMeta('legacy', { title: 'legacy', artist: 'A', album: 'B', duration: 240 });
+  db.upsertTrackAnalysis('legacy', { bpm: 120, musicalKey: 'Am', loudnessLufs: -12, peakDb: 0.5 });
+  assert.equal(facetRow('legacy', 'loudness')?.version, 1);
+  sql.prepare(`UPDATE tracks SET loudness_version = 2 WHERE id = 'legacy'`).run();
+  db.resyncAllFacets(db.requireDb());
+  assert.equal(facetRow('legacy', 'loudness')?.version, 2);
+  assert.equal(facetRow('legacy', 'loudness')?.status, 'ok');
+  assert.ok(!db.facetNeedsIds('loudness').includes('legacy'));
+  consistent();
+});
+
+test('the derivation stamp moved, so a table derived before re-derives once', () => {
+  assert.equal(JSON.parse(db.facetDerivationStamp()).revision, 2);
+});
