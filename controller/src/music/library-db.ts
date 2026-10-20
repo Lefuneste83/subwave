@@ -20,4 +20,3 @@ export * from './library-db/scenes.js';
 export * from './library-db/plays.js';
 export * from './library-db/stem-scan.js';
 export * from './library-db/facets.js';
-export * from './library-db/loudness.js';

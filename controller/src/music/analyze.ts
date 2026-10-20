@@ -23,7 +23,7 @@ import {
   tailVocalBackfillAvailable,
 } from './analyze-capability.js';
 import { probeListenerCount } from '../broadcast/listeners.js';
-import type { AcousticsPlan, WorkRequest } from './acoustics-plan.js';
+import { planAcoustics, type AcousticsPlan, type WorkRequest } from './acoustics-plan.js';
 import type { Facet } from './library-db/facets.js';
 
 // Status events for the panel, mirrored to the `[analyze] …` console line.
@@ -67,13 +67,6 @@ function vocalBackfillDefault(): boolean {
   } catch {
     return false;
   }
-}
-
-// Whole-file loudness (B13): env only for now, off unless set, because turning
-// it on re-reads every file in the library once.
-export function wholeFileLoudnessWanted(): boolean {
-  const v = config.analyzer.wholeFileLoudness;
-  return v === '1' || v === 'true' || v === 'yes';
 }
 
 // Read by /library/coverage to decide whether to show the vocal row (#646).
@@ -175,15 +168,9 @@ export interface AnalyzeStats {
   audioEmbedded: number;
   // Includes instrumentals (stored as []). 0 when off or demucs is absent.
   vocalAnalyzed: number;
-  // Whole-file loudness pass (B13); absent when the pass did not run.
-  loudness?: WholeFileLoudnessStats;
-}
-
-export interface WholeFileLoudnessStats {
-  measured: number;
-  failed: number;
-  scope: number;
-  pending: number;
+  // The opt-in whole-file backfill that followed the pass (absent when it
+  // did not run).
+  wholeFile?: { analyzed: number; failed: number; scope: number };
 }
 
 // Provenance label stamped into audio_embedding_meta; the worker owns the model.
@@ -220,7 +207,47 @@ function lyricTailRanges(id: string, outro: Pick<analyzer.OutroInfo, 'startMs'>,
   return clipRangesToTail(lyricVocal.vocalRanges, windowStartMs, durMs > 0 ? durMs : null);
 }
 
+// The opt-in whole-file backfill (ANALYZE_WHOLE_FILE): a facet plan for
+// loudness v2 + edges over every track that needs either, exactly what
+// `--facets loudness,edges` would plan. null when the switch is off; an
+// analyzer known to lack the facets gets nothing planned (skipped, counted).
+export async function wholeFileBackfillPlan(limit?: number): Promise<AcousticsPlan | null> {
+  if (!config.analyzer.wholeFile) return null;
+  const facets = [...db.WHOLE_FILE_FACETS];
+  const available = await analyzer.isAvailable().catch(() => false);
+  // An automatic widening needs POSITIVE support, like the tail-vocal one: an
+  // analyzer that predates the facets never says so, and sending them anyway
+  // fails every request. An explicit `--facets` run still plans on unknown.
+  const capable = available && analyzer.wholeFileAvailable() === true;
+  return planAcoustics({
+    ids: db.allTrackIdsOrdered(),
+    facets,
+    where: { kind: 'needs' },
+    state: db.loadFacetState(facets),
+    capabilities: { clap: null, demucs: null, tailVocal: null, wholeFile: capable },
+    limit,
+  });
+}
+
 export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<AnalyzeStats> {
+  const stats = await runAnalysisPassOnce(opts);
+  // The whole-file facets ride a regular run only when the operator opted in,
+  // as one more facet plan after it (same quiet gate, same failure rules).
+  if (opts.plan || !stats.available) return stats;
+  const plan = await wholeFileBackfillPlan(opts.limit);
+  if (!plan) return stats;
+  const skipped = plan.byFacet.reduce((n, c) => n + (c.skipped['no-whole-file'] ?? 0), 0);
+  if (skipped > 0 && plan.items.length === 0) {
+    logEvent('warning', 'Whole-file analysis is on, but the analyzer does not offer it (no ffmpeg, or an image that predates it) — rebuild the analyzer');
+    return stats;
+  }
+  if (plan.items.length === 0) return stats;
+  logEvent('info', `Whole-file loudness + edges: ${plan.items.length.toLocaleString('en-GB')} tracks to measure`);
+  const whole = await runAnalysisPassOnce({ plan });
+  return { ...stats, wholeFile: { analyzed: whole.analyzed, failed: whole.failed, scope: whole.scope } };
+}
+
+async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeStats> {
   if (!(await analyzer.isAvailable())) {
     // The only two things resolveBackend() consults, named by their env vars.
     console.log('[analyze] no analysis backend (ANALYZE_URL sidecar / ANALYZE_PYTHON venv) — skipping');
@@ -473,10 +500,7 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     console.log('[analyze] nothing to analyse — all tracks current');
     // Mood scoring can still have work (older vectors, changed vocabulary).
     await scoreAudioMoods();
-    // The whole-file loudness backlog is its own scope: a library whose head
-    // analysis is current may still be on the window's loudness figures.
-    const loudness = await runWholeFileLoudnessPass({ limit: cap });
-    return { available: true, backend, analyzed: 0, failed: 0, scope: 0, audioEmbedded: 0, vocalAnalyzed: 0, loudness };
+    return { available: true, backend, analyzed: 0, failed: 0, scope: 0, audioEmbedded: 0, vocalAnalyzed: 0 };
   }
   if (passStems) await stemCacheStore.markPassPending();
   logEvent('info', `Analysing audio for ${ids.length.toLocaleString('en-GB')} tracks…`);
@@ -523,10 +547,16 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   // Concurrent sidecar jobs stage only AFTER admission, so a quiet-time pause
   // never keeps downloading work that has not started.
   type Prefetch = Promise<{ path: string; complete: boolean } | { err: any } | { skip: true }>;
-  // A ranged tail read fetches its own few MB from Navidrome: no capped
-  // download to stage for it.
+  // A ranged tail read fetches its own few MB from Navidrome, and a track
+  // planned for the whole-file facets alone is streamed whole by the analyzer:
+  // neither has a capped download to stage (up to ANALYZE_MAX_BYTES read for
+  // nothing).
+  const wholeFileOnly = (songId: string) => {
+    const f = useFacets ? plannedFacets.get(songId) : undefined;
+    return !!f && f.length > 0 && f.every((x) => db.WHOLE_FILE_FACETS.includes(x));
+  };
   const prefetch = (songId: string): Prefetch =>
-    isRanged(songId)
+    isRanged(songId) || wholeFileOnly(songId)
       ? Promise.resolve({ skip: true as const })
       : analyzer.downloadCapped(songId).then((r) => r, (err) => ({ err }));
 
@@ -596,7 +626,9 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     const source: db.FacetSource =
       res?.source.kind === 'ranged' ? 'ranged'
         : res?.source.kind === 'capped-download' ? (res.source.complete === false ? 'capped' : 'url')
-          : localComplete === true ? 'full' : localComplete === false ? 'capped' : 'unknown';
+        // Whole-file facets alone: the analyzer streamed the URL itself.
+        : res?.source.kind === 'whole-file' ? 'url'
+        : localComplete === true ? 'full' : localComplete === false ? 'capped' : 'unknown';
 
     const w: db.FacetWrite = { source };
     const failures: string[] = [];
@@ -618,7 +650,17 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
           leadSilenceMs: r.leadSilenceMs,
         };
       } else if (f === 'loudness') {
-        w.loudness = { loudnessLufs: r.loudnessLufs, peakDb: r.peakDb };
+        w.loudness = {
+          loudnessLufs: r.loudnessLufs, peakDb: r.peakDb,
+          samplePeakDb: r.samplePeakDb ?? null, loudnessRangeLu: r.loudnessRangeLu ?? null,
+          version: r.loudnessVersion ?? null,
+        };
+      } else if (f === 'edges') {
+        if (r.edgeLeadMs == null || r.edgeTailMs == null || r.decodedDurationMs == null) {
+          failures.push(db.facetFailure(f, 'incomplete edges answer'));
+          continue;
+        }
+        w.edges = { leadMs: r.edgeLeadMs, tailMs: r.edgeTailMs, durationMs: r.decodedDurationMs };
       } else if (f === 'tail') {
         w.tail = { outro: r.outro, tailSilenceMs: r.tailSilenceMs, tailStartMs: r.tailStartMs };
       } else if (f === 'clap' && r.audioEmbedding?.length === db.AUDIO_EMBEDDING_DIM) {
@@ -674,14 +716,14 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     try {
       const settled = await (downloadPromise ?? prefetch(id));
       if ('skip' in settled) {
-        // ranged: nothing staged
+        // ranged / whole-file only: nothing staged
       } else if ('err' in settled) {
         const err: any = settled.err;
         // A non-audio response (stale library entry) is not retryable by url.
         if (err instanceof analyzer.NonAudioResponseError) throw err;
         // Otherwise a transient fetch failure — fall back to the url path.
         console.error(`[analyze] ${id} prefetch failed (${err?.message || err}); using url path`);
-      } else {
+      } else if ('path' in settled) {
         localPath = settled.path;
         localComplete = settled.complete;
       }
@@ -828,7 +870,12 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     }
   };
 
-  const requestedConcurrency = config.analyzer.concurrency;
+  // A plan of whole-file facets alone runs in the sidecar's own lane (no
+  // model, one CPU thread per file), so it may go wider than the analyze pool.
+  const wholeFileLane = !!plan && useFacets && plan.items.length > 0 && plan.items.every(i => wholeFileOnly(i.id));
+  const requestedConcurrency = wholeFileLane
+    ? Math.min(config.analyzer.wholeFileConcurrency, analyzer.wholeFileConcurrency() ?? config.analyzer.wholeFileConcurrency)
+    : config.analyzer.concurrency;
   const effectiveConcurrency = backend === 'sidecar' ? requestedConcurrency : 1;
   if (backend === 'local' && requestedConcurrency > 1) {
     logEvent(
@@ -928,10 +975,6 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
     );
   }
 
-  // After the head pass, so a track analysed for the first time this pass is
-  // already in the table (its window figures are the ones being replaced).
-  const loudness = await runWholeFileLoudnessPass({ limit: cap });
-
   logEvent(
     'success',
     `Audio analysed — ${analyzed.toLocaleString('en-GB')} tracks` +
@@ -939,130 +982,5 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
       (vocalAnalyzed > 0 ? `, ${vocalAnalyzed.toLocaleString('en-GB')} vocal` : '') +
       (failed > 0 ? ` · ${failed.toLocaleString('en-GB')} failed` : ''),
   );
-  return { available: true, backend, analyzed, failed, scope: ids.length, audioEmbedded, vocalAnalyzed, loudness };
-}
-
-// --- Whole-file loudness pass (B13) -------------------------------------------
-//
-// Replaces the analysis window's loudness/peak (first ANALYZE_SECONDS at
-// ANALYZE_SR, sample peak) with integrated loudness + TRUE peak over the whole
-// file, measured by the backend in one streamed ffmpeg pass. Separate from the
-// head pass on purpose: it needs no model and no staged download, costs one
-// full read of the file, and has its own width (ANALYZE_LOUDNESS_CONCURRENCY)
-// and optional per-pass cap (ANALYZE_LOUDNESS_BATCH, default the whole
-// backlog). Quietest-reading (most boosted) tracks go first, so a re-measure
-// stopped half way has already removed most of the overs; a track's stamp is
-// its progress, so the next pass resumes where this one stopped.
-// The same quiet gate holds it, and the same systemic-failure rule keeps an
-// outage from being stamped against every track.
-export async function runWholeFileLoudnessPass(
-  opts: { limit?: number } = {},
-): Promise<WholeFileLoudnessStats | undefined> {
-  if (!wholeFileLoudnessWanted()) return undefined;
-  if (analyzer.wholeFileLoudnessAvailable() !== true) {
-    logEvent(
-      'info',
-      'Whole-file loudness is on, but the analyzer does not offer it (image predates it) — rebuild the analyzer to measure loudness over whole files',
-    );
-    return undefined;
-  }
-  const caps = [opts.limit, config.analyzer.loudnessBatch].filter((n): n is number => !!n && n > 0);
-  const limit = caps.length ? Math.min(...caps) : undefined;
-  const ids = db.needsWholeFileLoudnessIds(limit);
-  const before = db.wholeFileLoudnessCounts();
-  if (ids.length === 0) {
-    if (before.givenUp > 0) {
-      console.log(`[analyze] whole-file loudness: all measurable tracks done (${before.givenUp} unreadable, kept on window figures)`);
-    }
-    return { measured: 0, failed: 0, scope: 0, pending: before.pending };
-  }
-  const concurrency = config.analyzer.loudnessConcurrency;
-  logEvent(
-    'info',
-    `Measuring whole-file loudness for ${ids.length.toLocaleString('en-GB')} tracks ` +
-      `(${before.pending.toLocaleString('en-GB')} pending, ${before.done.toLocaleString('en-GB')} done, ${concurrency} at a time)…`,
-  );
-  reportProgress({ phase: 'analyze', label: 'Measuring whole-file loudness', done: 0, total: ids.length });
-
-  const quietGate: QuietGate = { state: { quietSince: null }, paused: false };
-  let measured = 0;
-  let failed = 0;
-  let done = 0;
-  let consecutiveFailures = 0;
-  let aborted = false;
-  let measuredSeconds = 0;
-  let pendingStamps: string[] = [];
-  const flush = () => {
-    for (const id of pendingStamps) {
-      try {
-        db.recordWholeFileLoudnessFailure(id);
-      } catch (err: any) {
-        console.error(`[analyze] ${id} loudness failure stamp failed: ${err?.message || err}`);
-      }
-    }
-    pendingStamps = [];
-  };
-  class Skipped extends Error {}
-
-  await dispatchAnalysis(ids, {
-    concurrency,
-    beforeStart: async () => {
-      if (!aborted) await waitForQuiet(quietGate, { done, total: ids.length });
-    },
-    run: async (id) => {
-      if (aborted) throw new Skipped('pass stopped');
-      const m = await analyzer.measureWholeFileLoudness(id);
-      db.recordWholeFileLoudness(id, m);
-      return m;
-    },
-    onOutcome: (outcome, id) => {
-      done += 1;
-      if (outcome.status === 'fulfilled') {
-        measured += 1;
-        measuredSeconds += outcome.value.seconds ?? 0;
-        consecutiveFailures = 0;
-        flush();
-      } else if (!(outcome.reason instanceof Skipped)) {
-        failed += 1;
-        consecutiveFailures += 1;
-        const reason: any = outcome.reason;
-        console.error(`[analyze] ${id} whole-file loudness failed: ${reason?.message || reason}`);
-        if (failureCountsAgainstTrack(consecutiveFailures)) {
-          pendingStamps.push(id);
-        } else if (!aborted) {
-          // An outage, not a bad file: stamp nobody and stop this batch; the
-          // next pass retries from the same place.
-          aborted = true;
-          pendingStamps = [];
-          logEvent(
-            'warning',
-            `${SYSTEMIC_FAILURE_RUN + 1} whole-file loudness measurements in a row failed — stopping this batch ` +
-              'without counting them against any track (is the analyzer or the music server reachable?)',
-          );
-        }
-      }
-      if (done % 25 === 0 || done === ids.length) {
-        console.log(`[analyze] whole-file loudness ${done}/${ids.length} (ok=${measured} fail=${failed})`);
-        reportProgress({
-          phase: 'analyze',
-          label: 'Measuring whole-file loudness',
-          done,
-          total: ids.length,
-          errors: failed || undefined,
-        });
-      }
-    },
-  });
-  // A trailing run shorter than the systemic threshold is about its files.
-  if (!aborted) flush();
-
-  const after = db.wholeFileLoudnessCounts();
-  const avg = measured > 0 ? ` · ${(measuredSeconds / measured).toFixed(1)} s per track` : '';
-  logEvent(
-    failed > 0 ? 'warning' : 'success',
-    `Whole-file loudness measured for ${measured.toLocaleString('en-GB')} tracks${avg}` +
-      (failed > 0 ? ` · ${failed.toLocaleString('en-GB')} failed` : '') +
-      (after.pending > 0 ? ` · ${after.pending.toLocaleString('en-GB')} still pending` : ' · library complete'),
-  );
-  return { measured, failed, scope: ids.length, pending: after.pending };
+  return { available: true, backend, analyzed, failed, scope: ids.length, audioEmbedded, vocalAnalyzed };
 }

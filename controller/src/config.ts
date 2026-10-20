@@ -91,6 +91,18 @@ export const config = {
     // single-flight (one line-protocol worker cannot multiplex).
     concurrency: envInt('ANALYZE_CONCURRENCY', 1, { min: 1, max: 8 }),
     requestTimeoutMs: envInt('ANALYZE_REQUEST_TIMEOUT_MS', 120_000),
+    // A request carrying the whole-file facets (loudness v2, edges) reads the
+    // whole file, so it gets its own deadline; kept above the worker's own
+    // ANALYZE_WHOLE_FILE_TIMEOUT_S (900 s) so the worker reports its timeout.
+    wholeFileTimeoutMs: envInt('ANALYZE_WHOLE_FILE_TIMEOUT_MS', 960_000, { min: 1000 }),
+    // In-flight jobs for a pass that plans ONLY whole-file facets: the sidecar
+    // runs those in their own lane (no model, one CPU thread each), so they can
+    // go wider than ANALYZE_CONCURRENCY. Capped by the sidecar's own figure.
+    wholeFileConcurrency: envInt('ANALYZE_WHOLE_FILE_CONCURRENCY', 4, { min: 1, max: 32 }),
+    // Opt-in backfill of the whole-file facets on every regular analysis run
+    // (off = upgrade byte-identical). Without it they run only when asked for
+    // (`npm run analyze -- --facets loudness,edges`).
+    wholeFile: ['1', 'true', 'yes', 'on'].includes(envStr('ANALYZE_WHOLE_FILE', '').toLowerCase()),
     // Shorter deadline for transition renders: they run inside the pair-drain
     // window and must lose the race to the drain's fallback crossfade.
     renderTimeoutMs: envInt('ANALYZE_RENDER_TIMEOUT_MS', 60_000),
@@ -98,26 +110,6 @@ export const config = {
     // the MISS is timed; a backend that answered is remembered for the process
     // lifetime. 0 disables the caching.
     missProbeIntervalMs: envInt('ANALYZE_PROBE_MS', 60_000, { min: 0 }),
-    // Whole-file loudness (B13): integrated loudness + true peak over the WHOLE
-    // file, replacing the analysis window's figures as the playback gain's
-    // input. Off unless enabled: turning it on re-reads every file in the
-    // library once (a full download per track), so an upgrade alone must not
-    // start it. See docs/internals/music.md "Whole-file loudness".
-    wholeFileLoudness: envStr('ANALYZE_WHOLE_FILE_LOUDNESS', '').toLowerCase(),
-    // Loudness passes in flight. Each is one ffmpeg process on one CPU thread
-    // with no model, so it can go wider than ANALYZE_CONCURRENCY; the sidecar
-    // caps what it accepts with its own ANALYZE_LOUDNESS_CONCURRENCY.
-    loudnessConcurrency: envInt('ANALYZE_LOUDNESS_CONCURRENCY', 2, { min: 1, max: 32 }),
-    // Cap on tracks re-measured per analysis pass; 0 (default) = the whole
-    // backlog. The pass is resumable (a track's stamp is its progress) and the
-    // quiet gate pauses it, so the cap is only for an operator who wants a
-    // library-wide re-measure spread over several runs.
-    loudnessBatch: envInt('ANALYZE_LOUDNESS_BATCH', 0, { min: 0 }),
-    // One file's wall-clock bound (a long mix streamed over the network is the
-    // slow case).
-    // Same variable (and unit) as the analyzer sidecar's, so one .env line
-    // sets both.
-    loudnessTimeoutMs: envInt('ANALYZE_LOUDNESS_TIMEOUT_S', 900, { min: 30, max: 7200 }) * 1000,
   },
   kokoro: {
     python: envStr('KOKORO_PYTHON', '/opt/kokoro/venv/bin/python'),
