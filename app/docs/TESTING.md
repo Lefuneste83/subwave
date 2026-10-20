@@ -194,6 +194,16 @@ properly judged on a **physical device** — the remote-control wiring lives in
 `service.ts` (Play/Pause/Stop; Next/Seek intentionally omitted for a live
 stream).
 
+On Android, `PlaybackService` must **never resolve**. It runs as RNTP's
+headless JS task, and React Native fires JS timers behind a paused activity only
+while a headless task is active. Every background poll is a timer, including the
+`/now-playing` poll that feeds lock-screen and Bluetooth metadata. RN 0.85 never
+registered `HeadlessJsTaskSupport` under bridgeless, so the task never finished.
+RN 0.86 (Expo SDK 57) registers it, and app 1.6.0 shipped with metadata frozen
+behind the lock screen until the phone was unlocked. Device check: tune in, lock
+the phone, and wait through a track change. The notification (or a Bluetooth
+head unit) should show the new title without unlocking.
+
 ### CarPlay — Now-Playing in the car (iOS only)
 
 Scope is **Tier 1**: control the *already-playing* stream from the dash (metadata,

@@ -393,20 +393,156 @@ jingle_now_queue.on_metadata(synchronous=false, fun (m) -> begin
 end)
 
 # AUTONOMOUS FALLBACK — the controller maintains auto.m3u with mood-appropriate
-# tracks; reload_mode="watch" picks up its rewrites.
-
-auto_playlist = playlist(
-  id="auto",
-  reload_mode="watch",
-  mode="randomize",
-  "#{state_dir}/auto.m3u"
+# tracks and sends `auto.reload` after every write (scheduler.ts).
+#
+# A playlist keeps the track it will play next as its `current` request, apart
+# from its queue, and reload() empties only the queue (stdlib playlist.liq). So
+# while a DJ pick is on air the playlist already holds its next track: after an
+# idle pause that resumes into another show, a reload left that old-show track
+# to air first. The fallback's slot is therefore a source.dynamic: when the
+# playlist is not the one on air, `auto.reload` commits a fresh instance, which
+# drops whatever the old one prepared; when it is on air, a plain reload, and the
+# controller's skip ends the track. `OK` means the old fallback is gone.
+#
+# The instances do not watch auto.m3u themselves: radio.liq watches it once
+# (below) and reloads only contents no reload has read yet. The controller's
+# write is followed by `auto.reload` at once, and a playlist's own watch would
+# reload that same write again 0.5s later, emptying the queue `auto.ready` had
+# just reported, so a resume skip landing then aired the emergency loop. Pinned
+# by scripts/liquidsoap-resume-fallback.py. register_server_commands=false:
+# every instance would register auto.skip/auto.next/auto.uri again (nothing
+# calls them); radio.liq registers auto.reload and auto.ready below.
+auto_m3u = "#{state_dir}/auto.m3u"
+def make_auto_playlist() =
+  playlist(
+    id="auto",
+    register_server_commands=false,
+    reload_mode="never",
+    mode="randomize",
+    auto_m3u
+  )
+end
+auto_playlist = ref(make_auto_playlist())
+pending_auto_playlist = ref(null)
+# self_sync=false: a playlist never drives its own clock, and cross() below
+# refuses a source that may.
+auto_slot = source.dynamic(
+  id="auto_slot",
+  self_sync=false,
+  init=auto_playlist(),
+  # The clock thread calls this, while only the server thread below stores a
+  # source; clearing only what was taken never drops one stored meanwhile.
+  fun () -> begin
+    next = pending_auto_playlist()
+    if null.defined(next) then pending_auto_playlist := null end
+    next
+  end
 )
+
+# Whether the track on air is the playlist's own. Any other track (a DJ pick,
+# a request, a jingle below) means the playlist has moved its next track into
+# its current request. A frozen (idle-paused) track keeps the value, which is
+# what a resume asks about.
+auto_on_air = ref(false)
+dj_queue.on_track(synchronous=true, fun (_) -> auto_on_air := false)
+auto_slot.on_track(synchronous=true, fun (_) -> auto_on_air := true)
+
+# What the last reload read from auto.m3u. The watch below skips a write this
+# already holds; `auto.reload` always reloads.
+def read_auto_m3u() =
+  try
+    file.contents(auto_m3u)
+  catch err do
+    log(label="subwave", "auto.m3u unreadable (#{err})")
+    ""
+  end
+end
+auto_m3u_loaded = ref(read_auto_m3u())
+
+server.register(
+  namespace="auto",
+  "reload",
+  description="Reload auto.m3u; off air, a fresh playlist replaces the one holding a prepared track",
+  usage="reload",
+  fun (_) -> begin
+    auto_m3u_loaded := read_auto_m3u()
+    if auto_on_air() then
+      auto_playlist().reload()
+    else
+      fresh = make_auto_playlist()
+      auto_playlist := fresh
+      # The prepared source carries the activation the slot releases when it
+      # replaces it, which shuts the old instance and its request down.
+      pending_auto_playlist := auto_slot.prepare(fresh)
+      # Commit now: the slot only takes a prepared source when asked whether it
+      # is ready, and while DJ picks air nothing asks, sometimes for hours. A
+      # later reload would then reload the pending instance in place, keeping
+      # the track it had prepared.
+      ignore(auto_slot.is_ready())
+    end
+    "OK"
+  end
+)
+
+# Whether the fallback has a track ready to air: a fresh instance fetches its
+# first track after auto.reload, and the controller waits for it before a resume
+# skip, or the skip would air the emergency loop until it arrives. Reloaded in
+# place (on air), the playlist is ready only for the track it is playing: wait
+# for the next one in its queue (queued requests are resolved).
+server.register(
+  namespace="auto",
+  "ready",
+  description="Report whether the fallback has a track ready: ready / pending",
+  usage="ready",
+  fun (_) -> begin
+    ready = if auto_on_air() then list.length(auto_playlist().queue()) > 0 else auto_slot.is_ready() end
+    ready ? "ready" : "pending"
+  end
+)
+
+# The backup for a write whose `auto.reload` never arrived: reload the playlist
+# in place, as a playlist's own watch would (an off-air one keeps the track it
+# prepared until the next `auto.reload`). Settled like the stdlib's watch, so a
+# writer that truncates first is read once it is done. Only the server thread
+# replaces the instance; this thread never stores one. Never raises: it runs
+# in thread.run.
+auto_watch_scheduled = ref(false)
+def auto_m3u_changed() =
+  if
+    not auto_watch_scheduled()
+  then
+    auto_watch_scheduled := true
+    thread.run(
+      delay=0.5,
+      fun () ->
+        begin
+          auto_watch_scheduled := false
+          contents = read_auto_m3u()
+          if
+            contents != auto_m3u_loaded()
+          then
+            auto_m3u_loaded := contents
+            try
+              auto_playlist().reload()
+            catch err do
+              log(label="subwave", "auto.m3u watch reload failed (#{err})")
+            end
+          end
+        end
+    )
+  end
+end
+try
+  if file.exists(auto_m3u) then ignore(file.watch(auto_m3u, auto_m3u_changed)) end
+catch err do
+  log(label="subwave", "auto.m3u is not watched (#{err}); only auto.reload re-reads it")
+end
 
 # MAIN MUSIC SOURCE — queue takes priority, falls back to autonomous.
 music = fallback(
   id="music",
   track_sensitive=true,
-  [dj_queue, auto_playlist]
+  [dj_queue, auto_slot]
 )
 
 # HARD TRACK-LENGTH CAP (#447) — the controller stamps liq_cue_out on autonomous
@@ -1299,6 +1435,8 @@ music = fallback(
   track_sensitive=true,
   [jingle_now, music]
 )
+# A jingle on air also means the playlist has moved past its last track.
+music.on_track(synchronous=true, fun (m) -> if m["subwave_jingle"] == "true" then auto_on_air := false end)
 
 # Per-track loudness normalisation: the controller stamps `liq_amplify`
 # ("<n> dB") on any track with a measured LUFS. BEFORE the cross so each track
@@ -1561,7 +1699,7 @@ intro = mic_chain(amplify(override="liq_amplify", 1., edge_fade(intro_queue)))
 #
 # The fade-in is NOT a debounce and must never become one. track_sensitive=false
 # switches the instant `music` reports not-ready, including on brief real gaps
-# (cold boot before auto.m3u resolves, a seam where dj_queue and auto_playlist
+# (cold boot before auto.m3u resolves, a seam where dj_queue and auto_slot
 # are both momentarily unready). Delaying the switch is the wrong fix: fire
 # immediately and ramp the LEVEL. The music branch keeps the stdlib identity
 # transition because coming BACK must be instant.

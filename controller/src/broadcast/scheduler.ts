@@ -580,9 +580,8 @@ async function refreshAutoPlaylistInner(canPublish: () => boolean): Promise<Refr
       cueOutSec: trim.cueOutSec,
     });
   })];
-  // Atomic replace: Liquidsoap watches this file (reload_mode="watch"), so an
-  // in-place write can trigger a reload of a truncated playlist.
-  // A pause can land during catalogue work. Do not trigger either watcher or
+  // Atomic replace, so a reload never reads a half-written playlist.
+  // A pause can land during catalogue work. Do not publish or send the
   // telnet reload in that case; already-started work cannot be cancelled.
   const currentContext = { ...ctx, at: new Date().toISOString() };
   const currentShow = settings.resolveActiveShow();
@@ -595,11 +594,12 @@ async function refreshAutoPlaylistInner(canPublish: () => boolean): Promise<Refr
   // between the freshness check and rename. Catalogue work stays asynchronous.
   writeFileAtomicSync(config.liquidsoap.autoPlaylist, lines.join('\n'));
   coastOnDisk = coastContents(pool, builtAt);
-  // The atomic rename swaps the inode, so the inotify watch can orphan itself
-  // and loop a stale snapshot forever (#874). Force a telnet reload;
-  // best-effort, so an unreachable mixer never fails the refresh.
+  // Reload over telnet; radio.liq's file watch only re-reads a write this
+  // reload never reached. Off air, radio.liq replaces the playlist, dropping a
+  // track the old one had already prepared; best-effort, so an unreachable
+  // mixer never fails the refresh.
   const reloaded = await reloadAutoPlaylist();
-  if (!reloaded) queue.log('scheduler', 'Auto-playlist written but telnet reload failed — relying on inotify watch');
+  if (!reloaded) queue.log('scheduler', 'Auto-playlist written but the mixer did not confirm the reload — the file watch re-reads it; an off-air playlist is replaced on the next refresh');
 
   // Surface a silently-degraded strict genre and a too-thin strict pool (#629).
   if (strict && showGenres.length && !genreNames.length) {
@@ -633,7 +633,7 @@ async function refreshAutoPlaylistInner(canPublish: () => boolean): Promise<Refr
   // Every writer stamps, or the next boundary rebuilds a file already built for
   // this show (#1111).
   autoPlaylistBuild.built(show);
-  return 'refreshed';
+  return reloaded ? 'refreshed' : 'unreloaded';
 }
 
 // ---------------------------------------------------------------------------
