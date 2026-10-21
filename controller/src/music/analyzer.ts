@@ -88,6 +88,9 @@ export interface AnalysisResult {
   edgeLeadMs?: number | null;
   edgeTailMs?: number | null;
   decodedDurationMs?: number | null;
+  // Tail facet: true when the analyzer placed the tail window from the
+  // `tailWindow` it was sent (it then ends where the music stops: tail v2).
+  tailPlaced?: boolean;
 }
 
 // The outgoing track's measured ending. Timestamps are absolute ms.
@@ -252,6 +255,7 @@ interface WorkerMessage {
   edge_lead_ms?: unknown;
   edge_tail_ms?: unknown;
   decoded_duration_ms?: unknown;
+  tail_window?: unknown;
   // Facet-shape answer.
   facets?: Record<string, { status?: string; reason?: string; data?: WorkerMessage }>;
   source?: Record<string, unknown>;
@@ -447,6 +451,7 @@ function toAnalysisResult(msg: WorkerMessage): AnalysisResult {
           edgeLeadMs: parseSilenceMs(msg.edge_lead_ms),
           edgeTailMs: parseSilenceMs(msg.edge_tail_ms),
           decodedDurationMs: parseSilenceMs(msg.decoded_duration_ms),
+          tailPlaced: msg.tail_window === 'edges',
   };
 }
 
@@ -1112,6 +1117,9 @@ export type FacetName = 'head' | 'loudness' | 'tail' | 'clap' | 'vocal' | 'stems
 export const WHOLE_FILE_FACET_NAMES: readonly FacetName[] = ['loudness', 'edges'];
 const readsWholeFile = (body: Record<string, unknown>) =>
   Array.isArray(body.facets) && body.facets.some(f => (WHOLE_FILE_FACET_NAMES as readonly unknown[]).includes(f));
+// A placed tail window may be decoded from the stream URL (a capped copy cannot
+// reach it), so it needs the URL and the whole-file timeout too.
+const readsStream = (body: Record<string, unknown>) => readsWholeFile(body) || body.tail_window != null;
 export type FacetAnswerStatus = 'ok' | 'unmeasurable' | 'unavailable' | 'failed';
 
 export interface FacetAnswer {
@@ -1137,11 +1145,30 @@ export interface FacetAnalysis {
   source: FacetSourceInfo;
 }
 
+// Where the music stops, from the stored edges: the tail window ends there
+// instead of at the end of the file.
+export interface TailWindow {
+  endMs: number;
+  durationMs: number;
+}
+
+// The placement the stored edges give, or null when they are unmeasured or
+// leave nothing to place (a wholly silent file).
+export function tailWindowFor(t: { edgeTailMs?: number | null; decodedDurationMs?: number | null } | null | undefined): TailWindow | null {
+  const dur = t?.decodedDurationMs;
+  const tail = t?.edgeTailMs;
+  if (dur == null || tail == null || !Number.isFinite(dur) || !Number.isFinite(tail)) return null;
+  const endMs = Math.round(dur - tail);
+  return endMs > 0 && endMs <= dur ? { endMs, durationMs: Math.round(dur) } : null;
+}
+
 export interface FacetRequestOpts {
   facets: FacetName[];
   // Tail-only requests: read the file's end by HTTP Range (the backend falls
   // back to its capped download when it can't prove the end that way).
   ranged?: boolean;
+  // Tail facet: place the window from the stored edges.
+  tailWindow?: TailWindow | null;
   // Tail facet also carries the outro's vocal ranges (Demucs on the tail only).
   tailVocals?: boolean;
   stems_dir?: string;
@@ -1201,7 +1228,7 @@ export function parseFacetAnswer(msg: WorkerMessage): FacetAnalysis {
 async function facetRequest(body: Record<string, unknown>): Promise<FacetAnalysis> {
   const backend = await resolveBackend();
   if (!backend) throw new Error('no analysis backend available');
-  const timeoutMs = readsWholeFile(body)
+  const timeoutMs = readsStream(body)
     ? Math.max(config.analyzer.requestTimeoutMs, config.analyzer.wholeFileTimeoutMs)
     : config.analyzer.requestTimeoutMs;
   let msg: WorkerMessage;
@@ -1235,6 +1262,9 @@ export async function analyzeFacets(
   const body: Record<string, unknown> = { facets: opts.facets };
   if (opts.ranged) body.ranged = true;
   if (opts.tailVocals) body.tail_vocals = true;
+  if (opts.tailWindow && opts.facets.includes('tail')) {
+    body.tail_window = { end_ms: opts.tailWindow.endMs, duration_ms: opts.tailWindow.durationMs };
+  }
   // A stems target always travels with stems_require_marker, as on the flat
   // path, so an unmounted share on the analyzer's machine is never written to.
   const stems = opts.stems_dir ? { stems_dir: opts.stems_dir, stems_require_marker: true } : {};
@@ -1247,7 +1277,7 @@ export async function analyzeFacets(
       ...(opts.complete !== undefined ? { complete: opts.complete } : {}),
       // The whole-file facets read the stream URL unless the staged copy is
       // known to be complete; the worker decides, never the sidecar.
-      ...(readsWholeFile(body) ? { stream_url: url } : {}),
+      ...(readsStream(body) ? { stream_url: url } : {}),
       ...stems,
     });
   } catch (err) {

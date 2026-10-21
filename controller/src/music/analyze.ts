@@ -464,9 +464,12 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
   const useFacets = !!plan && (await analyzer.facetsAvailable()) === true;
   // Read after facetsAvailable(): a local worker has sent its ready message by then.
   const rangedOk = useFacets && analyzer.rangedTailAvailable() === true;
+  // A tail the stored edges can place reads its own window (staged copy, or
+  // just the window from the stream): the ranged end-of-file read is for an
+  // unplaced tail only.
   const isRanged = (id: string): boolean => {
     const f = plannedFacets.get(id);
-    return rangedOk && !!f && f.length === 1 && f[0] === 'tail';
+    return rangedOk && !!f && f.length === 1 && f[0] === 'tail' && !analyzer.tailWindowFor(db.getTrack(id));
   };
   if (plan) {
     logEvent(
@@ -600,6 +603,8 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
   ): Promise<TrackWorkResult> => {
     const facets = plannedFacets.get(id)!;
     const ranged = isRanged(id);
+    // The tail window ends where the music stops, when the edges are known.
+    const tailWindow = facets.includes('tail') ? analyzer.tailWindowFor(db.getTrack(id)) : null;
     const stems_dir = facets.includes('stems')
       ? (admittedStems ? admittedStems.dir : allocateStems(id))
       : undefined;
@@ -613,7 +618,10 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
       !(f === 'vocal' && lyricVocal) && !(f === 'stems' && !stems_dir));
     const res = requestedFacets.length ? await analyzer.analyzeFacets(
       id,
-      { facets: requestedFacets, ranged, tailVocals: tailVocals && !lyricVocal, stems_dir, complete: localComplete },
+      {
+        facets: requestedFacets, ranged, tailVocals: tailVocals && !lyricVocal, stems_dir, complete: localComplete,
+        tailWindow,
+      },
       ranged ? undefined : (localPath ?? undefined),
     ) : null;
     if (res?.source.kind === 'ranged') {
@@ -662,7 +670,8 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
         }
         w.edges = { leadMs: r.edgeLeadMs, tailMs: r.edgeTailMs, durationMs: r.decodedDurationMs };
       } else if (f === 'tail') {
-        w.tail = { outro: r.outro, tailSilenceMs: r.tailSilenceMs, tailStartMs: r.tailStartMs };
+        w.tail = { outro: r.outro, tailSilenceMs: r.tailSilenceMs, tailStartMs: r.tailStartMs,
+          version: r.tailPlaced ? 2 : null };
       } else if (f === 'clap' && r.audioEmbedding?.length === db.AUDIO_EMBEDDING_DIM) {
         w.clap = r.audioEmbedding;
         wroteClap = true;

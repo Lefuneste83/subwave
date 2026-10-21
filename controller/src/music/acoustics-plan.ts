@@ -196,9 +196,10 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
   }
   if (facets.includes('tail')) {
     warnings.push(
-      'tail: FLAC, MP3, WAV, AIFF and DSF are read by HTTP range on an analyzer that supports it; m4a/Opus, ' +
-        'VBR MP3 without a length header, compressed WAV and older analyzers use the capped download, ' +
-        'where a large file can come back unmeasurable again',
+      'tail: the window ends where the music stops when the edges facet is measured (run `--facets edges` first); ' +
+        'without edges it is the end of the file, and the tail stays due. An unplaced tail: FLAC, MP3, WAV, AIFF ' +
+        'and DSF are read by HTTP range on an analyzer that supports it; m4a/Opus, VBR MP3 without a length header, ' +
+        'compressed WAV and older analyzers use the capped download, where a large file can come back unmeasurable again',
     );
   }
   if (facets.includes('stems')) {

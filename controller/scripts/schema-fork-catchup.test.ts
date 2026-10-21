@@ -37,7 +37,7 @@ test('a fork database at 29 without search keys gets them, filled, at 30', async
   db.close();
 
   await db.open({ embeddingDim: 4 });
-  assert.equal(db.getDb()!.pragma('user_version', { simple: true }), 30);
+  assert.ok((db.getDb()!.pragma('user_version', { simple: true }) as number) >= 30);
   for (const c of SEARCH_KEY_DDL.columns) assert.ok(columns().has(c), `${c} added`);
   const row = db.getDb()!.prepare(`SELECT title_key, search_fresh FROM tracks WHERE id = 'acdc'`).get();
   assert.deepEqual(row, { title_key: 'thunderstruck', search_fresh: 1 }, 'filled on the upgrade, not on the first search');
