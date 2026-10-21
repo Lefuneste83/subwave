@@ -488,6 +488,16 @@ export async function migrate(embeddingDim: number, reseed = false, adoptStoredD
     d.pragma('user_version = 30');
   }
 
+  if (userVersion < 31) {
+    // `tail_version` says which window outro_json/tail_silence_ms/tail_start_ms
+    // were measured on: NULL = the file's last ANALYZE_OUTRO_SECONDS, 2 = a
+    // window ending where the music stops, placed from the stored edges and
+    // confirmed by the analyzer. Added only when missing, like step 30.
+    const have = (d.prepare('PRAGMA table_info(tracks)').all() as Array<{ name: string }>).some(c => c.name === 'tail_version');
+    if (!have) runDdl(d, 'ALTER TABLE tracks ADD COLUMN tail_version INTEGER;');
+    d.pragma('user_version = 31');
+  }
+
   // Before the vector reconcile below, which bumps it when it drops vectors.
   // Never throws. Its update trigger names tracks.genres and tracks.moods, and
   // SQLite refuses to DROP COLUMN either while it exists: a migration above
