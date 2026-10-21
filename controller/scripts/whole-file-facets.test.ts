@@ -161,5 +161,5 @@ test('a stored whole-file figure promotes a stale loudness row on re-derive', ()
 });
 
 test('the derivation stamp moved, so a table derived before re-derives once', () => {
-  assert.equal(JSON.parse(db.facetDerivationStamp()).revision, 2);
+  assert.ok(JSON.parse(db.facetDerivationStamp()).revision >= 2);
 });

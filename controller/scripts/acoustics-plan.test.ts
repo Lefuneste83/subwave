@@ -177,7 +177,8 @@ test('failed includes tracks past the retry limit (explicit retry)', () => {
 
 test('missing / outdated / all', () => {
   assert.deepEqual(planned(plan('clap', 'missing')), ['c', 'e']);
-  assert.deepEqual(planned(plan('tail', 'outdated')), ['e']);
+  // a and b have no edges: their tails sit on the end-of-file window (v1).
+  assert.deepEqual(planned(plan('tail', 'outdated')), ['a', 'b', 'e']);
   assert.deepEqual(planned(plan('head', 'all')), ['a', 'b', 'c', 'd', 'e']);
 });
 
@@ -355,7 +356,8 @@ test('a tail-only plan sends a ranged tail request and writes only the tail', as
   assert.equal(t.tailStartMs, 211_500);
   assert.equal(t.bpm, 128, 'a tail-only answer must not rewrite BPM');
   assert.equal(t.loudnessLufs, -8, 'a tail-only answer must not rewrite loudness');
-  assert.deepEqual(facetRow('t1', 'tail'), { status: 'ok', reason: null, source: 'ranged', version: db.FACET_VERSIONS.tail });
+  // No edges stored, so no placement: the end-of-file window's version.
+  assert.deepEqual(facetRow('t1', 'tail'), { status: 'ok', reason: null, source: 'ranged', version: db.FACET_VERSIONS.tail - 1 });
 });
 
 test('with vocal activity on, a tail-only request asks for the tail vocals and stores them', async () => {
