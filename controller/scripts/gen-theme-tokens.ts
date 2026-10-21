@@ -18,6 +18,8 @@ import {
   SWATCH_KEYS,
   DISPLAY_FONT_IDS,
   MONO_FONT_IDS,
+  TEXTURE_IDS,
+  FINISH_IDS,
 } from '../src/theme-tokens.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -34,6 +36,7 @@ const body = `// GENERATED FILE — do not edit by hand.
 export type TokenType = ${types};
 export type TokenGroup = ${groups};
 export type FontSet = 'display' | 'mono';
+export type KeywordSet = 'texture' | 'finish';
 
 export interface TokenDescriptor {
   key: string;
@@ -41,6 +44,7 @@ export interface TokenDescriptor {
   group: TokenGroup;
   type: TokenType;
   fontSet?: FontSet;
+  keywordSet?: KeywordSet;
 }
 
 export const THEME_TOKENS: readonly TokenDescriptor[] = ${JSON.stringify(THEME_TOKENS, null, 2)};
@@ -54,6 +58,12 @@ export type DisplayFontId = (typeof DISPLAY_FONT_IDS)[number];
 
 export const MONO_FONT_IDS = ${JSON.stringify([...MONO_FONT_IDS])} as const;
 export type MonoFontId = (typeof MONO_FONT_IDS)[number];
+
+export const TEXTURE_IDS = ${JSON.stringify([...TEXTURE_IDS])} as const;
+export type TextureId = (typeof TEXTURE_IDS)[number];
+
+export const FINISH_IDS = ${JSON.stringify([...FINISH_IDS])} as const;
+export type FinishId = (typeof FINISH_IDS)[number];
 `;
 
 writeFileSync(OUT, body);

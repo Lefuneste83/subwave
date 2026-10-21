@@ -12,6 +12,35 @@
   independent. Operators who already reconfigured profiles under #1777 must
   mark those profiles before upgrading. See [upgrade and recovery steps](docs/multi-station.md#upgrading-existing-profiles).
 
+## [1.26.0](https://github.com/perminder-klair/subwave/compare/v1.25.0...v1.26.0) (2026-10-21)
+
+
+### Features
+
+* **dash:** never play the track on air, from the Dash ([#2011](https://github.com/perminder-klair/subwave/issues/2011)) ([88f2a41](https://github.com/perminder-klair/subwave/commit/88f2a41689e46790e4acfbdaf78e6e01b65c0e34))
+* **library:** query language in the Library tab search ([#1955](https://github.com/perminder-klair/subwave/issues/1955)) ([9acf334](https://github.com/perminder-klair/subwave/commit/9acf3344f57d0d31fcd85f1a7783aba9cf80a938))
+* **picker:** opt-in genre run guard for the Agentic picker ([#2007](https://github.com/perminder-klair/subwave/issues/2007)) ([d9652ea](https://github.com/perminder-klair/subwave/commit/d9652ea6bf56995e6a7b901374713575877f60fe))
+* **skip:** let /dj/skip refuse when the expected track is no longer on air ([#2023](https://github.com/perminder-klair/subwave/issues/2023)) ([bcc3a93](https://github.com/perminder-klair/subwave/commit/bcc3a932fa6cd0c6c0d1279ef8112869ce50703a))
+* **web:** give AXO-1 depth — a real dust cover, rack joints that meet, raised controls ([#2013](https://github.com/perminder-klair/subwave/issues/2013)) ([13518df](https://github.com/perminder-klair/subwave/commit/13518df569bcda31492f5d459221e4821bed0fc2))
+
+
+### Bug Fixes
+
+* **app:** keep Android metadata updating behind the lock screen ([#2012](https://github.com/perminder-klair/subwave/issues/2012)) ([d2d84a1](https://github.com/perminder-klair/subwave/commit/d2d84a16541625353ee8e437291613d607d66800))
+* **controller:** drop stale programme on resume ([#1925](https://github.com/perminder-klair/subwave/issues/1925)) ([6bebad7](https://github.com/perminder-klair/subwave/commit/6bebad7a1e6eb3ff72443abd189bfed6e9e5e8e5))
+* **controller:** run llm-bench and leanings:replay on a disposable state copy ([#2025](https://github.com/perminder-klair/subwave/issues/2025)) ([20ff360](https://github.com/perminder-klair/subwave/commit/20ff36089ae28e7afcdea3af3172827c69e8f57f))
+* **controller:** run test:llm and test:connect through the test runner ([#2020](https://github.com/perminder-klair/subwave/issues/2020)) ([3c44a52](https://github.com/perminder-klair/subwave/commit/3c44a52f29eececcd34e2180980c926592261ccc))
+* **dash:** decide the never-play skip on the refetch's own answer ([#2022](https://github.com/perminder-klair/subwave/issues/2022)) ([e7789c6](https://github.com/perminder-klair/subwave/commit/e7789c6f4dee98ea3141043694f8fda53cc19391))
+* **jingles:** reload the mixer's jingle rotate after every playlist write ([#2021](https://github.com/perminder-klair/subwave/issues/2021)) ([101ab54](https://github.com/perminder-klair/subwave/commit/101ab547cce760a15aa812d8f2d5a982d81c2cac))
+* **liquidsoap:** a jingle that has started plays to its end, and a back-to-back jingle carries its wait ([#2028](https://github.com/perminder-klair/subwave/issues/2028)) ([aaaea56](https://github.com/perminder-klair/subwave/commit/aaaea562393f19afeb6e591f226f88d465ad20ac))
+* **liquidsoap:** write the jingle marker where a jingle goes on air ([#2027](https://github.com/perminder-klair/subwave/issues/2027)) ([be8b6ba](https://github.com/perminder-klair/subwave/commit/be8b6bafa08147ca60f6fd0552bdc9e7783c0ff3))
+* **requests:** preserve named recordings and recover honest alternatives ([#1965](https://github.com/perminder-klair/subwave/issues/1965)) ([704fa06](https://github.com/perminder-klair/subwave/commit/704fa06eb075ce10d0edcfba29ff00338598cd84))
+
+
+### Performance
+
+* **analyzer:** add DEMUCS_OVERLAP knob ([#2014](https://github.com/perminder-klair/subwave/issues/2014)) ([0447bc4](https://github.com/perminder-klair/subwave/commit/0447bc45284dd5a701650df4128285339e6925d8))
+
 ## [1.25.0](https://github.com/perminder-klair/subwave/compare/v1.24.0...v1.25.0) (2026-10-18)
 
 
