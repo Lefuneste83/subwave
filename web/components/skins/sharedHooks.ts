@@ -4,10 +4,12 @@
 // here reads only the core contexts, per the skin contract (see types.ts);
 // wording and layout stay with each skin.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { RefObject } from 'react';
 import { useReducedMotion } from 'motion/react';
 import { usePlayerActions, usePlayerFeed } from '@/components/player/PlayerCore';
 import { useLiteMode } from '@/hooks/useLiteMode';
+import { isRefusedOutcome } from '@/lib/request-outcome';
 import { lastVoiceLine, voiceOnAirMs } from './shared';
 
 /** Whether a skin may run a JS-driven (motion) transition right now. Lite
@@ -101,7 +103,7 @@ export function useRequestSlip(copy: RequestSlipCopy): RequestSlip {
     const deadline = Date.now() + POLL_DEADLINE_MS;
     const tick = async () => {
       if (pollStopRef.current) return;
-      if (Date.now() > deadline) return; // give up quietly; accepted line stands
+      if (Date.now() > deadline) return;
       const data = await pollRequest(requestId);
       if (pollStopRef.current) return;
       if (data?.status === 'resolved') {
@@ -110,12 +112,10 @@ export function useRequestSlip(copy: RequestSlipCopy): RequestSlip {
           typeof data.queuePosition === 'number' && data.queuePosition > 0
             ? ` — #${data.queuePosition} in the queue`
             : '';
-        setAck(
-          data.ack ||
-            (t?.title
-              ? `Lining up “${t.title}”${t.artist ? ` by ${t.artist}` : ''}${pos}.`
-              : copy.sent),
-        );
+        const refused = isRefusedOutcome(data.outcome);
+        const identity = t?.title ? `“${t.title}”${t.artist ? ` by ${t.artist}` : ''}` : '';
+        setAck([data.ack || (identity ? `Lining up ${identity}${pos}.` : copy.sent), data.ack && identity ? identity : ''].filter(Boolean).join(' '));
+        setOutcome(refused ? 'refused' : 'sent');
         return;
       }
       if (data?.status === 'failed') {
@@ -263,4 +263,32 @@ export function useVolumeNudge(): (delta: number) => void {
       setVolume(v => Math.min(1, Math.max(0, Math.round((v + delta) * 100) / 100))),
     [setVolume],
   );
+}
+
+/** Squeeze any SVG `<text>` under `rootRef` that carries `data-fit="<room>"`
+ *  and runs past that room. A skin that sets legends inside a drawing lays
+ *  them out by character budget, which can't know the theme's face, so each
+ *  row is measured once drawn. Re-measures when `key` changes and again once
+ *  web fonts land; an empty key skips. Measuring isn't motion, so this runs in
+ *  lite and reduced motion too. A hidden tree measures zero and is left alone. */
+export function useSvgTextFit(rootRef: RefObject<Element | null>, key: string): void {
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root || !key) return;
+    const fit = () => {
+      for (const el of root.querySelectorAll<SVGTextElement>('[data-fit]')) {
+        el.removeAttribute('textLength');
+        el.removeAttribute('lengthAdjust');
+        const room = Number(el.dataset.fit);
+        if (el.getComputedTextLength() > room) {
+          el.setAttribute('textLength', String(room));
+          el.setAttribute('lengthAdjust', 'spacingAndGlyphs');
+        }
+      }
+    };
+    fit();
+    let alive = true;
+    void document.fonts?.ready.then(() => { if (alive) fit(); });
+    return () => { alive = false; };
+  }, [rootRef, key]);
 }

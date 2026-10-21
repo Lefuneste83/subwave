@@ -80,7 +80,7 @@ bootstrap_state_dirs() {
     if [ -n "${SUBWAVE_STEMS_DIR:-}" ]; then
         state_prepare_dir "$SUBWAVE_STEMS_DIR"
     fi
-    # Liquidsoap's reload_mode="watch" playlists need the files to exist.
+    # Liquidsoap's file watches on these need the files to exist.
     state_prepare_file "$dir/auto.m3u" 666
     state_prepare_file "$dir/jingles.m3u" 666
     # Keeps a co-located Navidrome from scanning the hourly archive mixdowns in
@@ -501,6 +501,12 @@ emit_mount() {
             echo '        <authentication type="url">'
             echo "            <option name=\"listener_add\" value=\"$LISTENER_AUTH_URL_XML\"/>"
             echo '            <option name="auth_header" value="icecast-auth-user: 1"/>'
+            # The station has ONE shared password and the username is ignored, so many
+            # listeners present the same name (docs suggest `listener`). icecast-kh admits
+            # one connection per username unless told otherwise: the second gets a 403,
+            # or hangs unanswered when it arrives while the first is still closing, which
+            # is what an iOS player's range probe followed by its real request does.
+            echo '            <option name="allow_duplicate_users" value="1"/>'
             echo '        </authentication>'
         fi
         echo '    </mount>'

@@ -139,7 +139,9 @@ function ShellChrome({ skin, contained }: { skin?: SkinComponent; contained: boo
           // sw-player-shell is the pre-paint hide hook (SKIN_INIT_SCRIPT) —
           // full-page shells only; showcase embeds never set/clear the attr.
           contained ? 'absolute' : 'sw-player-shell fixed',
-          'inset-0 overflow-hidden bg-bg text-ink',
+          // sw-theme-stage carries the theme's --texture overlay and --finish
+          // filter (globals.css), in a showcase embed too.
+          'sw-theme-stage inset-0 overflow-hidden bg-bg text-ink',
           // Showcases reset --bg-image so no skin paints this station's
           // background inside another station's frame (shellClass.ts).
           shellClass(contained),
