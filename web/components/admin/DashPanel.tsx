@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAdminAuth } from '../../lib/adminAuth';
-import { adminResponse, useAdminMutation, useAdminQuery } from '../../lib/admin-query';
+import { useAdminMutation, useAdminQuery } from '../../lib/admin-query';
 import { notify, errorMessage } from '../../lib/notify';
 import { turnClass, turnKey } from '../../lib/sessionFeed';
 import { fmtClock } from '../../lib/format';
@@ -47,8 +47,9 @@ import { cn } from '../../lib/cn';
 import { RequestsCard } from './dash/RequestsCard';
 import { TakeoverCard } from './dash/TakeoverCard';
 import QueueHeldBadge from './dash/QueueHeldBadge';
-import { blockPlayingTrack, neverPlayToast, skipDecision, type SkipOutcome } from './dash/never-play';
-import { libraryKeys } from './library/queries';
+import { blockPlayingTrack, neverPlayToast, notifyNeverPlay, refetchOnAirId, skipDecision, skipFailureOutcome, type SkipOutcome } from './dash/never-play';
+import { deleteBlockEntry, reconcileBlockCaches } from './library/block-actions';
+import type { BlockEntry } from './library/types';
 import { deadlineFallbacks, djLatencyMs, failedCallsNote } from './dash/latency-gauge';
 import { BoothTurnText, SegmentButton, SortableTh, ToggleRow, classTone } from './dash/bits';
 import type {
@@ -81,6 +82,7 @@ import {
   fetchNowPlayingFile,
   fetchRequests,
   fetchSuggestions,
+  removeQueuedRow,
   runDashAction,
 } from './dash/queries';
 
@@ -230,26 +232,22 @@ export default function DashPanel() {
   // Runs only after the confirm dialog — a skip cuts the track for every listener.
   const doSkip = () => act('skip', '/dj/skip', {}, 'skip track');
 
-  // O2 — the library table's own block write, so the Library page's lists
-  // and the Blocked tab see it whether or not they are mounted.
+  // The same block write and cache reconciliation the Library page uses
+  // (library/block-actions), so its Blocked tab and loaded lists show the
+  // entry whether or not they are mounted.
   const blockMutation = useAdminMutation({
     adminFetch,
     toastOnError: false,
     request: (trackId: string, fetcher) => blockPlayingTrack(fetcher, trackId),
-    onDone: (_data, _vars, client) => {
-      void client.invalidateQueries({ queryKey: libraryKeys.blocked() });
-      void client.invalidateQueries({ queryKey: libraryKeys.rows });
-    },
+    // Not awaited: re-marking cached Library rows must not hold up the skip.
+    onDone: (_data, _vars, client) => { void reconcileBlockCaches(client, adminFetch); },
   });
-  const unblockMutation = useAdminMutation<void, string>({
+  const unblockMutation = useAdminMutation<void, BlockEntry>({
     adminFetch,
-    request: async (trackId, fetcher) => {
-      await adminResponse(fetcher, `/library/blocklist/track/${encodeURIComponent(trackId)}`, { method: 'DELETE' });
-    },
-    onDone: (_data, _vars, client) => {
-      void client.invalidateQueries({ queryKey: libraryKeys.blocked() });
-      void client.invalidateQueries({ queryKey: libraryKeys.rows });
-    },
+    // The Undo toast reports a failure itself.
+    toastOnError: false,
+    request: (entry, fetcher) => deleteBlockEntry(fetcher, entry),
+    onDone: (_data, _vars, client) => reconcileBlockCaches(client, adminFetch),
   });
 
   // Runs only after the confirm dialog. The block lands FIRST: a failed block
@@ -272,36 +270,35 @@ export default function DashPanel() {
       let skip: SkipOutcome = 'not-asked';
       let skipError: string | undefined;
       if (skipToo) {
-        // Decide on a FRESH read, never on `status` from this render: the
-        // track can change while the block request is in flight, and the
-        // closure would still show the blocked one (skipping its successor
-        // for every listener). A failed refetch leaves the last poll in the
-        // cache; an unknown track is never skipped.
-        await queryClient.refetchQueries({ queryKey: dashKeys.status(), exact: true });
-        const onAirId = queryClient.getQueryData<DashStatus>(dashKeys.status())?.nowPlaying?.subsonic_id;
-        const decision = skipDecision({ skipToo, targetId: target.id, onAirId });
+        // Decide on a read that landed AFTER the block, never on `status`
+        // from this render: the track can change while the block request is
+        // in flight, and the closure would still show the blocked one
+        // (skipping its successor for every listener). A failed or offline
+        // refetch is no read, and nothing is skipped without one. The read
+        // names a song, never what airs: a bed or pause-talk break leaves
+        // now-playing on the song before it, a jingle's seam moves it on to
+        // the song after it while the outgoing tail and the jingle still
+        // play, and the song can end during the skip's commit wait. So the
+        // skip names its target and the controller refuses (409) unless the
+        // blocked track is what is on air: moot, or behind a jingle, which
+        // tells the operator to skip again in a few seconds.
+        const onAirId = await refetchOnAirId(queryClient);
+        const decision = skipDecision({ targetId: target.id, onAirId });
         if (decision === 'skip') {
           setBusy('skip');
           try {
-            await actionMutation.mutateAsync({ path: '/dj/skip', body: {} });
+            await actionMutation.mutateAsync({ path: '/dj/skip', body: { expectId: target.id } });
             skip = 'done';
           } catch (e) {
-            skip = 'failed';
-            skipError = errorMessage(e);
+            skip = skipFailureOutcome(e);
+            if (skip === 'failed') skipError = errorMessage(e);
           }
         } else {
           skip = decision;
         }
       }
       const t = neverPlayToast({ title: target.title, artist: target.artist, block: r.block, skip, purged: r.purged, skipError });
-      if (t.tone === 'err') notify.err(t.text);
-      else if (r.entry) {
-        notify.undo(t.text, () => {
-          unblockMutation.mutateAsync(target.id)
-            .then(() => notify.ok(`“${target.title}” can play again`))
-            .catch(() => { /* toasted by the mutation */ });
-        });
-      } else notify.ok(t.text);
+      notifyNeverPlay(t, r.entry, e => unblockMutation.mutateAsync(e));
     } catch (e) {
       notify.err(`never play: ${errorMessage(e)}`);
     } finally {
@@ -309,7 +306,6 @@ export default function DashPanel() {
       void queryClient.invalidateQueries({ queryKey: dashKeys.status() });
     }
   };
-
 
   // No confirm: nothing on-air changes, worst case a 409 because the track went
   // on air first. The row drops optimistically; the poll confirms.
@@ -377,19 +373,7 @@ export default function DashPanel() {
     const id = typeof t.subsonic_id === 'string' ? t.subsonic_id : '';
     if (!id) return;
     setBusy(`cancel:${id}`);
-    await queryClient.cancelQueries(
-      { queryKey: dashKeys.status(), exact: true },
-      { silent: true },
-    );
-    queryClient.setQueryData<DashStatus>(dashKeys.status(), current => current
-      ? {
-          ...current,
-          queue: {
-            ...(current.queue || {}),
-            upcoming: (current.queue?.upcoming || []).filter(item => item.subsonic_id !== id),
-          },
-        }
-      : current);
+    await removeQueuedRow(queryClient, id);
     try {
       await cancelQueueItem.mutateAsync(id);
       notify.ok(`removed from queue: ${t.title || 'track'}`);
@@ -407,14 +391,14 @@ export default function DashPanel() {
   };
 
   const np = status?.nowPlaying;
-  // O1 — one lookup per track: keyed by the id, never re-polled (a file's
+  // one lookup per track: keyed by the id, never re-polled (a file's
   // format does not change), and an answer about a previous track is ignored.
   const npId = np?.subsonic_id || '';
   const fileQuery = useAdminQuery({
     key: dashKeys.fileFormat(npId), adminFetch, enabled: ready && !!npId,
     staleTime: Infinity, request: fetchNowPlayingFile, toastOnError: false,
     // Navidrome did not answer: ask again a minute later (the controller backs
-    // off the same minute), instead of leaving the chip blank for the track.
+    // off the same minute), instead of leaving the format blank for the track.
     refetchInterval: (query) => (query.state.data && query.state.data.format === null ? 60_000 : false),
   });
   const fileFormat = fileQuery.data?.id === npId ? formatFileFormat(fileQuery.data.format) : null;
@@ -481,6 +465,8 @@ export default function DashPanel() {
       <StationHeader
         metrics={healthMetrics}
         np={np}
+        onNeverPlay={openNeverPlay}
+        canNeverPlay={!!np?.subsonic_id}
         djName={djName}
         showName={showName}
         weatherText={weatherText}
@@ -488,8 +474,6 @@ export default function DashPanel() {
         busy={busy}
         onSkip={() => setConfirmSkip(true)}
         fileFormat={fileFormat}
-        onNeverPlay={openNeverPlay}
-        canNeverPlay={!!np?.subsonic_id}
       />
 
       {err && <ErrorState error={err} />}
@@ -943,15 +927,13 @@ export default function DashPanel() {
         onConfirm={doSkip}
       />
 
+      {/* The target outlives the close on purpose: the close animation still
+          shows its text, and clearing it blanked the dialog as it faded.
+          openNeverPlay overwrites it before every open, and the two actions,
+          its only readers, exist only while the dialog is open. */}
       <V3AlertDialog
         open={confirmNeverPlay}
-        onOpenChange={open => {
-          setConfirmNeverPlay(open);
-          // The target is captured at open time; doNeverPlay reads it before
-          // its first await, so clearing on close is safe and keeps a stale
-          // target from outliving its dialog.
-          if (!open) setNeverPlayTarget(null);
-        }}
+        onOpenChange={setConfirmNeverPlay}
         title="Never play this track"
         description={neverPlayTarget
           ? `Add “${neverPlayTarget.title}”${neverPlayTarget.artist ? ` — ${neverPlayTarget.artist}` : ''} to the never-play list? It will never air again, listener requests included. You can lift it from Library → Blocked.`

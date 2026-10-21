@@ -7,7 +7,7 @@
 //   - the walk's Subsonic child maps to the four fields (walkFileInfo);
 //   - a writer without file facts (manual edit, analyzer top-up) never clears
 //     the stored ones, and a later walk updates them.
-// Run: `tsx scripts/library-file-info.test.ts` (npm test).
+// Run: npm test -- library-file-info
 
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';

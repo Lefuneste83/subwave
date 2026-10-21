@@ -65,7 +65,7 @@ import {
   clampMaxOutputTokens,
   clampDiscoverySteps,
   clampNoRepeatWindow,
-  clampArtistVarietyWindow,
+  clampVarietyWindow,
   clampNumCtx,
   clampRepeatPenalty,
   clampTtsGain,
@@ -1063,10 +1063,11 @@ export async function load() {
       // Clamped to [0, 25]; a settings.json written before the field existed
       // picks up the shipped default, so an upgrade turns spacing on rather
       // than silently keeping the on-air-only guard it was filed against.
-      artistVarietyWindow: clampArtistVarietyWindow(
+      artistVarietyWindow: clampVarietyWindow(
         stored.llm?.artistVarietyWindow,
         DEFAULTS.llm.artistVarietyWindow,
       ),
+      genreVarietyWindow: clampVarietyWindow(stored.llm?.genreVarietyWindow, DEFAULTS.llm.genreVarietyWindow),
       requestWebResolve:
         typeof stored.llm?.requestWebResolve === 'boolean'
           ? stored.llm.requestWebResolve
@@ -2142,9 +2143,12 @@ export async function prepareUpdate(patch, { themeIds }: { themeIds?: ReadonlySe
       next.llm.noRepeatWindow = clampNoRepeatWindow(Number(l.noRepeatWindow), next.llm.noRepeatWindow);
     }
     if (l.artistVarietyWindow !== undefined) {
-      next.llm.artistVarietyWindow = clampArtistVarietyWindow(
+      next.llm.artistVarietyWindow = clampVarietyWindow(
         Number(l.artistVarietyWindow), next.llm.artistVarietyWindow,
       );
+    }
+    if (l.genreVarietyWindow !== undefined) {
+      next.llm.genreVarietyWindow = clampVarietyWindow(Number(l.genreVarietyWindow), next.llm.genreVarietyWindow);
     }
     if (l.requestWebResolve !== undefined) {
       next.llm.requestWebResolve = !!l.requestWebResolve;
