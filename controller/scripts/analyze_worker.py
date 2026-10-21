@@ -1369,6 +1369,21 @@ def tail_window_from_edges(edges):
     return parse_tail_window({"end_ms": int(round(dur - tail)), "duration_ms": int(round(dur))})
 
 
+def placed_outro(window, placement, librosa):
+    """(outro, (offset_s, length_s)) for a window placed from the edges:
+    measured as if the file ended where the music does, with the trailing
+    silence taken from the edges. outro is None when the window reads silent."""
+    t_src, t_sr, t_off = window
+    end_s = placement["end_ms"] / 1000.0
+    outro = facet_tail(t_src, t_sr, t_off, end_s, librosa)
+    if outro is not None:
+        outro.pop("tail_silence_ms", None)
+        outro.pop("tail_start_ms", None)
+        outro["tail_silence_ms"] = placement["duration_ms"] - placement["end_ms"]
+        outro["tail_start_ms"] = placement["end_ms"]
+    return outro, (t_off, end_s - t_off)
+
+
 def input_seek_is_exact(path):
     """True when ffmpeg's INPUT seek lands on the exact sample for this file's
     container: FLAC (frames carry sample numbers), Ogg (granule positions), WAV
@@ -2619,6 +2634,7 @@ _RESULT_ORDER = (
 def analyze(
     librosa, url=None, path=None, embed=None, vocal=None, complete=None,
     stems_dir=None, embedding_only=False, stems_require_marker=False,
+    tail_window=None, stream_url=None,
 ):
     import numpy as np
 
@@ -2640,6 +2656,7 @@ def analyze(
     audio_embedding = None
     vocal_ranges = None
     outro = None
+    placement = placed_src = tail_span = None
     try:
         if owned:
             path, complete = fetch_audio(url)
@@ -2694,7 +2711,23 @@ def analyze(
         # a pre-decoded WAV defeats that check (its duration IS the decodable
         # length, so the tail always decodes full) — skip outro rather than
         # risk measuring mid-song audio as the ending.
-        if complete is not False and (complete is True or decoded_tmp is None):
+        # A placement (where the music stops, from the stored edges) moves the
+        # tail window there, exactly as the facet protocol does; the window is
+        # read in place from a complete copy, else decoded from the stream.
+        placement = None if embedding_only else parse_tail_window(tail_window)
+        if placement is not None:
+            placed_src = FileSource(src_path, complete=complete, stream_url=stream_url or url)
+            placed_src.path, placed_src.decoded_tmp, placed_src.duration_s = path, decoded_tmp, duration_s
+            try:
+                window = placed_src.tail(librosa, placement)
+                if isinstance(window, str):
+                    log(f"placed tail not measured: {window}")
+                else:
+                    outro, tail_span = placed_outro(window, placement, librosa)
+            except Exception as e:  # noqa: BLE001 — outro is best-effort
+                log(f"outro analysis failed: {e}")
+                outro = None
+        elif complete is not False and (complete is True or decoded_tmp is None):
             try:
                 outro = analyze_outro(path, librosa, duration_s, complete)
             except Exception as e:  # noqa: BLE001 — outro is best-effort
@@ -2721,7 +2754,11 @@ def analyze(
         # ENDING is sung. Gated on the same detector AND a computed outro:
         # outro non-None already proves the file is complete and long enough
         # for a distinct tail (see demucs_tail).
-        if detector is not None and outro is not None and "startMs" in outro \
+        if detector is not None and outro is not None and "startMs" in outro and tail_span:
+            demucs_tail(detector, lambda **kw: placed_src.load_tail(librosa, **kw), librosa,
+                        placement["duration_ms"] / 1000.0, outro, stems_dir, stems_require_marker,
+                        window=tail_span)
+        elif detector is not None and outro is not None and "startMs" in outro \
                 and not outro.get("_searched"):
             demucs_tail(detector, load, librosa, duration_s, outro, stems_dir, stems_require_marker)
             # The share went away during the pass: report no stems_cached so
@@ -2729,6 +2766,8 @@ def analyze(
             if stems_dir and stems_dir_to_write(stems_dir, stems_require_marker) is None:
                 stems_cached = None
     finally:
+        if placed_src is not None:
+            placed_src.close_window()
         if decoded_tmp is not None:
             try:
                 os.remove(decoded_tmp)
@@ -2755,6 +2794,8 @@ def analyze(
     # (only ever fed a window proven to reach the end of the file) and lifted
     # out of the outro dict HERE so outro_json never carries it. Omitted when
     # not measured — absence means "no silence signal, behave as today".
+    if tail_span:
+        result["tail_window"] = "edges"
     if outro is not None:
         outro.pop("_searched", None)
     if outro is not None and "tail_silence_ms" in outro:
@@ -2903,13 +2944,17 @@ class FileSource:
             "predecoded": self.decoded_tmp is not None,
         }
 
-    def close(self):
+    def close_window(self):
+        """Remove the tail window decoded from the stream, if any."""
         if self.window_tmp is not None:
             try:
                 os.remove(self.window_tmp)
             except OSError:
                 pass
             self.window_tmp = None
+
+    def close(self):
+        self.close_window()
         if self.decoded_tmp is not None:
             try:
                 os.remove(self.decoded_tmp)
@@ -3651,19 +3696,9 @@ def analyze_facets(librosa, source, facets, stems_dir=None, tail_vocals=False, s
             if isinstance(window, str):
                 tail_reason = window
             elif placement:
-                t_src, t_sr, t_off = window
-                end_s = placement["end_ms"] / 1000.0
-                tail_span = (t_off, end_s - t_off)
-                # Measured as if the file ended where the music does; the
-                # trailing silence is the edges' own figure.
-                outro = facet_tail(t_src, t_sr, t_off, end_s, librosa)
+                outro, tail_span = placed_outro(window, placement, librosa)
                 if outro is None:
                     tail_reason = "silent-tail-window"
-                else:
-                    outro.pop("tail_silence_ms", None)
-                    outro.pop("tail_start_ms", None)
-                    outro["tail_silence_ms"] = placement["duration_ms"] - placement["end_ms"]
-                    outro["tail_start_ms"] = placement["end_ms"]
             else:
                 t_src, t_sr, t_off = window
                 outro = facet_tail(t_src, t_sr, t_off, source.duration_s, librosa)
@@ -4018,6 +4053,7 @@ def main():
                     complete=req.get("complete"), stems_dir=req.get("stems_dir"),
                     embedding_only=req.get("embedding_only") is True,
                     stems_require_marker=req.get("stems_require_marker") is True,
+                    tail_window=req.get("tail_window"), stream_url=req.get("stream_url"),
                 )
                 # If a getter stamped the clock, this request DID use a model —
                 # re-stamp so the countdown starts from the end of the work, not
