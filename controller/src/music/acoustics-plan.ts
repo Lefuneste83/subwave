@@ -12,10 +12,12 @@
 import {
   FACETS,
   FACET_VERSIONS,
+  isAnalysisFacet,
   type Facet,
   type FacetCell,
 } from './library-db/facets.js';
 import { analysisRetryAllowed, tailVocalBackfillAvailable } from './analyze-capability.js';
+import { yearRetryDue } from './original-year-policy.js';
 
 export type { FacetCell };
 
@@ -46,6 +48,9 @@ export interface PlanCapabilities {
   demucs: boolean | null;
   // Tail-only vocal backfill requires positive support, unlike missing heads.
   tailVocal: boolean | null;
+  // MusicBrainz year lookups (settings.embedding.enrichment.originalYear).
+  // Absent = on, the setting's own default.
+  yearLookups?: boolean;
 }
 
 export interface PlanInput {
@@ -55,6 +60,8 @@ export interface PlanInput {
   state: ReadonlyMap<string, TrackFacets>;
   capabilities: PlanCapabilities;
   limit?: number;
+  // The clock the year facet's retry delays are judged against (tests pin it).
+  now?: number;
 }
 
 // The worker flags one track's facets translate to.
@@ -71,7 +78,9 @@ export interface WorkItem {
   request: WorkRequest;
 }
 
-export type SkipReason = 'no-clap' | 'no-demucs' | 'no-tail-vocal' | 'limit';
+// 'year-known': the year needs no lookup (trusted, resolved or manual).
+// 'year-off': MusicBrainz lookups are switched off in the settings.
+export type SkipReason = 'no-clap' | 'no-demucs' | 'no-tail-vocal' | 'year-known' | 'year-off' | 'limit';
 
 export interface FacetPlanCount {
   facet: Facet;
@@ -92,8 +101,9 @@ export interface AcousticsPlan {
   warnings: string[];
 }
 
-export function matchesWhere(cell: FacetCell | undefined, facet: Facet, where: Where): boolean {
+export function matchesWhere(cell: FacetCell | undefined, facet: Facet, where: Where, now = Date.now()): boolean {
   const current = FACET_VERSIONS[facet];
+  if (facet === 'year') return yearMatchesWhere(cell, where, now);
   switch (where.kind) {
     case 'all':
       return true;
@@ -116,6 +126,30 @@ export function matchesWhere(cell: FacetCell | undefined, facet: Facet, where: W
         cell.version < current ||
         cell.status === 'failed'
       );
+  }
+}
+
+// The year facet's own selection: a lookup has no analysis failure count, and a
+// failed one is retried on the delays in original-year-policy.ts, not on the
+// next run. `--where failed` takes every failed lookup, exhausted or not.
+function yearMatchesWhere(cell: FacetCell | undefined, where: Where, now: number): boolean {
+  const current = FACET_VERSIONS.year;
+  switch (where.kind) {
+    case 'all':
+      return true;
+    case 'missing':
+      return !cell;
+    case 'outdated':
+      return !!cell && cell.version < current;
+    case 'failed':
+      return !!cell && cell.status === 'failed';
+    case 'unmeasurable':
+      return !!cell && cell.status === 'unmeasurable' &&
+        (!where.reason || (cell.reason ?? '').toLowerCase().includes(where.reason.toLowerCase()));
+    case 'needs':
+    default:
+      return !cell || cell.version < current ||
+        (cell.status === 'failed' && yearRetryDue(cell.attempts, cell.at, now));
   }
 }
 
@@ -148,8 +182,11 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
     if ((f === 'vocal' || f === 'stems') && input.capabilities.demucs === false) return 'no-demucs';
     if (f === 'vocal' && cell?.reason === 'head-only' &&
       !tailVocalBackfillAvailable(input.capabilities.tailVocal)) return 'no-tail-vocal';
+    if (f === 'year' && input.capabilities.yearLookups === false) return 'year-off';
+    if (f === 'year' && cell?.status === 'ok') return 'year-known';
     return null;
   };
+  const now = input.now ?? Date.now();
 
   const items: WorkItem[] = [];
   const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : Infinity;
@@ -158,7 +195,7 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
     const state = input.state.get(id) ?? empty;
     const picked: Facet[] = [];
     for (const f of facets) {
-      if (!matchesWhere(state.get(f), f, input.where)) continue;
+      if (!matchesWhere(state.get(f), f, input.where, now)) continue;
       counts.get(f)!.matched += 1;
       const why = unavailable(f, state.get(f));
       if (why) {
@@ -173,11 +210,11 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
       continue;
     }
     for (const f of picked) counts.get(f)!.planned += 1;
-    items.push({ id, facets: picked, request: requestFor(picked) });
+    items.push({ id, facets: picked, request: requestFor(picked.filter(isAnalysisFacet)) });
   }
 
   // A full analysis recomputes head/loudness/tail whatever was asked: say so.
-  const anyFull = items.some((i) => !i.request.embeddingOnly);
+  const anyFull = items.some((i) => i.facets.some(isAnalysisFacet) && !i.request.embeddingOnly);
   const rideAlong = anyFull ? FULL_PASS.filter((f) => !facets.includes(f)) : [];
 
   const warnings: string[] = [];
@@ -195,6 +232,13 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
   if (facets.includes('stems')) {
     warnings.push('stems: the stem-cache byte budget is enforced at run time, so fewer than planned may be written');
   }
+  const yearItems = items.filter((i) => i.facets.includes('year')).length;
+  if (yearItems) {
+    warnings.push(
+      `year: MusicBrainz allows about 1 lookup a second, so ${yearItems} tracks take about ${Math.max(1, Math.ceil(yearItems * 1.1 / 60))} min; ` +
+        'a failed lookup is retried after 1 h, 1 day, then 7 days',
+    );
+  }
 
   return {
     where: input.where,
@@ -205,6 +249,21 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
     rideAlong,
     warnings,
   };
+}
+
+// The analyzer's share of a plan: year dropped from every item, items left with
+// nothing for the analyzer dropped. Null when the plan has no analyzer work.
+export function analysisPart(plan: AcousticsPlan): AcousticsPlan | null {
+  const items = plan.items
+    .map((i) => ({ ...i, facets: i.facets.filter(isAnalysisFacet) }))
+    .filter((i) => i.facets.length > 0);
+  if (!items.length) return null;
+  return { ...plan, facets: plan.facets.filter(isAnalysisFacet), items };
+}
+
+// The tracks a plan asks a year lookup for, in plan order.
+export function yearPart(plan: AcousticsPlan): string[] {
+  return plan.items.filter((i) => i.facets.includes('year')).map((i) => i.id);
 }
 
 // Parse `--facets tail,clap`. Throws on an unknown facet name.
@@ -242,9 +301,14 @@ export function formatPlan(plan: AcousticsPlan, sample = 10): string[] {
     const skipped = Object.entries(c.skipped).map(([k, v]) => `${k} ${v}`).join(', ') || '-';
     out.push(`  ${c.facet.padEnd(9)} ${String(c.matched).padStart(8)} ${String(c.planned).padStart(8)}  ${skipped}`);
   }
-  const embedOnly = plan.items.filter((i) => i.request.embeddingOnly).length;
-  out.push('  facet-capable analyzer: one request per track for exactly its facets');
-  out.push(`  older analyzer: ${plan.items.length - embedOnly} full analysis, ${embedOnly} CLAP-only`);
+  const analysis = plan.items.filter((i) => i.facets.some(isAnalysisFacet));
+  if (analysis.length) {
+    const embedOnly = analysis.filter((i) => i.request.embeddingOnly).length;
+    out.push('  facet-capable analyzer: one request per track for exactly its facets');
+    out.push(`  older analyzer: ${analysis.length - embedOnly} full analysis, ${embedOnly} CLAP-only`);
+  }
+  const years = plan.items.filter((i) => i.facets.includes('year')).length;
+  if (years) out.push(`  year: ${years} MusicBrainz lookups (no analyzer involved)`);
   if (plan.rideAlong.length) {
     out.push(`  note: on an older analyzer a full analysis also recomputes ${plan.rideAlong.join(', ')}`);
   }
