@@ -47,6 +47,7 @@ import {
   jingleRatioSchema,
   jingleRotateSchema,
   likesPatchSchema,
+  musicSourcePatchSchema,
   localeSchema,
   loudnessPatchSchema,
   moodScheduleSchema,
@@ -162,6 +163,7 @@ export const SETTINGS_PATCH_KEYS = [
   'webhooksPolicy',
   'scrobble',
   'likes',
+  'musicSource',
 ] as const;
 
 export type SettingsPatchKey = (typeof SETTINGS_PATCH_KEYS)[number];
@@ -236,6 +238,7 @@ export const SETTINGS_PATCH_SCHEMAS: Readonly<Partial<Record<SettingsPatchKey, S
   webhooksPolicy: webhooksPolicyPatchSchema,
   scrobble: scrobblePatchSchema,
   likes: likesPatchSchema,
+  musicSource: musicSourcePatchSchema,
   moods: moodsSchema,
   moodSchedule: moodScheduleSchema,
   weatherMoods: weatherMoodsSchema,
