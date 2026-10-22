@@ -160,11 +160,8 @@ export interface StationHeaderProps {
   showName: string;
   weatherText: string;
   pickerBusy: boolean;
-  /** Opens the never-play confirm for the track on air. */
-  onNeverPlay: () => void;
-  /** Whether a library track (one with a subsonic id) is on air; only one can be blocked. */
-  canNeverPlay: boolean;
   busy: string | null;
+  /** Opens the Skip dialog, which also offers the never-play blocks. */
   onSkip: () => void;
   /** The playing file's own format line ("FLAC · 44.1 kHz · 16-bit"),
    *  shown after the artist in the caption style of the album · DJ line
@@ -179,8 +176,6 @@ export default function StationHeader({
   showName,
   weatherText,
   pickerBusy,
-  onNeverPlay,
-  canNeverPlay,
   busy,
   onSkip,
   fileFormat,
@@ -301,14 +296,12 @@ export default function StationHeader({
         <div className="flex gap-2">
           <Btn
             lg
-            disabled={!!busy || !canNeverPlay}
-            onClick={onNeverPlay}
-            title={canNeverPlay ? 'Add this track to the never-play list' : 'Only a library track can be blocked'}
+            tone="danger"
+            disabled={!!busy || !np?.title}
+            onClick={onSkip}
+            title="Skip it, keep it off the air for good, or both"
           >
-            {busy === 'never-play' ? 'blocking…' : 'Never play'}
-          </Btn>
-          <Btn lg tone="danger" disabled={!!busy || !np?.title} onClick={onSkip}>
-            {busy === 'skip' ? 'skipping…' : 'Skip track'}
+            {busy === 'never-play' ? 'blocking…' : busy === 'skip' ? 'skipping…' : 'Skip track'}
           </Btn>
         </div>
       </div>
