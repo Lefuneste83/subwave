@@ -58,6 +58,7 @@ import * as stemCacheStore from '../music/stem-cache.js';
 import * as stemBlendStore from './stem-blend.js';
 import * as doctor from '../doctor.js';
 import * as backup from '../backup/scheduled.js';
+import { autoEnableRealPath } from '../music/navidrome-players.js';
 
 // take() hard-stops at the target, so TARGET_POOL must exceed the sum of the
 // non-show weights or the random top-up below becomes unreachable.
@@ -1190,6 +1191,18 @@ async function nightlyDoctor() {
 // retention all live in backup/pure.ts and this tick only reports. Every
 // failure is logged and swallowed — losing the scheduler to a backup would take
 // the auto playlist, the talk tick and the takeover janitor with it.
+// Keeps Navidrome's "Report Real Path" on for SUB/WAVE's own player rows when
+// the operator opted in (musicSource.reportRealPath). On a timer, not once: a
+// new client or user agent gets a fresh row with the flag off. Never throws.
+export async function realPathTick() {
+  if (settings.get().musicSource?.reportRealPath !== true) return;
+  try {
+    await autoEnableRealPath(line => queue.log('scheduler', line));
+  } catch (err) {
+    queue.log('error', `Report Real Path check failed: ${err.message}`);
+  }
+}
+
 async function scheduledBackupTick() {
   try {
     const r = await backup.runScheduledBackup();
@@ -1352,6 +1365,10 @@ export function startScheduler() {
   // the elapsed-time cadence lives in backup/pure.ts. :23 keeps it off the :02
   // cleanup and the */5 janitor. Off by default.
   cron.schedule('23 * * * *', scheduledBackupTick);
+  // :41 keeps it off the :02 cleanup and the :23 backup. The boot pass waits a
+  // minute so the controller's own first Subsonic calls have created its rows.
+  cron.schedule('41 * * * *', realPathTick);
+  setTimeout(() => { void realPathTick(); }, 60_000).unref();
 
   syncSkillCrons();
   // Each task bakes the zone in at registration, so a live timezone change has
