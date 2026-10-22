@@ -63,9 +63,13 @@ export function NavidromeRealPathCard({ adminFetch }: { adminFetch: AdminFetch }
         ? adminJson<RealPathView>(fetcher, '/settings/navidrome/players/real-path', { method: 'POST' })
         : null;
     },
-    onDone: async (view, _vars, client) => {
+    onDone: async (view, on, client) => {
       if (view) client.setQueryData(realPathKey, view);
       else await client.invalidateQueries({ queryKey: realPathKey });
+      // Saved on the click, with no save bar, so say so.
+      notify.ok(on
+        ? `Saved: Report Real Path kept on${view?.switched ? ` (${view.switched} player(s) switched on now)` : ''}`
+        : 'Saved: Report Real Path no longer kept on');
     },
   });
 
@@ -115,10 +119,11 @@ export function NavidromeRealPathCard({ adminFetch }: { adminFetch: AdminFetch }
           <Label>Keep Report Real Path on</Label>
           <Seg
             value={view?.autoEnable ? 'on' : 'off'}
-            onChange={v => setAuto.mutate(v === 'on')}
+            onChange={v => { if (!busy) setAuto.mutate(v === 'on'); }}
             options={[{ id: 'off', label: 'Off' }, { id: 'on', label: 'On' }]}
           />
           <div className="field-hint">
+            {setAuto.isPending ? 'Saving… ' : 'Saved as soon as you click. '}
             Checks SUB/WAVE&apos;s players every hour and at start-up, and switches on any that are
             off. Off by default, because it changes your Navidrome&apos;s settings.
           </div>
