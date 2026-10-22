@@ -1370,6 +1370,12 @@ export async function load() {
         ? Math.min(365, Math.max(0, Math.round(Number(stored.likes.windowDays))))
         : DEFAULTS.likes.windowDays,
     },
+    musicSource: {
+      reportRealPath:
+        typeof stored.musicSource?.reportRealPath === 'boolean'
+          ? stored.musicSource.reportRealPath
+          : DEFAULTS.musicSource.reportRealPath,
+    },
   };
   setCache(loaded);
   if (typeof stored.timezone === 'string' && stored.timezone.trim() && !loaded.timezone) {
@@ -2638,6 +2644,10 @@ export async function prepareUpdate(patch, { themeIds }: { themeIds?: ReadonlySe
     ] as const) {
       if (lk[k] !== undefined) (next.likes as Record<string, unknown>)[k] = lk[k];
     }
+  }
+  if ('musicSource' in patch) {
+    const ms = parseSettingsPatchKey<Record<string, unknown>>('musicSource', patch.musicSource);
+    if (ms.reportRealPath !== undefined) next.musicSource.reportRealPath = ms.reportRealPath as boolean;
   }
 
   // Post-patch integrity sweep — a personas/shows change in this patch may
