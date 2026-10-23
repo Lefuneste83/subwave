@@ -205,6 +205,7 @@ router.get('/settings', requireAdmin, async (req, res) => {
         LASTFM_SESSION_KEY: !!process.env.LASTFM_SESSION_KEY,
         LISTENBRAINZ_USER_TOKEN: !!process.env.LISTENBRAINZ_USER_TOKEN,
         LISTENBRAINZ_API_URL: !!process.env.LISTENBRAINZ_API_URL,
+        DISCOGS_TOKEN: !!process.env.DISCOGS_TOKEN,
       },
       skills: { catalog: skillCatalog() },
     });
