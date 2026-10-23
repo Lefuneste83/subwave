@@ -637,6 +637,15 @@ end
 # song pairs -3.1 LU, equal-power -0.1). sin/cos gains keep in^2 + out^2 = 1 at
 # every instant. Liquidsoap's own fade type="sin" is NOT this: it is sin^2, an
 # S-curve whose AMPLITUDES sum to 1, so it dips exactly like linear.
+# The INCOMING side rises as sin^1.5, not sin. Heard on air: a quiet live
+# ending into a loud start (Peter Gabriel - D.I.Y. -> Iggy Pop - I Need More,
+# 6 s cross, the outgoing ~12 dB under the incoming) came in abruptly. Such a
+# seam is a fade-in out of near-silence, where the powers-add premise does not
+# hold, and a plain sin brought the incoming up 3-4 dB earlier than linear
+# (offline, that seam: -20.7 vs -23.8 dBFS 2.75 s in). sin^1.5 starts no
+# faster than linear (equal at 25% of the cross, quieter before) and still
+# holds in^2 + out^2 within 0.9 dB of 1 (lowest at sin = 2/3), against the
+# 3 dB linear dip. `fx-render-test.sh eqpower` checks both.
 # The fader still spans the WHOLE buffer d (the INVARIANT above holds), and
 # only song-to-song seams take it (equal_power_seam): two time-ALIGNED copies
 # of the same audio would sum +3 dB under it, and a stem-blend clip seam is
@@ -651,7 +660,7 @@ def equal_power_fade(~span, ~rising, s) =
     e = source.elapsed(s)
     x = if span <= 0. then 1. else e / span end
     x = if x < 0. then 0. elsif x > 1. then 1. else x end
-    if rising then sin(half_pi * x) else cos(half_pi * x) end
+    if rising then pow(sin(half_pi * x), 1.5) else cos(half_pi * x) end
   end
   amplify(gain, s)
 end

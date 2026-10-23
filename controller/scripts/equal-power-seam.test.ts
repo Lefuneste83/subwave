@@ -42,9 +42,12 @@ test('the curve defaults to linear and only an explicit "true" switches it', () 
   assert.ok(radio.includes('liquidsoap_equal_power_crossfade.txt'), 'reads the handoff file settings/liquidsoap.ts writes');
 });
 
-test('the fader is sin/cos over the elapsed fraction of its span, not fade type="sin"', () => {
+test('the fader is cos out and sin^1.5 in over the elapsed fraction of its span, not fade type="sin"', () => {
   const fader = block(/^def equal_power_fade\(~span, ~rising, s\) =$/m, /^end$/m);
-  assert.match(fader, /if rising then sin\(half_pi \* x\) else cos\(half_pi \* x\) end/);
+  // sin^1.5 in: no faster than linear over the first quarter (a quiet ending
+  // into a loud start is a fade-in from silence), within 0.9 dB of constant
+  // power against the cos out.
+  assert.match(fader, /if rising then pow\(sin\(half_pi \* x\), 1\.5\) else cos\(half_pi \* x\) end/);
   assert.match(fader, /x = if span <= 0\. then 1\. else e \/ span end/);
   assert.match(fader, /amplify\(gain, s\)/);
   assert.match(radio, /^half_pi = acos\(-1\.\) \/ 2\.$/m);
