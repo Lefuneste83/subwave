@@ -192,6 +192,13 @@ export interface TrackMeta {
   isCompilation?: boolean | null;
   /** music/era-suspect.albumEraSuspect's verdict for this track's album. */
   eraUntrusted?: boolean | null;
+  /** Which marker produced that verdict ('compilation-flag', 'title-year-range',
+   *  ...). Walk-time audit truth; null when the walk flagged nothing. COALESCEd
+   *  like the ids, so a non-walk writer never clears it. (C13) */
+  eraReason?: string | null;
+  /** The ALBUM artist the era judgement keyed on (Navidrome's album record),
+   *  not the per-track `artist`. Walk only. (C13) */
+  albumArtist?: string | null;
   /** The file as Navidrome reports it (walk only). `filePath` is the real path
    *  when the client has "Report Real Path" on, else Navidrome's tag-built one.
    *  COALESCEd like the ids: a writer without them never clears a stored value. */

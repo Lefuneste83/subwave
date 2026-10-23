@@ -6,6 +6,7 @@ import * as subsonic from '../subsonic.js';
 import * as db from '../library-db.js';
 import * as embeddings from '../embeddings.js';
 import { adoptAndPrune } from '../id-rotation.js';
+import { eraWalkFields, loadEraOverrides, type EraVerdict } from '../era-review.js';
 import { loadSecretsIntoEnv } from '../../setup/secrets.js';
 import { loadNavidromeConfig } from '../../setup/config.js';
 import { reportProgress, reportCatalogueReady } from '../tagger-progress.js';
@@ -126,7 +127,13 @@ export async function walkNavidrome(): Promise<{ walked: number; liveIds: Set<st
   // Blast radius of the era gate, reported once at the end so an operator sees
   // it in the log rather than as a show that stopped picking (#1418).
   const eraReasons = new Map<string, number>();
+  // Operator era overrides (C13), read ONCE before the loop: an override
+  // replaces the walk's stored verdict for its album, and the walk is what
+  // makes a Reset take effect (the override map is re-read fresh each walk).
+  const rawDb = db.getDb();
+  const eraOverrides: Map<string, EraVerdict> = rawDb ? loadEraOverrides(rawDb) : new Map();
   for await (const song of subsonic.iterateAllSongs({ requireComplete: true })) {
+    const eraFields = eraWalkFields(song, eraOverrides);
     db.upsertTrackMeta(song.id, {
       title: song.title,
       artist: song.artist,
@@ -146,7 +153,11 @@ export async function walkNavidrome(): Promise<{ walked: number; liveIds: Set<st
       //    trusted album — and keeps the track eligible for a lookup.
       originalYear: informativeAlbumYear(song),
       isCompilation: song.albumIsCompilation ?? null,
-      eraUntrusted: song.albumEraUntrusted ?? null,
+      eraUntrusted: eraFields.eraUntrusted,
+      // Why the walk flagged it (audit truth — never rewritten by an
+      // override), and the album artist the override key folds on (C13).
+      eraReason: eraFields.eraReason,
+      albumArtist: eraFields.albumArtist,
       genres: subsonic.songGenres(song),
       duration: song.duration,
       ...walkFileInfo(song),

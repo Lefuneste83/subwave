@@ -772,6 +772,9 @@ export async function* iterateAllSongs({ requireComplete = false } = {}) {
             // A Child's albumId is optional in the spec; the album being
             // iterated is the authoritative fallback.
             albumId: s.albumId ?? r.album?.id ?? album.id ?? null,
+            // The album artist the era judgement keyed on, stored per track
+            // (C13) so the era review can key overrides without Navidrome.
+            albumArtist: r.album?.artist ?? album.artist ?? null,
             albumIsCompilation: isCompilation,
             albumOriginalYear: originalYear,
             albumEraUntrusted: suspicion.suspect,
