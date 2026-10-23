@@ -40,6 +40,8 @@ export const SECRET_ENV_KEYS = [
   'LASTFM_SESSION_KEY',
   'LISTENBRAINZ_USER_TOKEN',
   'LISTENBRAINZ_API_URL',
+  // Discogs personal access token: the original-year fallback (music/discogs.ts).
+  'DISCOGS_TOKEN',
 ];
 
 // An unquoted value carrying a `#`: dotenv truncates there (correct .env
