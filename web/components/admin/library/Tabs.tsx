@@ -1,7 +1,7 @@
 'use client';
 
 import type { ReactNode } from 'react';
-import { Search, Ban, Music, LayoutGrid, History } from 'lucide-react';
+import { Search, Ban, Music, LayoutGrid, History, CalendarClock } from 'lucide-react';
 import { cn } from '../../../lib/cn';
  
 import type { Tab } from './types';
@@ -14,6 +14,7 @@ export function Tabs({ tab, setTab }: {
     { id: 'tracks', name: 'Tracks', sub: 'newest & needs tags', icon: <Music size={17} /> },
     { id: 'browse', name: 'Browse', sub: 'tagged index', icon: <LayoutGrid size={17} /> },
     { id: 'search', name: 'Search', sub: 'navidrome', icon: <Search size={17} /> },
+    { id: 'era', name: 'Era', sub: 'suspect albums', icon: <CalendarClock size={17} /> },
     { id: 'history', name: 'History', sub: 'what aired', icon: <History size={17} /> },
     { id: 'blocked', name: 'Blocked', sub: 'never plays', icon: <Ban size={17} /> },
   ];
