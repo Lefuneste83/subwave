@@ -14,10 +14,11 @@
 // Run: npm test -- era-review
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import test from 'node:test';
+import test, { after } from 'node:test';
+import { removeTempDir } from './test-utils/temp-dir.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'subwave-era-review-'));
 process.env.STATE_DIR = dir;
@@ -31,10 +32,17 @@ const db = await import('../src/music/library-db.js');
 const era = await import('../src/music/era-review.js');
 const { listen: listenHttp } = await import('./test-utils/http.js');
 await db.open({ embeddingDim: 8, adoptStoredDim: true });
-// Clean up at exit rather than an `after()` hook: with this file's mixed
-// sync/async top-level tests the root hook was observed firing mid-suite.
+const eraSuspect = await import('../src/music/era-suspect.js');
+const { ERA_YEAR_SQL } = await import('../src/music/library-db/browse.js');
+const { router: eraRoutes } = await import('../src/routes/library/era.js');
+const app = express();
+app.use(express.json());
+app.use(eraRoutes);
+const { server, url: base } = await listenHttp(app);
+server.unref();
+
 // The HTTP server is unref()ed, so it never needs closing for exit.
-process.on('exit', () => { db.close(); rmSync(dir, { recursive: true, force: true }); });
+after(async () => { db.close(); await removeTempDir(dir); });
 
 const d = () => db.getDb()!;
 const cols = () => new Set((d().pragma('table_info(tracks)') as Array<{ name: string }>).map(c => c.name));
@@ -176,23 +184,52 @@ test('setEraOverride flips existing rows at once and marks text_vector_dirty onl
   assert.equal(row('x1')!.text_vector_dirty, 1, 'stays dirty; no second marking needed');
 });
 
-test('Reset removes the override without silently touching existing rows; the next walk restores the walk verdict', () => {
+test('Reset drops the override and restores the walk verdict at once, from the stored reason', () => {
   const key = era.albumEraKey('QA Artist', 'QA Album');
   era.setEraOverride(d(), key, 'trusted');
   assert.equal(row('x1')!.era_untrusted, 0);
-  const removed = era.setEraOverride(d(), key, null);
-  assert.equal(removed, 1, 'one override row deleted');
+  assert.equal(row('x3')!.era_untrusted, 0);
+  d().exec(`UPDATE tracks SET text_vector_dirty = 0 WHERE id IN ('x1','x2','x3','x4')`);
+  // x1/x2 carry the walk's reason, so the walk flagged them: back to 1. x3/x4
+  // have none, so the walk found nothing: they stay 0 and are not touched.
+  assert.equal(era.setEraOverride(d(), key, null), 2, 'tracks whose verdict changed');
   assert.equal(era.loadEraOverrides(d()).has(key), false);
-  // The deliberate behaviour: rows stay as they are until the next walk,
-  // which writes the (un-overridden) walk verdict again.
-  assert.equal(row('x1')!.era_untrusted, 0);
+  assert.equal(row('x1')!.era_untrusted, 1);
+  assert.equal(row('x2')!.era_untrusted, 1);
+  assert.equal(row('x1')!.text_vector_dirty, 1);
+  assert.equal(row('x3')!.era_untrusted, 0);
+  assert.equal(row('x3')!.text_vector_dirty, 0, 'unchanged, so not dirty');
+  // The album stays on the list across the Reset (it never drops off between
+  // the click and the next walk).
+  assert.ok(era.listEraAlbums(d()).some(a => a.albumKey === key));
+  // The next walk agrees with what Reset restored.
   const f = era.eraWalkFields(
     { albumArtist: 'QA Artist', album: 'QA Album', albumEraUntrusted: true, albumEraReason: 'compilation-flag' },
     era.loadEraOverrides(d()),
   );
-  assert.equal(f.eraUntrusted, true, 'with no override, the walk verdict rules again');
+  assert.equal(f.eraUntrusted, true);
   // Resetting a key with no override is a no-op, not an error.
   assert.equal(era.setEraOverride(d(), era.albumEraKey('Nobody', 'Nowhere'), null), 0);
+});
+
+test('Reset leaves a row the walk has not judged since the update to the walk', () => {
+  // Pre-step-32 rows: flagged, but no album artist and no reason stored yet.
+  d().exec(`INSERT INTO tracks (id, title, artist, album, era_untrusted) VALUES ('u1', 'Old', 'Old', 'Old Album', 1)`);
+  const key = era.albumEraKey(null, 'Old Album');
+  assert.equal(era.albumScanned(d(), key), false);
+  assert.equal(era.listEraAlbums(d()).find(a => a.albumKey === key)!.scanned, false);
+  assert.equal(era.listEraAlbums(d()).find(a => a.albumKey === key)!.verdict, null);
+  assert.equal(era.setEraOverride(d(), key, null), 0);
+  assert.equal(row('u1')!.era_untrusted, 1, 'a missing reason on an unscanned row says nothing');
+  d().exec(`DELETE FROM tracks WHERE id = 'u1'`);
+});
+
+test('the walk writes its reason with its verdict, so an album it no longer flags loses the old reason', () => {
+  db.upsertTrackMeta('r1', { title: 'R', artist: 'R', album: 'Best Of R', albumArtist: 'R', eraUntrusted: true, eraReason: 'title-compilation' });
+  assert.equal(row('r1')!.era_reason, 'title-compilation');
+  db.upsertTrackMeta('r1', { title: 'R', artist: 'R', album: 'R', albumArtist: 'R', eraUntrusted: false, eraReason: null });
+  assert.equal(row('r1')!.era_reason, null);
+  assert.equal(row('r1')!.era_untrusted, 0);
 });
 
 // ── (f) listing + summary ────────────────────────────────────────────────────
@@ -220,6 +257,8 @@ test('listEraAlbums groups by (album, album_artist) over suspect-or-overridden t
   assert.equal(qa.tracks, 4);
   assert.equal(qa.reason, 'compilation-flag');
   assert.equal(qa.overridden, true);
+  assert.equal(qa.verdict, 'suspect');
+  assert.equal(qa.scanned, true);
   const ll = albums.find(a => a.album === 'Lounging 1970-1975')!;
   assert.equal(ll.tracks, 2);
   assert.equal(ll.overridden, true);
@@ -274,14 +313,86 @@ test('exportEraCsv: RFC4180 header, quoting, and year_state values', () => {
   assert.equal(era.exportEraCsv(d()).split('\r\n').some(l => l.includes('Normal Album')), false);
 });
 
-// ── (h) routes ───────────────────────────────────────────────────────────────
+// ── (i) one stored verdict for every era reader ──────────────────────────────
 
-const { router: eraRoutes } = await import('../src/routes/library/era.js');
-const app = express();
-app.use(express.json());
-app.use(eraRoutes);
-const { server, url: base } = await listenHttp(app);
-server.unref();
+
+test('storedYearUntrusted: the walk verdict wins once known, the raw flag only before it, and SQL agrees', () => {
+  const cases: Array<[number | null, number | null, boolean | null]> = [
+    // [is_compilation, era_untrusted, expected]
+    [null, null, null], [0, null, false], [1, null, true],
+    [null, 0, false],   [0, 0, false],    [1, 0, false],   // [1, 0] only via a Trust override
+    [null, 1, true],    [0, 1, true],     [1, 1, true],
+  ];
+  d().exec(`CREATE TEMP TABLE era_cases (id INTEGER, is_compilation INTEGER, era_untrusted INTEGER)`);
+  const ins = d().prepare(`INSERT INTO era_cases VALUES (?, ?, ?)`);
+  cases.forEach(([c, e], i) => ins.run(i, c, e));
+  const sql = d().prepare(`SELECT id, ${eraSuspect.eraSuspectSql()} AS s FROM era_cases ORDER BY id`).all() as Array<{ s: number | null }>;
+  cases.forEach(([c, e, want], i) => {
+    assert.equal(eraSuspect.storedYearUntrusted(c, e), want, `JS comp=${c} era=${e}`);
+    assert.equal(sql[i].s == null ? null : sql[i].s === 1, want, `SQL comp=${c} era=${e}`);
+  });
+  d().exec(`DROP TABLE era_cases`);
+});
+
+test('Trust on a Navidrome compilation reaches every era reader: track, resolver, era filter, year lookups', () => {
+  db.upsertTrackMeta('k1', {
+    title: 'Hit', artist: 'Singer', album: 'Hits Compilation', albumArtist: 'Various Artists', year: 1975,
+    isCompilation: true, eraUntrusted: true, eraReason: 'compilation-flag',
+  });
+  const inEra = () => d().prepare(`SELECT 1 FROM tracks WHERE id = 'k1' AND ${ERA_YEAR_SQL} BETWEEN 1970 AND 1979`).get();
+  assert.equal(db.getTrack('k1')!.yearUntrusted, true);
+  assert.equal(db.resolvedEraYearForTrack('k1'), null);
+  assert.equal(inEra(), undefined, 'suspect: the reissue year never places it in the 70s');
+  assert.ok(db.idsNeedingOriginalYear().includes('k1'));
+  assert.ok(db.yearLookupDueIds(Date.now()).includes('k1'));
+
+  era.setEraOverride(d(), era.albumEraKey('Various Artists', 'Hits Compilation'), 'trusted');
+  assert.equal(db.getTrack('k1')!.yearUntrusted, false);
+  assert.equal(db.resolvedEraYearForTrack('k1'), 1975);
+  assert.ok(inEra(), 'trusted: its own year counts');
+  assert.equal(db.idsNeedingOriginalYear().includes('k1'), false, 'no lookup for a trusted album');
+  assert.equal(db.yearLookupDueIds(Date.now()).includes('k1'), false);
+  // Even with no facet row yet (a row synced before the facet existed), the
+  // due query itself reads the stored verdict.
+  d().exec(`DELETE FROM track_facet_status WHERE track_id = 'k1' AND facet = 'year'`);
+  assert.equal(db.yearLookupDueIds(Date.now()).includes('k1'), false);
+  db.syncTrackFacets('k1');
+  const yr = d().prepare(`SELECT status, reason FROM track_facet_status WHERE track_id = 'k1' AND facet = 'year'`).get() as { status: string; reason: string } | undefined;
+  assert.deepEqual(yr && { ...yr }, { status: 'ok', reason: 'not-needed' }, 'the year facet row is re-derived at once');
+
+  // A later walk keeps it trusted, and Reset hands it back.
+  db.upsertTrackMeta('k1', { title: 'Hit', isCompilation: true, ...era.eraWalkFields(
+    { albumArtist: 'Various Artists', album: 'Hits Compilation', albumEraUntrusted: true, albumEraReason: 'compilation-flag' },
+    era.loadEraOverrides(d()),
+  ) });
+  assert.equal(db.getTrack('k1')!.yearUntrusted, false);
+  era.setEraOverride(d(), era.albumEraKey('Various Artists', 'Hits Compilation'), null);
+  assert.equal(db.getTrack('k1')!.yearUntrusted, true);
+  assert.equal(db.resolvedEraYearForTrack('k1'), null);
+  d().exec(`DELETE FROM tracks WHERE id = 'k1'`);
+});
+
+test('the other era readers follow the stored verdict too: lite row, album facts, decade buckets, candidates, pool rows, vector freshness, the walk\'s facet re-derive', () => {
+  const comp = { title: 'Comp', artist: 'A', album: 'Comp LP', albumArtist: 'Various Artists', year: 1983, isCompilation: true };
+  db.upsertTrackMeta('k2', { ...comp, eraUntrusted: true, eraReason: 'compilation-flag' });
+  // A walk writing a trusted verdict on a flagged compilation (what an
+  // override makes it do) re-derives the year facet like any era change.
+  db.upsertTrackMeta('k2', { ...comp, eraUntrusted: false, eraReason: 'compilation-flag' });
+  const yr = d().prepare(`SELECT reason FROM track_facet_status WHERE track_id = 'k2' AND facet = 'year'`).get() as { reason: string };
+  assert.equal(yr.reason, 'not-needed');
+  assert.equal(db.getTrackLite('k2')!.yearUntrusted, false);
+  assert.equal(db.getAlbumFacts('k2')!.yearUntrusted, false);
+  assert.ok([...db.trackIdsByGenreDecade().entries()].some(([k, ids]) => k.endsWith('|1980') && ids.includes('k2')));
+  assert.equal(db.candidateFilterTracks().find(t => t.id === 'k2')!.yearUntrusted, false);
+  const raw = d().prepare(`SELECT * FROM tracks WHERE id = 'k2'`).get() as any;
+  assert.equal(db.rowToEnergyPool(raw).yearUntrusted, false);
+  // A vector built from the trusted era (1983) is current, so not dirty.
+  db.upsertTrackVector('k2', new Array(8).fill(0.1), 1983);
+  assert.equal(row('k2')!.text_vector_dirty, 0);
+  d().exec(`DELETE FROM tracks WHERE id = 'k2'`);
+});
+
+// ── (h) routes ───────────────────────────────────────────────────────────────
 
 const auth = `Basic ${Buffer.from('era-test-admin:era-test-pass').toString('base64')}`;
 
@@ -299,7 +410,7 @@ test('GET /library/era returns { summary, albums }', async () => {
   if (res.status !== 200) throw new Error(`body: ${await res.text()}`);
   const body = await res.json() as any;
   assert.deepEqual(Object.keys(body).sort(), ['albums', 'summary']);
-  assert.equal(body.summary.albums, 2);
+  assert.equal(body.summary.albums, 2, JSON.stringify(body.albums.map((a: any) => a.albumKey)));
   assert.equal(body.albums.find((a: any) => a.album === 'QA Album').tracks, 6); // c1+c2 joined QA
   assert.equal(body.albums.every((a: any) => typeof a.albumKey === 'string'), true);
 });
@@ -320,13 +431,23 @@ test('POST /library/era/override trusts, suspects and removes; respond carries {
   res = await post({ album: 'Lounging 1970-1975', albumArtist: 'Band L', verdict: null });
   out = await res.json() as any;
   assert.equal(out.ok, true);
-  assert.equal(out.affected, 1, 'removal counts the override row dropped');
+  assert.equal(out.affected, 2, 'removal counts the tracks restored to the walk verdict');
+  assert.equal(row('g1')!.era_untrusted, 1, 'back to what the walk said');
   assert.equal(era.loadEraOverrides(d()).has(era.albumEraKey('Band L', 'Lounging 1970-1975')), false);
 
   res = await post({ album: 'Lounging 1970-1975', albumArtist: 'Band L', verdict: 'maybe' });
   assert.equal(res.status, 400);
   res = await post({ albumArtist: 'Band L', verdict: 'trusted' });
   assert.equal(res.status, 400, 'album is required');
+
+  // An album no scan has judged since the update has no stored album artist,
+  // so an override would key on the wrong pair: refused, nothing written.
+  d().exec(`INSERT INTO tracks (id, title, artist, album, era_untrusted) VALUES ('u2', 'Old', 'Old', 'Unscanned LP', 1)`);
+  res = await post({ album: 'Unscanned LP', albumArtist: null, verdict: 'trusted' });
+  assert.equal(res.status, 409);
+  assert.equal(row('u2')!.era_untrusted, 1);
+  assert.equal(era.loadEraOverrides(d()).has(era.albumEraKey(null, 'Unscanned LP')), false);
+  d().exec(`DELETE FROM tracks WHERE id = 'u2'`);
 });
 
 test('GET /library/era/csv streams the export with a download filename', async () => {

@@ -26,6 +26,9 @@ export interface EraAlbum {
   yearUnchecked: number;
   year: number | null;
   overridden: boolean;
+  /** False until a library scan has judged the album since the update. */
+  scanned: boolean;
+  verdict: 'trusted' | 'suspect' | null;
 }
 
 export interface EraSummary {
@@ -77,7 +80,7 @@ export default function EraReviewSection() {
     onDone: async (out, vars, qc) => {
       notify.ok(
         vars.verdict === null
-          ? 'Override removed — the next library scan decides again'
+          ? `Override removed: ${out.affected} track${out.affected === 1 ? '' : 's'} back to the library scan's verdict`
           : `Saved as soon as you clicked: ${out.affected} track${out.affected === 1 ? '' : 's'} now ${vars.verdict}`,
       );
       // The override flips era_untrusted on every row of the album, and era
@@ -154,7 +157,7 @@ export default function EraReviewSection() {
       <span className="caption !tracking-[0.04em] !normal-case">
         The station treats these albums&apos; release year as the reissue&apos;s date, not the
         recordings&apos;. Trust an album to take its year at face value; Suspect one the detector
-        missed; Reset hands it back to the next library scan. Overrides save as soon as you click.
+        missed; Reset hands it back to the library scan&apos;s verdict. Saved as soon as you click.
       </span>
 
       <Input
@@ -198,13 +201,23 @@ export default function EraReviewSection() {
                   <td className="caption py-1.5 pr-3 whitespace-nowrap">{yearTally(a)}</td>
                   <td className="py-1.5">
                     <span className="flex flex-wrap gap-1.5">
-                      <Btn sm onClick={() => post(a, 'trusted')} disabled={override.isPending}
-                        title="Treat this album's year as the recordings' year">Trust</Btn>
-                      <Btn sm onClick={() => post(a, 'suspect')} disabled={override.isPending}
-                        title="Keep treating the year as the reissue's, whatever the walk says">Suspect</Btn>
-                      {a.overridden && (
-                        <Btn sm onClick={() => post(a, null)} disabled={override.isPending}
-                          title="Drop the override; the next library scan decides again">Reset</Btn>
+                      {!a.scanned || !a.album ? (
+                        <span className="caption self-center">
+                          {!a.album ? 'no album tag' : 'run a library scan (Reconcile) first'}
+                        </span>
+                      ) : (
+                        <>
+                          <Btn sm tone={a.verdict === 'trusted' ? 'accent' : undefined}
+                            onClick={() => post(a, 'trusted')} disabled={override.isPending || a.verdict === 'trusted'}
+                            title="Treat this album's year as the recordings' year">Trust</Btn>
+                          <Btn sm tone={a.verdict === 'suspect' ? 'accent' : undefined}
+                            onClick={() => post(a, 'suspect')} disabled={override.isPending || a.verdict === 'suspect'}
+                            title="Keep treating the year as the reissue's, whatever the walk says">Suspect</Btn>
+                          {a.overridden && (
+                            <Btn sm onClick={() => post(a, null)} disabled={override.isPending}
+                              title="Drop the override and go back to the library scan's verdict">Reset</Btn>
+                          )}
+                        </>
                       )}
                       {busyKey === a.albumKey && <span className="caption self-center">saving…</span>}
                     </span>

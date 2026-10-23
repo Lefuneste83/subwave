@@ -8,7 +8,7 @@ import express from 'express';
 import { requireAdmin } from '../../middleware/auth.js';
 import * as db from '../../music/library-db.js';
 import {
-  albumEraKey, countEraSummary, exportEraCsv, listEraAlbums, setEraOverride,
+  albumEraKey, albumScanned, countEraSummary, exportEraCsv, listEraAlbums, setEraOverride,
   type EraVerdict,
 } from '../../music/era-review.js';
 
@@ -38,7 +38,7 @@ router.get('/library/era', requireAdmin, (_req, res) => {
 // Body: { album, albumArtist?, verdict: 'trusted' | 'suspect' | null }.
 // The key is computed here, never taken from the client: one fold, one
 // implementation (era-review.albumEraKey). `verdict: null` REMOVES the
-// override; existing rows keep their current verdict until the next walk.
+// override and restores the walk's own verdict at once.
 router.post('/library/era/override', requireAdmin, (req, res) => {
   const d = handle(res);
   if (!d) return;
@@ -52,8 +52,15 @@ router.post('/library/era/override', requireAdmin, (req, res) => {
   if (verdict !== null && verdict !== 'trusted' && verdict !== 'suspect') {
     return res.status(400).json({ error: "verdict must be 'trusted', 'suspect' or null" });
   }
+  const key = albumEraKey(albumArtist as string | null | undefined, album);
+  // An album the walk has not judged since the update has no stored album
+  // artist yet, so an override now would key on the wrong pair and be
+  // orphaned by the next scan.
+  if (!albumScanned(d, key)) {
+    return res.status(409).json({ error: 'This album has not been scanned since the update. Run a library scan (Reconcile) first.' });
+  }
   try {
-    const affected = setEraOverride(d, albumEraKey(albumArtist as string | null | undefined, album), verdict as EraVerdict | null);
+    const affected = setEraOverride(d, key, verdict as EraVerdict | null);
     res.json({ ok: true, affected });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

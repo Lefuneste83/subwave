@@ -11,9 +11,12 @@
 // a hand-rolled join.
 //
 // Functions take the better-sqlite3 handle explicitly rather than reaching
-// through library-db, so the routes and tests share one code path.
+// through library-db, so the routes and tests share one code path. The one
+// exception is the year facet re-derive after an override, which goes through
+// facets.syncTrackFacets on the library's own (same) handle.
 
 import type Database from 'better-sqlite3';
+import { syncTrackFacets } from './library-db/facets.js';
 
 export type EraVerdict = 'trusted' | 'suspect';
 
@@ -76,6 +79,20 @@ export function eraWalkFields(
   };
 }
 
+/** A row the walk has judged since step 32: it stored the album artist, or a
+ *  reason. Only such a row's key is the one the walk will look up, and only its
+ *  era_reason says what the walk decided. */
+const SCANNED_SQL = `(album_artist IS NOT NULL OR era_reason IS NOT NULL)`;
+
+/** Has the walk judged any track of this album since step 32? An override set
+ *  before that would key on a NULL album artist the next walk then fills in,
+ *  orphaning it, so the route refuses until a library scan has run. */
+export function albumScanned(d: Database, albumKey: string): boolean {
+  return !!d.prepare(
+    `SELECT 1 FROM tracks WHERE ${ERA_ALBUM_KEY_SQL} = ? AND ${SCANNED_SQL} LIMIT 1`,
+  ).get(albumKey);
+}
+
 /**
  * Record, change, or remove an operator's verdict for one album, and apply it
  * to the existing rows immediately — the operator should not have to run a
@@ -83,28 +100,45 @@ export function eraWalkFields(
  * stored value actually changes, so text_vector_dirty is only set where the
  * era source text behind a vector genuinely moved (step 22's rule).
  *
- * `verdict: null` REMOVES the override and deliberately touches no track: the
- * next walk writes the un-overridden walk verdict again (eraWalkFields), and
- * silently re-deciding rows here would second-guess the walk's data.
+ * `verdict: null` REMOVES the override and restores the walk's own verdict at
+ * once: a walked row's era_reason is non-NULL exactly when the detector flagged
+ * it (it travels with the verdict, tracks.upsertTrackMeta), so Reset needs no
+ * walk and the album never drops off the list in between. Unscanned rows are
+ * left for the walk.
  *
- * Returns what changed: flipped track count for a verdict, dropped override
- * rows for a removal.
+ * Returns the number of tracks whose stored verdict changed.
  */
 export function setEraOverride(d: Database, albumKey: string, verdict: EraVerdict | null): number {
-  if (verdict === null) {
-    return d.prepare(`DELETE FROM era_override WHERE album_key = ?`).run(albumKey).changes;
-  }
-  d.prepare(
-    `INSERT INTO era_override (album_key, verdict, set_at) VALUES (?, ?, ?)
-     ON CONFLICT(album_key) DO UPDATE SET verdict = excluded.verdict, set_at = excluded.set_at`,
-  ).run(albumKey, verdict, new Date().toISOString());
-  const target = verdict === 'suspect' ? 1 : 0;
-  return d.prepare(
-    `UPDATE tracks
-        SET era_untrusted = ?, text_vector_dirty = 1
-      WHERE ${ERA_ALBUM_KEY_SQL} = ?
-        AND era_untrusted IS NOT ?`,
-  ).run(target, albumKey, target).changes;
+  // The value each row should hold: the override's, or (Reset) the walk's own,
+  // which a scanned row's era_reason records. Unscanned rows are left to the
+  // walk on a Reset.
+  const want = verdict === null
+    ? `(CASE WHEN era_reason IS NOT NULL THEN 1 ELSE 0 END)`
+    : verdict === 'suspect' ? '1' : '0';
+  const scope = verdict === null ? `AND ${SCANNED_SQL}` : '';
+  return d.transaction(() => {
+    if (verdict === null) {
+      d.prepare(`DELETE FROM era_override WHERE album_key = ?`).run(albumKey);
+    } else {
+      d.prepare(
+        `INSERT INTO era_override (album_key, verdict, set_at) VALUES (?, ?, ?)
+         ON CONFLICT(album_key) DO UPDATE SET verdict = excluded.verdict, set_at = excluded.set_at`,
+      ).run(albumKey, verdict, new Date().toISOString());
+    }
+    const ids = (d.prepare(
+      `SELECT id FROM tracks
+        WHERE ${ERA_ALBUM_KEY_SQL} = ? ${scope}
+          AND era_untrusted IS NOT ${want}`,
+    ).all(albumKey) as Array<{ id: string }>).map(r => r.id);
+    const flip = d.prepare(`UPDATE tracks SET era_untrusted = ${want}, text_vector_dirty = 1 WHERE id = ?`);
+    for (const id of ids) {
+      flip.run(id);
+      // The year facet reads the verdict (a trusted album needs no lookup), so
+      // its row is re-derived like any walk that changes the era columns.
+      syncTrackFacets(id);
+    }
+    return ids.length;
+  })();
 }
 
 export interface EraAlbumRow {
@@ -121,6 +155,11 @@ export interface EraAlbumRow {
   /** The album's own release-year tag, as the walk stored it. */
   year: number | null;
   overridden: boolean;
+  /** False until a library scan has judged this album since the update; the
+   *  override buttons wait for it (albumScanned). */
+  scanned: boolean;
+  /** The operator's override, when there is one. */
+  verdict: EraVerdict | null;
 }
 
 export function listEraAlbums(d: Database): EraAlbumRow[] {
@@ -135,7 +174,9 @@ export function listEraAlbums(d: Database): EraAlbumRow[] {
        SUM(CASE WHEN ${YEAR_STATE_SQL} = 'not found' THEN 1 ELSE 0 END) AS year_not_found,
        SUM(CASE WHEN ${YEAR_STATE_SQL} = 'unchecked' THEN 1 ELSE 0 END) AS year_unchecked,
        MAX(t.year) AS year,
-       MAX(CASE WHEN o.album_key IS NOT NULL THEN 1 ELSE 0 END) AS overridden
+       MAX(CASE WHEN o.album_key IS NOT NULL THEN 1 ELSE 0 END) AS overridden,
+       MAX(CASE WHEN ${SCANNED_SQL} THEN 1 ELSE 0 END) AS scanned,
+       MAX(o.verdict) AS verdict
      FROM tracks t
      LEFT JOIN era_override o ON o.album_key = ${ERA_ALBUM_KEY_SQL}
      WHERE ${ERA_SELECTION_SQL}
@@ -144,7 +185,7 @@ export function listEraAlbums(d: Database): EraAlbumRow[] {
   ).all() as Array<{
     era_album_key: string; album: string | null; album_artist: string | null; era_reason: string | null;
     tracks: number; year_resolved: number; year_not_found: number; year_unchecked: number;
-    year: number | null; overridden: number;
+    year: number | null; overridden: number; scanned: number; verdict: EraVerdict | null;
   }>;
   return rows.map(r => ({
     albumKey: r.era_album_key,
@@ -157,6 +198,8 @@ export function listEraAlbums(d: Database): EraAlbumRow[] {
     yearUnchecked: r.year_unchecked,
     year: r.year,
     overridden: !!r.overridden,
+    scanned: !!r.scanned,
+    verdict: r.verdict ?? null,
   }));
 }
 
