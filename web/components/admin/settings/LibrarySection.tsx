@@ -20,7 +20,7 @@ import { cn } from '../../../lib/cn';
 import { HeaderRowsEditor } from './LlmSection';
 import { effectiveCompatMode } from './compat-mode';
 import {
-  SectionHeader, SaveBar, KeyStatus,
+  SectionHeader, SaveBar, KeyStatus, KeyTestResult,
   headerMap,
   type SectionProps,
 } from './shared';
@@ -36,6 +36,28 @@ export function LibrarySection({ data, form, setForm, busy, saveSettings, adminF
   const e = form.embedding;
   const [embeddingKeyInput, setEmbeddingKeyInput] = useState('');
   const [compatEmbedKeyInput, setCompatEmbedKeyInput] = useState('');
+  // Discogs token: the original-year fallback. Component-local like the key
+  // boxes above, saved to state/secrets.env with the rest of the section.
+  const [discogsInput, setDiscogsInput] = useState('');
+  const [discogsTest, setDiscogsTest] = useState<{ ok: boolean; message: string; latencyMs: number } | null>(null);
+  const [discogsTesting, setDiscogsTesting] = useState(false);
+  const discogsSet = !!data.env?.['DISCOGS_TOKEN'];
+  const testDiscogs = async () => {
+    setDiscogsTesting(true);
+    setDiscogsTest(null);
+    try {
+      const r = await adminResponse(adminFetch, '/settings/secrets/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'DISCOGS_TOKEN', value: discogsInput.trim() }),
+      });
+      setDiscogsTest(await r.json());
+    } catch (err) {
+      setDiscogsTest({ ok: false, message: errorMessage(err), latencyMs: 0 });
+    } finally {
+      setDiscogsTesting(false);
+    }
+  };
 
   useEffect(() => { setEmbeddingKeyInput(''); setCompatEmbedKeyInput(''); }, [form.embedding.provider]);
 
@@ -99,6 +121,10 @@ export function LibrarySection({ data, form, setForm, busy, saveSettings, adminF
     if (embedKeyVar && embeddingKeyInput.trim()) {
       const ok = await saveKey('EMBEDDING_API_KEY', embeddingKeyInput);
       if (ok) { notify.ok('API key saved'); setEmbeddingKeyInput(''); refresh(); }
+    }
+    if (discogsInput.trim()) {
+      const ok = await saveKey('DISCOGS_TOKEN', discogsInput);
+      if (ok) { notify.ok('Discogs token saved'); setDiscogsInput(''); setDiscogsTest(null); refresh(); }
     }
   };
 
@@ -821,6 +847,34 @@ export function LibrarySection({ data, form, setForm, busy, saveSettings, adminF
               }
             />
           </div>
+
+          <div className="field">
+            <Label>Discogs token (original years)</Label>
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                type="password"
+                autoComplete="off"
+                value={discogsInput}
+                placeholder={discogsSet ? '•••••• (token saved)' : 'DISCOGS_TOKEN — or set it in .env'}
+                onChange={(ev: ChangeEvent<HTMLInputElement>) => { setDiscogsInput(ev.target.value); setDiscogsTest(null); }}
+                className="max-w-[360px]"
+              />
+              <Btn sm onClick={testDiscogs} disabled={discogsTesting || (!discogsInput.trim() && !discogsSet)}>
+                {discogsTesting ? 'Testing…' : 'Test token'}
+              </Btn>
+            </div>
+            <div className="field-hint">
+              Optional. Reissues and compilations carry the reissue&rsquo;s year, so
+              era-bounded shows ask MusicBrainz for each song&rsquo;s original year.
+              With a token, Discogs is asked when MusicBrainz has none. Create one
+              under Discogs &rarr; Settings &rarr; Developers (free). Stored in{' '}
+              <code>state/secrets.env</code>. Tracks already marked &ldquo;not
+              found&rdquo; are asked again only by{' '}
+              <code>npm run analyze -- --facets year --where unmeasurable:not-found</code>.
+            </div>
+            {discogsTest && <KeyTestResult result={discogsTest} />}
+          </div>
+          {discogsSet && <KeyStatus envVar="DISCOGS_TOKEN" present />}
         </div>
       </Card>
       </Advanced>
@@ -839,7 +893,7 @@ export function LibrarySection({ data, form, setForm, busy, saveSettings, adminF
         // Both key boxes are component-local, so the panel's FormState diff
         // can't see them; without this a pasted key looks clean and the save
         // button unmounts.
-        dirty={!!(embeddingKeyInput.trim() || compatEmbedKeyInput.trim())}
+        dirty={!!(embeddingKeyInput.trim() || compatEmbedKeyInput.trim() || discogsInput.trim())}
       />
     </>
   );
