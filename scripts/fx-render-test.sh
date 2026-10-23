@@ -897,6 +897,10 @@ jingledry() {
 #      the linear fade.in/fade.out pair, measured at the middle of the cross.
 #      Linear powers add to 0.5 there (-3 dB); equal-power must hold within
 #      1 dB of the steady level and never rise more than 1.5 dB above it.
+#      The incoming alone (out of silence) must also arrive no faster than the
+#      linear fade-in over the first quarter of the cross: a quiet ending into
+#      a loud start is a fade-in from silence, and a curve that brings the
+#      incoming up early made it abrupt (heard on air).
 #   2. the seam rule: equal_power_seam must be true for a plain song-to-song
 #      seam only. A stem-blend clip seam, a jingle, a bed, a pause break or any
 #      gesture flag keeps the linear curve (a clip is rendered FROM the tracks
@@ -914,25 +918,29 @@ eqpower() {
 
   [ -f "$WORK/eqp-a.wav" ] || ffmpeg -v error -y -f lavfi -i "anoisesrc=color=pink:seed=11:amplitude=0.25" -t 16 -ar 44100 -ac 2 "$WORK/eqp-a.wav"
   [ -f "$WORK/eqp-b.wav" ] || ffmpeg -v error -y -f lavfi -i "anoisesrc=color=pink:seed=97:amplitude=0.25" -t 16 -ar 44100 -ac 2 "$WORK/eqp-b.wav"
-  local mode
-  for mode in lin ep; do
+  [ -f "$WORK/eqp-s.wav" ] || ffmpeg -v error -y -f lavfi -i "anullsrc=r=44100:cl=stereo" -t 16 "$WORK/eqp-s.wav"
+  local mode src
+  for mode in lin ep linin epin; do
+    src=a; case "$mode" in *in) src=s ;; esac
     cat > "$WORK/eqp-$mode.liq" <<LIQ
 settings.frame.audio.samplerate := 44100
 $(cat "$WORK/eqp-fade.liq")
 d = 10.
 def trans(a, b) =
-  if "$mode" == "ep" then
+  if "$mode" == "ep" or "$mode" == "epin" then
     add(normalize=false, [equal_power_fade(span=d, rising=false, a.source), equal_power_fade(span=d, rising=true, b.source)])
   else
     add(normalize=false, [fade.out(duration=d, a.source), fade.in(duration=d, b.source)])
   end
 end
-s = cross(duration=d, trans, sequence([once(single("/work/eqp-a.wav")), once(single("/work/eqp-b.wav"))]))
+s = cross(duration=d, trans, sequence([once(single("/work/eqp-$src.wav")), once(single("/work/eqp-b.wav"))]))
 output.file(%wav, fallible=true, on_stop=shutdown, "/work/eqp-$mode.wav", s)
 LIQ
   done
   liq eqp-lin.liq > "$WORK/eqp-lin.log" 2>&1 &
   liq eqp-ep.liq > "$WORK/eqp-ep.log" 2>&1 &
+  liq eqp-linin.liq > "$WORK/eqp-linin.log" 2>&1 &
+  liq eqp-epin.liq > "$WORK/eqp-epin.log" 2>&1 &
   wait
   # Steady = A's body (1..5 s) and B's (17..21 s); the cross runs 6..16 s.
   local res
@@ -947,6 +955,15 @@ LIQ
   echo "$res" | awk '{printf "  %-3s midpoint %+.1f dB, loudest second of the cross %+.1f dB (vs steady)\n", $1, $2, $3}'
   echo "$res" | awk '$1=="lin"{ok=($2<=-2.0 && $2>=-4.5)} $1=="ep"{okp=($2>=-1.0 && $2<=1.0 && $3<=1.5)} END{exit !(ok && okp)}' \
     || { echo "EQPOWER FAIL — the linear pair should dip ~3 dB mid-cross and equal-power hold within 1 dB"; return 1; }
+  # The incoming out of silence, first quarter of the cross (6.0 .. 8.5 s).
+  local early
+  early=$(for mode in linin epin; do
+    ffmpeg -hide_banner -nostats -ss 6.0 -t 2.5 -i "$WORK/eqp-$mode.wav" -af astats=metadata=0:reset=0 -f null - 2>&1 \
+      | awk '/Overall/{o=1} o && /RMS level dB/{print $NF; exit}'
+  done | paste -sd' ')
+  echo "$early" | awk '{printf "  incoming out of silence, first quarter: linear %.1f dB, equal-power %.1f dB\n", $1, $2}'
+  echo "$early" | awk 'NF == 2 {ok = ($2 <= $1 + 0.5)} END {exit !ok}' \
+    || { echo "EQPOWER FAIL — the equal-power incoming rises faster than the linear fade-in"; return 1; }
 
   cat > "$WORK/eqp-rule-run.liq" <<LIQ
 equal_power_crossfade = ref(true)
