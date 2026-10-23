@@ -24,6 +24,10 @@ const NEVER_WRITTEN = ['id', 'genre'];
 const WALK_OWNED = [
   'title', 'artist', 'album', 'album_id', 'artist_id', 'year',
   'genres', 'duration_sec', 'is_compilation', 'era_untrusted',
+  // The era reason and album artist (C13) ride the same verdict: the walk
+  // re-derives all three together, and an old id's pair is what its own walk
+  // said about a file that may have moved.
+  'era_reason', 'album_artist',
   // The file as Navidrome reports it (walkFileInfo): the new id's own walk
   // writes them, and an old id's path may name a file that moved.
   'file_path', 'file_suffix', 'file_size', 'bit_rate',

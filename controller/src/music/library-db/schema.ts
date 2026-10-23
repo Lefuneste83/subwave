@@ -509,6 +509,27 @@ export async function migrate(embeddingDim: number, reseed = false, adoptStoredD
     d.pragma('user_version = 31');
   }
 
+  if (userVersion < 32) {
+    // Era review (C13). The walk starts storing WHY it distrusts an album
+    // (`era_reason`, the era-suspect.ts marker) and the album artist the
+    // judgement keyed on (`album_artist` — not the per-track artist), and a
+    // new table holds the operator's per-album override, keyed the way
+    // music/era-review.albumEraKey folds (album artist, album). Added only
+    // when missing, like steps 28-31: a hand-repaired db may already have
+    // them.
+    const have = new Set((d.prepare('PRAGMA table_info(tracks)').all() as Array<{ name: string }>).map(c => c.name));
+    const add = [['era_reason', 'TEXT'], ['album_artist', 'TEXT']].filter(([c]) => !have.has(c));
+    if (add.length) runDdl(d, add.map(([c, t]) => `ALTER TABLE tracks ADD COLUMN ${c} ${t};`).join('\n'));
+    runDdl(d, `
+      CREATE TABLE IF NOT EXISTS era_override (
+        album_key TEXT PRIMARY KEY,
+        verdict   TEXT NOT NULL CHECK (verdict IN ('trusted','suspect')),
+        set_at    TEXT NOT NULL
+      );
+    `);
+    d.pragma('user_version = 32');
+  }
+
   // Before the vector reconcile below, which bumps it when it drops vectors.
   // Never throws. Its update trigger names tracks.genres and tracks.moods, and
   // SQLite refuses to DROP COLUMN either while it exists: a migration above

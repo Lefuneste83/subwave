@@ -40,6 +40,8 @@ export const libraryKeys = {
   // The curatable genre vocabulary with its consolidation rules (#1577). Unlike
   // `genres`, it excludes Navidrome's own index: only what the mirror holds.
   scenes: () => ['library', 'scenes'] as const,
+  // Era review (C13): the suspect-album listing + summary.
+  era: () => ['library', 'era'] as const,
   // What a staged merge would orphan (#1593). Keyed on the merge itself.
   sceneReferences: (from: readonly string[], to: string) =>
     ['library', 'scene-references', [...from].sort().join('\u0000'), to] as const,

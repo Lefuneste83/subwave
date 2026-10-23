@@ -188,9 +188,9 @@ export function upsertTrackMeta(id: string, meta: TrackMeta): void {
   requireDb()
     .prepare(
       `
-      INSERT INTO tracks (id, title, artist, album, album_id, artist_id, year, original_year, original_year_source, is_compilation, era_untrusted, genres, duration_sec,
+      INSERT INTO tracks (id, title, artist, album, album_id, artist_id, year, original_year, original_year_source, is_compilation, era_untrusted, era_reason, album_artist, genres, duration_sec,
                           file_path, file_suffix, file_size, bit_rate)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title        = COALESCE(excluded.title, tracks.title),
         artist       = COALESCE(excluded.artist, tracks.artist),
@@ -223,6 +223,12 @@ export function upsertTrackMeta(id: string, meta: TrackMeta): void {
         END,
         is_compilation = COALESCE(excluded.is_compilation, tracks.is_compilation),
         era_untrusted  = COALESCE(excluded.era_untrusted, tracks.era_untrusted),
+        -- Era review (C13): the walk is the only writer with either, so the
+        -- same COALESCE rule as the ids. A cleared era_reason on a walk that
+        -- no longer flags the album rides the next walk's non-null verdict
+        -- columns; the listing never shows an unflagged, un-overridden row.
+        era_reason     = COALESCE(excluded.era_reason, tracks.era_reason),
+        album_artist   = COALESCE(excluded.album_artist, tracks.album_artist),
         genres       = COALESCE(excluded.genres, tracks.genres),
         duration_sec = COALESCE(excluded.duration_sec, tracks.duration_sec),
         -- File facts: only the walk has them; any other writer passes NULL.
@@ -244,6 +250,8 @@ export function upsertTrackMeta(id: string, meta: TrackMeta): void {
       normaliseYear(meta.originalYear) != null ? 'album-tag' : null,
       meta.isCompilation == null ? null : meta.isCompilation ? 1 : 0,
       meta.eraUntrusted == null ? null : meta.eraUntrusted ? 1 : 0,
+      meta.eraReason ?? null,
+      meta.albumArtist ?? null,
       meta.genres?.length ? JSON.stringify(meta.genres) : null,
       Number.isFinite(meta.duration as number) ? (meta.duration as number) : null,
       typeof meta.filePath === 'string' && meta.filePath !== '' ? meta.filePath : null,
