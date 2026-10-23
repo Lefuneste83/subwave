@@ -9,6 +9,7 @@ import { normaliseYear, rowToTrack, safeParseArray } from './rows.js';
 import { runDdl } from './schema.js';
 import { touchGenreInputs } from './genre-inputs.js';
 import { resolveEraYear } from '../era-year.js';
+import { eraSuspectSql, storedYearUntrusted } from '../era-suspect.js';
 import { MAX_ANALYSIS_FAILURES, analysisFailureExclusion } from '../analyze-capability.js';
 
 export { MAX_ANALYSIS_FAILURES, analysisFailureExclusion } from '../analyze-capability.js';
@@ -66,9 +67,7 @@ export function getTrackLite(id: string): TrackLite | null {
     originalYear: row.original_year ?? null,
     isCompilation: row.is_compilation == null ? null : !!row.is_compilation,
     // Same composition as rowToTrack; era consumers read this, not the raw flag.
-    yearUntrusted: (row.is_compilation === 1 || row.era_untrusted === 1)
-      ? true
-      : (row.is_compilation == null && row.era_untrusted == null ? null : false),
+    yearUntrusted: storedYearUntrusted(row.is_compilation, row.era_untrusted),
     durationSec: row.duration_sec ?? null,
     // Edge dead air: an auto-playlist play has no queue item carrying the
     // stamped cue points, so /now-playing resolves the trim from the row.
@@ -90,10 +89,8 @@ export function getAlbumFacts(id: string): { isCompilation: boolean | null; year
   if (!row) return null;
   return {
     isCompilation: row.is_compilation == null ? null : !!row.is_compilation,
-    // Same composition as rowToTrack/getTrackLite: OR, not COALESCE.
-    yearUntrusted: (row.is_compilation === 1 || row.era_untrusted === 1)
-      ? true
-      : (row.is_compilation == null && row.era_untrusted == null ? null : false),
+    // Same composition as rowToTrack/getTrackLite.
+    yearUntrusted: storedYearUntrusted(row.is_compilation, row.era_untrusted),
   };
 }
 
@@ -134,7 +131,7 @@ function storedEra(id: string): StoredEra | null {
 }
 
 function resolvedStoredEra(row: StoredEra): number | null {
-  const untrusted = row.is_compilation === 1 || row.era_untrusted === 1;
+  const untrusted = storedYearUntrusted(row.is_compilation, row.era_untrusted) === true;
   return resolveEraYear(row.year, row.original_year, untrusted);
 }
 
@@ -149,7 +146,7 @@ export function resolvedEraYearForTrack(id: string): number | null {
 function syncYearIfEraChanged(id: string, before: StoredEra | null): void {
   const after = storedEra(id);
   if (!after) return;
-  const suspect = (r: StoredEra) => r.is_compilation === 1 || r.era_untrusted === 1;
+  const suspect = (r: StoredEra) => storedYearUntrusted(r.is_compilation, r.era_untrusted) === true;
   if (before && suspect(before) === suspect(after) && before.original_year === after.original_year) return;
   syncTrackFacets(id);
 }
@@ -223,11 +220,13 @@ export function upsertTrackMeta(id: string, meta: TrackMeta): void {
         END,
         is_compilation = COALESCE(excluded.is_compilation, tracks.is_compilation),
         era_untrusted  = COALESCE(excluded.era_untrusted, tracks.era_untrusted),
-        -- Era review (C13): the walk is the only writer with either, so the
-        -- same COALESCE rule as the ids. A cleared era_reason on a walk that
-        -- no longer flags the album rides the next walk's non-null verdict
-        -- columns; the listing never shows an unflagged, un-overridden row.
-        era_reason     = COALESCE(excluded.era_reason, tracks.era_reason),
+        -- Era review (C13): the reason travels WITH the verdict. A writer that
+        -- passes a verdict (the walk) writes its reason too, NULL included, so
+        -- an album the detector no longer flags drops its old reason; a writer
+        -- without a verdict keeps both. NULL reason on a walked row = the walk
+        -- found nothing, which is what a Reset restores (era-review.ts).
+        era_reason     = CASE WHEN excluded.era_untrusted IS NULL THEN tracks.era_reason
+                              ELSE excluded.era_reason END,
         album_artist   = COALESCE(excluded.album_artist, tracks.album_artist),
         genres       = COALESCE(excluded.genres, tracks.genres),
         duration_sec = COALESCE(excluded.duration_sec, tracks.duration_sec),
@@ -276,7 +275,7 @@ export function idsNeedingOriginalYear(retryMisses = false): string[] {
         // Era-suspect, not just flagged. SQL twin of
         // musicbrainz.needsOriginalYearLookup; the two must stay in agreement.
         `SELECT id FROM tracks
-          WHERE (is_compilation = 1 OR era_untrusted = 1)
+          WHERE ${eraSuspectSql()}
             AND original_year IS NULL ${extra}`,
       )
       .all() as Array<{ id: string }>
@@ -904,7 +903,7 @@ export function upsertTrackVector(
         SET text_vector_dirty = CASE
           WHEN (CASE
             WHEN original_year > 0 THEN original_year
-            WHEN is_compilation = 1 OR era_untrusted = 1 THEN NULL
+            WHEN ${eraSuspectSql()} THEN NULL
             WHEN year > 0 THEN year
             ELSE NULL
           END) IS ? THEN 0 ELSE 1 END
