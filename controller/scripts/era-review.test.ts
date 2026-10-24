@@ -157,12 +157,12 @@ test('trusted override survives a second walk and a third', () => {
 test('setEraOverride flips existing rows at once and marks text_vector_dirty only where the value actually changes', () => {
   // Four tracks on one album key, in each stored state, all clean to start.
   d().exec(`
-    INSERT INTO tracks (id, title, artist, album, album_artist, era_untrusted, era_reason, text_vector_dirty)
+    INSERT INTO tracks (id, title, artist, album, album_artist, era_untrusted, era_reason, text_vector_dirty, year)
     VALUES
-      ('x1', 'One',   'QA', 'QA Album', 'QA Artist', 1,    'compilation-flag', 0),
-      ('x2', 'Two',   'QA', 'QA Album', 'QA Artist', 1,    'compilation-flag', 0),
-      ('x3', 'Three', 'QA', 'QA Album', 'QA Artist', 0,    NULL,               0),
-      ('x4', 'Four',  'QA', 'QA Album', 'QA Artist', NULL, NULL,               0);
+      ('x1', 'One',   'QA', 'QA Album', 'QA Artist', 1,    'compilation-flag', 0, 1994),
+      ('x2', 'Two',   'QA', 'QA Album', 'QA Artist', 1,    'compilation-flag', 0, 1994),
+      ('x3', 'Three', 'QA', 'QA Album', 'QA Artist', 0,    NULL,               0, 1994),
+      ('x4', 'Four',  'QA', 'QA Album', 'QA Artist', NULL, NULL,               0, 1994);
   `);
   const key = era.albumEraKey('QA Artist', 'QA Album');
   const affected = era.setEraOverride(d(), key, 'trusted');
@@ -230,6 +230,46 @@ test('the walk writes its reason with its verdict, so an album it no longer flag
   db.upsertTrackMeta('r1', { title: 'R', artist: 'R', album: 'R', albumArtist: 'R', eraUntrusted: false, eraReason: null });
   assert.equal(row('r1')!.era_reason, null);
   assert.equal(row('r1')!.era_untrusted, 0);
+});
+
+test('an override re-embeds only tracks whose Era: line moves: no resolved year, and a file year', () => {
+  d().exec(`
+    INSERT INTO tracks (id, title, artist, album, album_artist, era_untrusted, era_reason, text_vector_dirty, year, original_year)
+    VALUES
+      ('v1', 'Open',     'V', 'V Album', 'V Artist', 1, 'many-artists', 0, 1988, NULL),
+      ('v2', 'Resolved', 'V', 'V Album', 'V Artist', 1, 'many-artists', 0, 1988, 1969),
+      ('v3', 'No year',  'V', 'V Album', 'V Artist', 1, 'many-artists', 0, NULL, NULL);
+  `);
+  const key = era.albumEraKey('V Artist', 'V Album');
+  assert.equal(era.setEraOverride(d(), key, 'trusted'), 3, 'all three verdicts change');
+  assert.equal(row('v1')!.text_vector_dirty, 1, 'its era goes from unknown to 1988');
+  assert.equal(row('v2')!.text_vector_dirty, 0, 'the resolved 1969 wins either way: vector kept');
+  assert.equal(row('v3')!.text_vector_dirty, 0, 'no year either way: vector kept');
+  era.setEraOverride(d(), key, null);
+  d().exec(`DELETE FROM tracks WHERE id IN ('v1','v2','v3')`);
+});
+
+test('albumEraKey folds the way SQLite does, so non-ASCII names key the same on both sides', () => {
+  const names: Array<[string | null, string]> = [
+    ['Serge Gainsbourg', "Volume 7 L'Homme À La Tête De Chou 1975-1978"],
+    ['Erlend Øye', 'DJ-Kicks'],
+    ['  Ça Va  ', ' ÉTÉ '],
+    [null, 'Bare Album'],
+    ['\tTabbed', 'Album\u00a0'],
+  ];
+  const sql = d().prepare(`SELECT ${era.ERA_ALBUM_KEY_SQL} AS k FROM (SELECT ? AS album_artist, ? AS album)`);
+  for (const [artist, album] of names) {
+    assert.equal(era.albumEraKey(artist, album), (sql.get(artist, album) as { k: string }).k, `${artist} / ${album}`);
+  }
+  // And end to end: an override on such an album is accepted and applied.
+  db.upsertTrackMeta('n1', { title: 'N', artist: 'Serge Gainsbourg', album: names[0][1], albumArtist: 'Serge Gainsbourg',
+    year: 1989, eraUntrusted: true, eraReason: 'title-year-range' });
+  const key = era.albumEraKey('Serge Gainsbourg', names[0][1]);
+  assert.equal(era.albumScanned(d(), key), true);
+  assert.equal(era.setEraOverride(d(), key, 'trusted'), 1);
+  assert.equal(row('n1')!.era_untrusted, 0);
+  era.setEraOverride(d(), key, null);
+  d().exec(`DELETE FROM tracks WHERE id = 'n1'`);
 });
 
 // ── (f) listing + summary ────────────────────────────────────────────────────

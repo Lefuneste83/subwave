@@ -24,7 +24,9 @@ export function Tabs({ tab, setTab }: {
     // `!` because `.admin-root .lib-*` outranks a bare utility.
     <div className="lib-tabs !flex-wrap sm:!flex-nowrap">
       {items.map(it => (
-        <button key={it.id} type="button" className={cn('lib-tab !px-2.5 sm:!px-[18px]', tab === it.id && 'on')} onClick={() => setTab(it.id)}>
+        // sm:!basis-0: equal widths from sm: up (each still never below its
+        // content), instead of widths that follow each subtitle's length.
+        <button key={it.id} type="button" className={cn('lib-tab !px-2.5 sm:!basis-0 sm:!px-[18px]', tab === it.id && 'on')} onClick={() => setTab(it.id)}>
           {it.icon}
           <span className="min-w-0">
             <span className="lib-tab-name">{it.name}</span>
