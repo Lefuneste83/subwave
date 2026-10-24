@@ -42,6 +42,9 @@ export const libraryKeys = {
   scenes: () => ['library', 'scenes'] as const,
   // Era review (C13): the suspect-album listing + summary.
   era: () => ['library', 'era'] as const,
+  // One album's tracks in the Era tab's year editor; under `era`, so a
+  // decision's invalidation of the listing refreshes it too.
+  eraAlbum: (albumKey: string) => ['library', 'era', 'album', albumKey] as const,
   // What a staged merge would orphan (#1593). Keyed on the merge itself.
   sceneReferences: (from: readonly string[], to: string) =>
     ['library', 'scene-references', [...from].sort().join('\u0000'), to] as const,

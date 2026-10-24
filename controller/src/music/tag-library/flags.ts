@@ -6,7 +6,7 @@ import * as subsonic from '../subsonic.js';
 import * as db from '../library-db.js';
 import * as embeddings from '../embeddings.js';
 import { adoptAndPrune } from '../id-rotation.js';
-import { eraWalkFields, loadEraOverrides, type EraVerdict } from '../era-review.js';
+import { applyWalkForcedYear, eraWalkFields, loadEraOverrides, type EraOverride } from '../era-review.js';
 import { loadSecretsIntoEnv } from '../../setup/secrets.js';
 import { loadNavidromeConfig } from '../../setup/config.js';
 import { reportProgress, reportCatalogueReady } from '../tagger-progress.js';
@@ -127,11 +127,11 @@ export async function walkNavidrome(): Promise<{ walked: number; liveIds: Set<st
   // Blast radius of the era gate, reported once at the end so an operator sees
   // it in the log rather than as a show that stopped picking (#1418).
   const eraReasons = new Map<string, number>();
-  // Operator era overrides (C13), read ONCE before the loop: an override
-  // replaces the walk's stored verdict for its album, and the walk is what
-  // makes a Reset take effect (the override map is re-read fresh each walk).
+  // Operator era records (C13), read ONCE before the loop: a decision replaces
+  // the walk's stored verdict for its album, a kind replaces the title's
+  // suggestion, and a one-year decision reaches tracks added since.
   const rawDb = db.getDb();
-  const eraOverrides: Map<string, EraVerdict> = rawDb ? loadEraOverrides(rawDb) : new Map();
+  const eraOverrides: Map<string, EraOverride> = rawDb ? loadEraOverrides(rawDb) : new Map();
   for await (const song of subsonic.iterateAllSongs({ requireComplete: true })) {
     const eraFields = eraWalkFields(song, eraOverrides);
     db.upsertTrackMeta(song.id, {
@@ -157,11 +157,16 @@ export async function walkNavidrome(): Promise<{ walked: number; liveIds: Set<st
       // Why the walk flagged it (audit truth — never rewritten by an
       // override), and the album artist the override key folds on (C13).
       eraReason: eraFields.eraReason,
+      albumKind: eraFields.albumKind,
       albumArtist: eraFields.albumArtist,
       genres: subsonic.songGenres(song),
       duration: song.duration,
       ...walkFileInfo(song),
     });
+    // A one-year decision (Library → Era) on this album: a track that arrived
+    // after it, or lost its year, gets it as its manual year. A track that
+    // already holds a manual year keeps it (the operator set that one).
+    applyWalkForcedYear(song.id, eraFields.forcedYear);
     liveIds.add(song.id);
     if (song.albumEraUntrusted && song.albumEraReason) {
       eraReasons.set(song.albumEraReason, (eraReasons.get(song.albumEraReason) ?? 0) + 1);

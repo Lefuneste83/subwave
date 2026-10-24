@@ -1,19 +1,28 @@
 'use client';
 
-// Era review (C13): the albums the walk refuses to trust the release year of,
-// per-album, with the reason that fired and the operator's override. Trust an
-// album and its year is taken at face value again; Suspect an album the
-// detector missed; Reset hands it back to the walk. The CSV is the same
-// listing as a spreadsheet, for reviewing the tail offline.
-import { useMemo, useState } from 'react';
-import { Download, CalendarClock } from 'lucide-react';
+// Era review (C13): the albums whose release year the walk refuses to take as
+// the recordings' year. Each album gets a KIND (pre-filled from its title, set
+// here) and a DECISION, and the decision is what takes it out of "To review":
+//   - Year is right: every track uses its file year;
+//   - One year: that year becomes every track's hand-set year, for good;
+//   - Per track: each track keeps its own looked-up or hand-set year — the
+//     album leaves the list once every track has one (edit them inline).
+// "Decided" keeps every handled album, for undoing. The detector's reason
+// (why the album looked suspect) is a small hint only: several kinds share it.
+import { Fragment, useMemo, useState } from 'react';
+import type { QueryClient } from '@tanstack/react-query';
+import { CalendarClock, ChevronDown, ChevronRight, Download } from 'lucide-react';
 import { adminJson, adminResponse } from '../../../lib/admin-query';
 import { notify } from '../../../lib/notify';
+import { ALBUM_KINDS, ALBUM_KIND_LABELS, type AlbumKind } from '../../../lib/schemas.generated';
 import { Btn, Pill } from '../ui';
 import { Input } from '../../ui/input';
-import { libraryKeys } from './queries';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../ui/select';
+import { applyEraYearEvent, libraryKeys } from './queries';
 import { useLibrary } from './LibraryContext';
 import { useAdminMutation, useAdminQuery } from './useAdminQuery';
+
+type Verdict = 'trusted' | 'year' | 'suspect';
 
 export interface EraAlbum {
   albumKey: string;
@@ -28,7 +37,14 @@ export interface EraAlbum {
   overridden: boolean;
   /** False until a library scan has judged the album since the update. */
   scanned: boolean;
-  verdict: 'trusted' | 'suspect' | null;
+  verdict: Verdict | null;
+  forcedYear: number | null;
+  kind: AlbumKind | null;
+  /** The operator chose the kind; false = the title's suggestion. */
+  kindSet: boolean;
+  suggestedVerdict: Verdict | null;
+  /** Out of "To review". */
+  done: boolean;
 }
 
 export interface EraSummary {
@@ -38,83 +54,113 @@ export interface EraSummary {
   overridden: number;
 }
 
+interface EraTrack {
+  id: string;
+  title: string | null;
+  artist: string | null;
+  year: number | null;
+  originalYear: number | null;
+  originalYearSource: string | null;
+  yearState: 'resolved' | 'not found' | 'unchecked';
+}
+
 interface EraResponse { albums: EraAlbum[]; summary: EraSummary }
-interface OverrideResponse { ok: boolean; affected: number }
+interface WriteResponse { ok: boolean; affected: number }
 
 const NO_ALBUMS: EraAlbum[] = [];
-const NO_SUMMARY: EraSummary = { albums: 0, tracks: 0, byReason: {}, overridden: 0 };
+const NO_KIND = '__none';
 
-// The detector's markers, in the operator's words. Keyed by the server's
-// reason codes (music/era-suspect.ts) so a new marker reads as its raw code
-// rather than vanishing from the table.
-// Which era-suspect.ts marker fired, in the order it checks them.
+// Why the detector flagged it, in the operator's words. Various Artists and
+// many artists are one signal here: several artists on the record.
 const REASON_LABEL: Record<string, string> = {
-  'compilation-flag': 'tagged compilation',
-  'various-artists': 'various artists',
-  'many-artists': 'many artists',
+  'compilation-flag': 'compilation tag',
+  'various-artists': 'several artists',
+  'many-artists': 'several artists',
   'title-compilation': 'best-of title',
   'title-year-range': 'year range in title',
 };
 const REASON_HINT: Record<string, string> = {
   'compilation-flag': "The files carry a compilation tag (COMPILATION / iTunes 'cpil'), so Navidrome marks the album a compilation.",
-  'various-artists': "The album artist is 'Various Artists' (or a variant of it).",
-  'many-artists': 'No lead artist dominates: at least 5 different lead artists over 8+ tracks, none on 30% of them. Catches anthologies with no compilation tag.',
-  'title-compilation': "One artist, but the title reads like a compilation: 'Best of', 'Greatest Hits', 'Anthology', 'Rarities', 'B-Sides', 'The Collection', 'Complete … Singles', a DJ mix…",
-  'title-year-range': "The title spans years, like 'Singles 1968-1974': a retrospective, so its release year is not the recordings'.",
+  'various-artists': "Several artists: the album artist is 'Various Artists'.",
+  'many-artists': 'Several artists: no lead artist dominates (at least 5 different leads over 8+ tracks, none on 30% of them).',
+  'title-compilation': "The title reads like a compilation: 'Best of', 'Greatest Hits', 'Anthology', 'The Collection', 'Rarities', a DJ mix… (checked before a year range, so it wins).",
+  'title-year-range': "The title spans years, like 'Singles 1968-1974'.",
 };
-const REASON_ORDER = ['compilation-flag', 'various-artists', 'many-artists', 'title-compilation', 'title-year-range'];
 
-// A quick filter from the summary line. `needs-year`: at least one track has no
-// recording year yet (not found or not checked) — the albums where a verdict
-// still changes something.
-type Pick = null | 'overridden' | 'needs-year' | `reason:${string}`;
-const needsYear = (a: EraAlbum) => a.yearNotFound + a.yearUnchecked > 0;
+const DECISION_LABEL: Record<Verdict, string> = { trusted: 'Year is right', year: 'One year', suspect: 'Per track' };
+const DECISION_HINT: Record<Verdict, string> = {
+  trusted: "Every track uses its file year (an original album, a dated compilation whose tracks are that year's).",
+  year: 'One year for every track, set by hand and kept for good: no lookup overwrites it, and tracks added later get it too.',
+  suspect: 'Each track keeps its own year, looked up or set by hand. The album leaves the list once every track has one.',
+};
 
-const yearTally = (a: EraAlbum) =>
-  `${a.yearResolved} resolved · ${a.yearNotFound} not found · ${a.yearUnchecked} unchecked`;
+const yearTally = (a: EraAlbum) => {
+  const missing = a.yearNotFound + a.yearUnchecked;
+  return missing ? `${a.yearResolved}/${a.tracks} years known` : `all ${a.tracks} years known`;
+};
+
+type View = 'review' | 'decided';
 
 export default function EraReviewSection() {
   const { adminFetch } = useLibrary();
   const [filter, setFilter] = useState('');
-  // The album key whose override request is in flight; others stay clickable.
+  const [view, setView] = useState<View>('review');
+  const [kindPick, setKindPick] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  const [yearDraft, setYearDraft] = useState<Record<string, string>>({});
 
-  const data = useAdminQuery<EraResponse>({
-    key: libraryKeys.era(),
-    path: '/library/era',
-    toastOnError: true,
-  });
+  const data = useAdminQuery<EraResponse>({ key: libraryKeys.era(), path: '/library/era', toastOnError: true });
 
-  const override = useAdminMutation<OverrideResponse, { album: string; albumArtist: string | null; verdict: 'trusted' | 'suspect' | null }>({
-    request: (vars, fetcher) =>
-      adminJson<OverrideResponse>(fetcher, '/library/era/override', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(vars),
-      }),
+  const refresh = async (qc: QueryClient) => {
+    // A decision flips era_untrusted or writes years on every row of the album,
+    // which the browse filters and coverage tallies read too.
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: libraryKeys.era() }),
+      qc.invalidateQueries({ queryKey: libraryKeys.rows }),
+      qc.invalidateQueries({ queryKey: libraryKeys.coverage() }),
+    ]);
+  };
+
+  const decide = useAdminMutation<WriteResponse, { album: string; albumArtist: string | null; verdict: Verdict | null; year?: number }>({
+    request: (vars, fetcher) => adminJson<WriteResponse>(fetcher, '/library/era/override', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(vars),
+    }),
     onDone: async (out, vars, qc) => {
-      notify.ok(
-        vars.verdict === null
-          ? `Override removed: ${out.affected} track${out.affected === 1 ? '' : 's'} back to the library scan's verdict`
-          : `Saved as soon as you clicked: ${out.affected} track${out.affected === 1 ? '' : 's'} now ${vars.verdict}`,
-      );
-      // The override flips era_untrusted on every row of the album, and era
-      // is read by the browse filters and coverage tallies too.
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: libraryKeys.era() }),
-        qc.invalidateQueries({ queryKey: libraryKeys.rows }),
-        qc.invalidateQueries({ queryKey: libraryKeys.coverage() }),
-      ]);
+      const n = `${out.affected} track${out.affected === 1 ? '' : 's'}`;
+      notify.ok(vars.verdict === null
+        ? `Decision removed: ${n} back to the library scan's verdict`
+        : `Saved: ${DECISION_LABEL[vars.verdict]}${vars.verdict === 'year' ? ` ${vars.year}` : ''} · ${n} changed`);
+      await refresh(qc);
     },
   });
 
-  const post = (a: EraAlbum, verdict: 'trusted' | 'suspect' | null) => {
-    if (override.isPending) return; // one save at a time; clicks are ignored while pending
+  const setKind = useAdminMutation<WriteResponse, { album: string; albumArtist: string | null; kind: AlbumKind | null }>({
+    request: (vars, fetcher) => adminJson<WriteResponse>(fetcher, '/library/era/kind', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(vars),
+    }),
+    onDone: async (_out, vars, qc) => {
+      notify.ok(vars.kind ? `Saved: ${ALBUM_KIND_LABELS[vars.kind]}` : 'Kind cleared: back to the title suggestion');
+      await refresh(qc);
+    },
+  });
+
+  const pending = decide.isPending || setKind.isPending;
+  const run = (a: EraAlbum, fn: () => void) => {
+    if (pending) return; // one save at a time; clicks are ignored while pending
     setBusyKey(a.albumKey);
-    override.mutate(
-      { album: a.album ?? '', albumArtist: a.albumArtist, verdict },
-      { onSettled: () => setBusyKey(null) },
-    );
+    fn();
+  };
+  const settle = { onSettled: () => setBusyKey(null) };
+  const post = (a: EraAlbum, verdict: Verdict | null, year?: number) =>
+    run(a, () => decide.mutate({ album: a.album ?? '', albumArtist: a.albumArtist, verdict, ...(year != null && { year }) }, settle));
+  const postKind = (a: EraAlbum, kind: AlbumKind | null) =>
+    run(a, () => setKind.mutate({ album: a.album ?? '', albumArtist: a.albumArtist, kind }, settle));
+  const postYear = (a: EraAlbum) => {
+    const raw = (yearDraft[a.albumKey] ?? String(a.forcedYear ?? a.year ?? '')).trim();
+    const y = Number(raw);
+    if (!Number.isInteger(y) || y < 1000) { notify.err('Type a four-digit year first'); return; }
+    post(a, 'year', y);
   };
 
   const [downloading, setDownloading] = useState(false);
@@ -125,12 +171,12 @@ export default function EraReviewSection() {
       const r = await adminResponse(adminFetch, '/library/era/csv');
       const blob = await r.blob();
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'era-suspects.csv';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'era-suspects.csv';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
       URL.revokeObjectURL(url);
     } catch (e) {
       notify.err(e instanceof Error ? e.message : String(e));
@@ -139,25 +185,26 @@ export default function EraReviewSection() {
     }
   };
 
-  const summary = data.data?.summary ?? NO_SUMMARY;
   const albums = data.data?.albums ?? NO_ALBUMS;
-  const [pick, setPick] = useState<Pick>(null);
-  const toggle = (p: Pick) => setPick(cur => (cur === p ? null : p));
-  const reasonAlbums = useMemo(() => {
+  const inView = useMemo(() => albums.filter(a => (view === 'decided' ? a.done : !a.done)), [albums, view]);
+  const counts = useMemo(() => ({
+    review: albums.filter(a => !a.done).length,
+    decided: albums.filter(a => a.done).length,
+  }), [albums]);
+  const kindCounts = useMemo(() => {
     const m = new Map<string, number>();
-    for (const a of albums) if (a.reason) m.set(a.reason, (m.get(a.reason) ?? 0) + 1);
+    for (const a of inView) m.set(a.kind ?? NO_KIND, (m.get(a.kind ?? NO_KIND) ?? 0) + 1);
     return m;
-  }, [albums]);
-  const needsYearAlbums = useMemo(() => albums.filter(needsYear).length, [albums]);
+  }, [inView]);
   const shown = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    return albums.filter(a => {
-      if (pick === 'overridden' && !a.overridden) return false;
-      if (pick === 'needs-year' && !needsYear(a)) return false;
-      if (pick?.startsWith('reason:') && a.reason !== pick.slice(7)) return false;
+    return inView.filter(a => {
+      if (kindPick && (a.kind ?? NO_KIND) !== kindPick) return false;
       return !q || (a.album ?? '').toLowerCase().includes(q) || (a.albumArtist ?? '').toLowerCase().includes(q);
     });
-  }, [albums, filter, pick]);
+  }, [inView, filter, kindPick]);
+
+  const switchView = (v: View) => { setView(v); setKindPick(null); };
 
   return (
     <div className="grid gap-3 border border-ink bg-bg p-4">
@@ -165,32 +212,14 @@ export default function EraReviewSection() {
         <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-ink">
           <CalendarClock size={13} /> Era review
         </span>
-        <Pill tone={pick === null ? 'accent' : 'ink'} pressed={pick === null} onClick={() => setPick(null)}
-          title="Show every album">
-          all {summary.albums} album{summary.albums === 1 ? '' : 's'} · {summary.tracks} tracks
+        <Pill tone={view === 'review' ? 'accent' : 'ink'} pressed={view === 'review'} onClick={() => switchView('review')}
+          title="Albums still waiting for a decision, or for track years">
+          to review: {counts.review}
         </Pill>
-        {summary.overridden > 0 && (
-          <Pill tone={pick === 'overridden' ? 'accent' : 'ink'} pressed={pick === 'overridden'}
-            onClick={() => toggle('overridden')} title="Albums you set Trust or Suspect on">
-            overridden: {summary.overridden}
-          </Pill>
-        )}
-        {needsYearAlbums > 0 && (
-          <Pill tone={pick === 'needs-year' ? 'accent' : 'ink'} pressed={pick === 'needs-year'}
-            onClick={() => toggle('needs-year')}
-            title="Albums with at least one track whose recording year is still unknown: there, Trust or Suspect changes what era shows hear">
-            needs a year: {needsYearAlbums}
-          </Pill>
-        )}
-        {REASON_ORDER.filter(r => reasonAlbums.has(r)).map(reason => {
-          const p: Pick = `reason:${reason}`;
-          return (
-            <Pill key={reason} tone={pick === p ? 'accent' : 'ink'} pressed={pick === p}
-              onClick={() => toggle(p)} title={REASON_HINT[reason]}>
-              {REASON_LABEL[reason] ?? reason}: {reasonAlbums.get(reason)}
-            </Pill>
-          );
-        })}
+        <Pill tone={view === 'decided' ? 'accent' : 'ink'} pressed={view === 'decided'} onClick={() => switchView('decided')}
+          title="Albums you decided on, or whose every track has a year: normal entries, kept here so you can undo">
+          decided: {counts.decided}
+        </Pill>
         <span className="ml-auto">
           <Btn sm onClick={downloadCsv} disabled={downloading} title="Every track on an era-suspect album, as CSV">
             <Download size={13} /> {downloading ? 'Preparing…' : 'Download CSV'}
@@ -198,10 +227,20 @@ export default function EraReviewSection() {
         </span>
       </div>
 
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="caption">kind:</span>
+        {[...ALBUM_KINDS, NO_KIND].filter(k => kindCounts.has(k)).map(k => (
+          <Pill key={k} tone={kindPick === k ? 'accent' : 'ink'} pressed={kindPick === k}
+            onClick={() => setKindPick(cur => (cur === k ? null : k))}>
+            {k === NO_KIND ? 'unclassified' : ALBUM_KIND_LABELS[k as AlbumKind]}: {kindCounts.get(k)}
+          </Pill>
+        ))}
+      </div>
+
       <span className="caption !tracking-[0.04em] !normal-case">
-        The station treats these albums&apos; release year as the reissue&apos;s date, not the
-        recordings&apos;. Trust an album to take its year at face value; Suspect one the detector
-        missed; Reset hands it back to the library scan&apos;s verdict. Saved as soon as you click.
+        Set what each album is, then how its tracks get their year: <b>Year is right</b>, <b>One year</b> for every
+        track, or <b>Per track</b> (open the album to type the missing ones). A decided album is a normal entry
+        again. Saved as soon as you click.
       </span>
 
       <Input
@@ -215,69 +254,180 @@ export default function EraReviewSection() {
       {data.isPending ? (
         <span className="caption">loading…</span>
       ) : shown.length === 0 ? (
-        albums.length > 0 ? (
-          <span className="caption">No album matches this filter.</span>
-        ) : (
-        <span className="caption">No era-suspect albums. The walk flags compilations, various-artist
-          releases and titles like &ldquo;Best of&rdquo; or &ldquo;Singles 1968-1974&rdquo;.</span>
-        )
+        <span className="caption">
+          {albums.length === 0
+            ? 'No era-suspect albums. The walk flags compilations, various-artist releases and titles like “Best of” or “Singles 1968-1974”.'
+            : view === 'review' && !kindPick && !filter ? 'Nothing left to review.' : 'No album matches this filter.'}
+        </span>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[640px] border-collapse text-[12px]">
+          <table className="w-full min-w-[760px] border-collapse text-[12px]">
             <thead>
               <tr className="caption text-left">
                 <th className="py-1 pr-3 font-bold">Album — artist</th>
-                <th className="py-1 pr-3 font-bold">Reason</th>
-                <th className="py-1 pr-3 font-bold">Tracks</th>
-                <th className="py-1 pr-3 font-bold">Year lookups</th>
-                <th className="py-1 font-bold">Override</th>
+                <th className="py-1 pr-3 font-bold">Kind</th>
+                <th className="py-1 pr-3 font-bold">Years</th>
+                <th className="py-1 font-bold">Decision</th>
               </tr>
             </thead>
             <tbody>
-              {shown.map(a => (
-                <tr key={a.albumKey} className="border-t border-ink align-middle">
-                  <td className="max-w-[280px] py-1.5 pr-3">
-                    <span className="block truncate text-ink">{a.album ?? '(no album tag)'}</span>
-                    <span className="caption block truncate">
-                      {a.albumArtist ?? '(no album artist)'}{a.year != null ? ` · ${a.year}` : ''}
-                    </span>
-                  </td>
-                  <td className="py-1.5 pr-3">
-                    <Pill tone={a.overridden ? 'accent' : 'ink'} title={a.reason ? REASON_HINT[a.reason] : 'Only your override lists it'}>
-                      {a.reason ? (REASON_LABEL[a.reason] ?? a.reason) : 'operator'}
-                    </Pill>
-                  </td>
-                  <td className="mono-num py-1.5 pr-3">{a.tracks}</td>
-                  <td className="caption py-1.5 pr-3 whitespace-nowrap">{yearTally(a)}</td>
-                  <td className="py-1.5">
-                    <span className="flex flex-wrap gap-1.5">
-                      {!a.scanned || !a.album ? (
-                        <span className="caption self-center">
-                          {!a.album ? 'no album tag' : 'run a library scan (Reconcile) first'}
-                        </span>
-                      ) : (
-                        <>
-                          <Btn sm tone={a.verdict === 'trusted' ? 'accent' : undefined}
-                            onClick={() => post(a, 'trusted')} disabled={override.isPending || a.verdict === 'trusted'}
-                            title="Treat this album's year as the recordings' year">Trust</Btn>
-                          <Btn sm tone={a.verdict === 'suspect' ? 'accent' : undefined}
-                            onClick={() => post(a, 'suspect')} disabled={override.isPending || a.verdict === 'suspect'}
-                            title="Keep treating the year as the reissue's, whatever the walk says">Suspect</Btn>
-                          {a.overridden && (
-                            <Btn sm onClick={() => post(a, null)} disabled={override.isPending}
-                              title="Drop the override and go back to the library scan's verdict">Reset</Btn>
-                          )}
-                        </>
-                      )}
-                      {busyKey === a.albumKey && <span className="caption self-center">saving…</span>}
-                    </span>
-                  </td>
-                </tr>
-              ))}
+              {shown.map(a => {
+                const blocked = !a.scanned || !a.album;
+                const open = openKey === a.albumKey;
+                return (
+                  <Fragment key={a.albumKey}>
+                    <tr className="border-t border-ink align-middle">
+                      <td className="max-w-[300px] py-1.5 pr-3">
+                        <button type="button" className="flex max-w-full items-start gap-1 text-left"
+                          onClick={() => setOpenKey(open ? null : a.albumKey)} aria-expanded={open}
+                          title={open ? 'Hide the tracks' : 'Show the tracks and their years'}>
+                          {open ? <ChevronDown size={13} className="mt-0.5 shrink-0" /> : <ChevronRight size={13} className="mt-0.5 shrink-0" />}
+                          <span className="min-w-0">
+                            <span className="block truncate text-ink">{a.album ?? '(no album tag)'}</span>
+                            <span className="caption block truncate">
+                              {a.albumArtist ?? '(no album artist)'}{a.year != null ? ` · ${a.year}` : ''} · {a.tracks} tracks
+                            </span>
+                          </span>
+                        </button>
+                        {a.reason && (
+                          <span className="caption mt-0.5 block pl-4" title={REASON_HINT[a.reason]}>
+                            flagged: {REASON_LABEL[a.reason] ?? a.reason}
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-1.5 pr-3">
+                        <Select value={a.kind ?? NO_KIND} disabled={blocked || pending}
+                          onValueChange={v => postKind(a, v === NO_KIND ? null : (v as AlbumKind))}>
+                          <SelectTrigger className={a.kindSet ? 'h-7 w-[170px] text-xs' : 'h-7 w-[170px] text-xs italic'}
+                            aria-label={`Kind of ${a.album ?? 'album'}`}
+                            title={a.kindSet ? 'Set by you' : 'Suggested from the title: pick one to confirm or correct it'}>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value={NO_KIND}>{a.kindSet ? 'use the title suggestion' : 'unclassified'}</SelectItem>
+                            {ALBUM_KINDS.map(k => <SelectItem key={k} value={k}>{ALBUM_KIND_LABELS[k]}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                        {!a.kindSet && a.kind && <span className="caption mt-0.5 block">suggested</span>}
+                      </td>
+                      <td className="caption py-1.5 pr-3 whitespace-nowrap">{yearTally(a)}</td>
+                      <td className="py-1.5">
+                        {blocked ? (
+                          <span className="caption">{!a.album ? 'no album tag' : 'run a library scan (Reconcile) first'}</span>
+                        ) : (
+                          <span className="flex flex-wrap items-center gap-1.5">
+                            <Btn sm tone={a.verdict === 'trusted' ? 'accent' : undefined} disabled={pending || a.verdict === 'trusted'}
+                              onClick={() => post(a, 'trusted')} title={DECISION_HINT.trusted}>
+                              {DECISION_LABEL.trusted}
+                            </Btn>
+                            <span className="inline-flex items-center gap-1">
+                              <Input type="number" inputMode="numeric" className="h-7 w-[68px] px-1.5 text-xs"
+                                aria-label={`One year for every track of ${a.album}`}
+                                value={yearDraft[a.albumKey] ?? String(a.forcedYear ?? a.year ?? '')}
+                                onChange={e => setYearDraft(d => ({ ...d, [a.albumKey]: e.currentTarget.value }))} />
+                              <Btn sm tone={a.verdict === 'year' ? 'accent' : undefined} disabled={pending}
+                                onClick={() => postYear(a)} title={DECISION_HINT.year}>
+                                {DECISION_LABEL.year}
+                              </Btn>
+                            </span>
+                            <Btn sm tone={a.verdict === 'suspect' ? 'accent' : undefined} disabled={pending || a.verdict === 'suspect'}
+                              onClick={() => { post(a, 'suspect'); setOpenKey(a.albumKey); }} title={DECISION_HINT.suspect}>
+                              {DECISION_LABEL.suspect}
+                            </Btn>
+                            {a.verdict && (
+                              <Btn sm disabled={pending} onClick={() => post(a, null)}
+                                title="Drop the decision and go back to the library scan's verdict">Reset</Btn>
+                            )}
+                            {!a.verdict && a.suggestedVerdict && (
+                              <span className="caption">suggested: {DECISION_LABEL[a.suggestedVerdict]}</span>
+                            )}
+                            {busyKey === a.albumKey && <span className="caption">saving…</span>}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                    {open && !blocked && (
+                      <tr className="align-top">
+                        <td colSpan={4} className="pb-3 pl-5">
+                          <AlbumTracks album={a} />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>
       )}
     </div>
+  );
+}
+
+const SOURCE_LABEL: Record<string, string> = {
+  manual: 'set by hand', musicbrainz: 'MusicBrainz', discogs: 'Discogs', 'album-tag': 'album tag',
+};
+
+// One album's tracks with their recording years; a missing or wrong one is
+// typed in place (the Library's own hand-set year, POST /library/original-year).
+function AlbumTracks({ album }: { album: EraAlbum }) {
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const q = new URLSearchParams({ album: album.album ?? '', albumArtist: album.albumArtist ?? '' });
+  const tracks = useAdminQuery<{ tracks: EraTrack[] }>({
+    key: libraryKeys.eraAlbum(album.albumKey),
+    path: `/library/era/album?${q}`,
+    toastOnError: true,
+  });
+  const save = useAdminMutation<{ ok: boolean }, { id: string; originalYear: number | null }>({
+    request: (vars, fetcher) => adminJson<{ ok: boolean }>(fetcher, '/library/original-year', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: vars.id, originalYear: vars.originalYear, applyToAlbum: false }),
+    }),
+    onDone: async (_out, vars, qc) => {
+      notify.ok(vars.originalYear == null ? 'Year cleared' : `Year ${vars.originalYear} saved`);
+      applyEraYearEvent(qc, { originalYear: vars.originalYear, trackIds: [vars.id] });
+      await qc.invalidateQueries({ queryKey: libraryKeys.era() });
+    },
+  });
+  const commit = (t: EraTrack) => {
+    if (save.isPending) return;
+    const raw = (draft[t.id] ?? '').trim();
+    if (raw === '') return;
+    const y = Number(raw);
+    if (!Number.isInteger(y) || y < 1000) { notify.err('Type a four-digit year'); return; }
+    save.mutate({ id: t.id, originalYear: y });
+  };
+
+  if (tracks.isPending) return <span className="caption">loading tracks…</span>;
+  const rows = tracks.data?.tracks ?? [];
+  return (
+    <table className="w-full border-collapse text-[11px]">
+      <tbody>
+        {rows.map(t => (
+          <tr key={t.id} className="border-t border-[var(--separator)]">
+            <td className="max-w-[320px] truncate py-1 pr-3">{t.title ?? '(untitled)'} <span className="caption">— {t.artist ?? '?'}</span></td>
+            <td className="caption py-1 pr-3 whitespace-nowrap">file {t.year ?? '—'}</td>
+            <td className="py-1 pr-3 whitespace-nowrap">
+              {t.originalYear != null
+                ? <>{t.originalYear} <span className="caption">({SOURCE_LABEL[t.originalYearSource ?? ''] ?? t.originalYearSource})</span></>
+                : <span className="caption">{t.yearState === 'not found' ? 'not found' : 'not looked up yet'}</span>}
+            </td>
+            <td className="py-1">
+              <span className="inline-flex items-center gap-1">
+                <Input type="number" inputMode="numeric" className="h-6 w-[64px] px-1.5 text-[11px]"
+                  aria-label={`Recording year of ${t.title}`} placeholder="year"
+                  value={draft[t.id] ?? ''} onChange={e => setDraft(d => ({ ...d, [t.id]: e.currentTarget.value }))}
+                  onKeyDown={e => { if (e.key === 'Enter') commit(t); }} />
+                <Btn sm disabled={save.isPending || !(draft[t.id] ?? '').trim()} onClick={() => commit(t)}>Set</Btn>
+                {t.originalYearSource === 'manual' && (
+                  <Btn sm disabled={save.isPending} onClick={() => save.mutate({ id: t.id, originalYear: null })}
+                    title="Clear the hand-set year; the lookups take the track back">Clear</Btn>
+                )}
+              </span>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }

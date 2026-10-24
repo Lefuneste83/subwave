@@ -8,9 +8,10 @@ import express from 'express';
 import { requireAdmin } from '../../middleware/auth.js';
 import * as db from '../../music/library-db.js';
 import {
-  albumEraKey, albumScanned, countEraSummary, exportEraCsv, listEraAlbums, setEraOverride,
-  type EraVerdict,
+  albumEraKey, albumScanned, countEraSummary, exportEraCsv, listEraAlbums, listEraAlbumTracks,
+  setEraKind, setEraOverride, type EraVerdict,
 } from '../../music/era-review.js';
+import { ALBUM_KINDS, isAlbumKind, type AlbumKind } from '../../music/album-kind.js';
 
 export const router = express.Router();
 
@@ -35,33 +36,83 @@ router.get('/library/era', requireAdmin, (_req, res) => {
   }
 });
 
-// Body: { album, albumArtist?, verdict: 'trusted' | 'suspect' | null }.
-// The key is computed here, never taken from the client: one fold, one
-// implementation (era-review.albumEraKey). `verdict: null` REMOVES the
-// override and restores the walk's own verdict at once.
+// Every per-album route names the album as { album, albumArtist? } and the key
+// is computed here, never taken from the client: one fold, one implementation
+// (era-review.albumEraKey). An album the walk has not judged since the update
+// has no stored album artist yet, so a record keyed now would be orphaned by
+// the next scan: 409 until a scan has run.
+function albumKeyOf(res: express.Response, d: NonNullable<ReturnType<typeof db.getDb>>, src: Record<string, unknown>): string | null {
+  const { album, albumArtist } = src;
+  if (typeof album !== 'string' || album.trim() === '') {
+    res.status(400).json({ error: 'album is required' });
+    return null;
+  }
+  if (albumArtist != null && typeof albumArtist !== 'string') {
+    res.status(400).json({ error: 'albumArtist must be a string when present' });
+    return null;
+  }
+  const key = albumEraKey(albumArtist as string | null | undefined, album);
+  if (!albumScanned(d, key)) {
+    res.status(409).json({ error: 'This album has not been scanned since the update. Run a library scan (Reconcile) first.' });
+    return null;
+  }
+  return key;
+}
+
+// Body: { album, albumArtist?, verdict: 'trusted' | 'year' | 'suspect' | null,
+// year? }. 'year' needs `year` (applied to every track as its manual original
+// year); `verdict: null` removes the decision and restores the walk's own.
 router.post('/library/era/override', requireAdmin, (req, res) => {
   const d = handle(res);
   if (!d) return;
-  const { album, albumArtist, verdict } = (req.body ?? {}) as Record<string, unknown>;
-  if (typeof album !== 'string' || album.trim() === '') {
-    return res.status(400).json({ error: 'album is required' });
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const { verdict, year } = body;
+  if (verdict !== null && verdict !== 'trusted' && verdict !== 'suspect' && verdict !== 'year') {
+    return res.status(400).json({ error: "verdict must be 'trusted', 'year', 'suspect' or null" });
   }
-  if (albumArtist != null && typeof albumArtist !== 'string') {
-    return res.status(400).json({ error: 'albumArtist must be a string when present' });
+  const maxYear = new Date().getFullYear() + 1;
+  if (verdict === 'year' && !(Number.isInteger(year) && (year as number) >= 1000 && (year as number) <= maxYear)) {
+    return res.status(400).json({ error: `year must be a whole year between 1000 and ${maxYear}` });
   }
-  if (verdict !== null && verdict !== 'trusted' && verdict !== 'suspect') {
-    return res.status(400).json({ error: "verdict must be 'trusted', 'suspect' or null" });
-  }
-  const key = albumEraKey(albumArtist as string | null | undefined, album);
-  // An album the walk has not judged since the update has no stored album
-  // artist yet, so an override now would key on the wrong pair and be
-  // orphaned by the next scan.
-  if (!albumScanned(d, key)) {
-    return res.status(409).json({ error: 'This album has not been scanned since the update. Run a library scan (Reconcile) first.' });
-  }
+  const key = albumKeyOf(res, d, body);
+  if (!key) return;
   try {
-    const affected = setEraOverride(d, key, verdict as EraVerdict | null);
+    const affected = setEraOverride(d, key, verdict as EraVerdict | null, { year: verdict === 'year' ? (year as number) : null });
     res.json({ ok: true, affected });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Body: { album, albumArtist?, kind: <ALBUM_KINDS id> | null }. null goes back
+// to the title's suggestion.
+router.post('/library/era/kind', requireAdmin, (req, res) => {
+  const d = handle(res);
+  if (!d) return;
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const { kind } = body;
+  if (kind !== null && !isAlbumKind(kind)) {
+    return res.status(400).json({ error: `kind must be one of: ${ALBUM_KINDS.join(', ')}, or null` });
+  }
+  const key = albumKeyOf(res, d, body);
+  if (!key) return;
+  try {
+    const affected = setEraKind(d, key, kind as AlbumKind | null);
+    res.json({ ok: true, affected });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ?album=&albumArtist= — one album's tracks, for the per-track year editor.
+router.get('/library/era/album', requireAdmin, (req, res) => {
+  const d = handle(res);
+  if (!d) return;
+  const q = req.query as Record<string, unknown>;
+  const key = albumKeyOf(res, d, { album: q.album, albumArtist: typeof q.albumArtist === 'string' && q.albumArtist !== '' ? q.albumArtist : null });
+  if (!key) return;
+  try {
+    res.json({ tracks: listEraAlbumTracks(d, key) });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

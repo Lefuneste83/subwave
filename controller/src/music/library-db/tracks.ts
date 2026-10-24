@@ -185,9 +185,9 @@ export function upsertTrackMeta(id: string, meta: TrackMeta): void {
   requireDb()
     .prepare(
       `
-      INSERT INTO tracks (id, title, artist, album, album_id, artist_id, year, original_year, original_year_source, is_compilation, era_untrusted, era_reason, album_artist, genres, duration_sec,
+      INSERT INTO tracks (id, title, artist, album, album_id, artist_id, year, original_year, original_year_source, is_compilation, era_untrusted, era_reason, album_kind, album_artist, genres, duration_sec,
                           file_path, file_suffix, file_size, bit_rate)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title        = COALESCE(excluded.title, tracks.title),
         artist       = COALESCE(excluded.artist, tracks.artist),
@@ -227,6 +227,11 @@ export function upsertTrackMeta(id: string, meta: TrackMeta): void {
         -- found nothing, which is what a Reset restores (era-review.ts).
         era_reason     = CASE WHEN excluded.era_untrusted IS NULL THEN tracks.era_reason
                               ELSE excluded.era_reason END,
+        -- The album's effective kind (era-review.eraWalkFields) rides the
+        -- verdict the same way, so an album that stops being flagged and has
+        -- no operator kind drops out of every show's excludedAlbumKinds.
+        album_kind     = CASE WHEN excluded.era_untrusted IS NULL THEN tracks.album_kind
+                              ELSE excluded.album_kind END,
         album_artist   = COALESCE(excluded.album_artist, tracks.album_artist),
         genres       = COALESCE(excluded.genres, tracks.genres),
         duration_sec = COALESCE(excluded.duration_sec, tracks.duration_sec),
@@ -250,6 +255,7 @@ export function upsertTrackMeta(id: string, meta: TrackMeta): void {
       meta.isCompilation == null ? null : meta.isCompilation ? 1 : 0,
       meta.eraUntrusted == null ? null : meta.eraUntrusted ? 1 : 0,
       meta.eraReason ?? null,
+      meta.albumKind ?? null,
       meta.albumArtist ?? null,
       meta.genres?.length ? JSON.stringify(meta.genres) : null,
       Number.isFinite(meta.duration as number) ? (meta.duration as number) : null,
@@ -329,6 +335,17 @@ export function recordOriginalYearOutcome(id: string, outcome: OriginalYearOutco
 // sources. `year: null` REMOVES the override rather than pinning "unknown": the
 // track re-enters the automatic pipeline. The old embedding stays in the KNN
 // index marked dirty, so the next tag pass replaces its stale `Era:` line.
+/** Ids of every track whose album has one of these kinds (Library → Era), for
+ *  a show's excludedAlbumKinds. A plain scan: the set is small and it runs once
+ *  per pick, beside the excluded-playlist fetch it joins. */
+export function albumKindTrackIds(kinds: readonly string[]): Set<string> {
+  if (!kinds.length) return new Set();
+  const rows = requireDb()
+    .prepare(`SELECT id FROM tracks WHERE album_kind IN (${kinds.map(() => '?').join(',')})`)
+    .all(...kinds) as Array<{ id: string }>;
+  return new Set(rows.map(r => r.id));
+}
+
 export function setManualOriginalYear(id: string, year: number | null): void {
   const eraBefore = storedEra(id);
   if (year != null) {

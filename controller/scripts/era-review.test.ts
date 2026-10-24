@@ -72,13 +72,41 @@ test('step 32 adds era_reason, album_artist and the era_override table on an old
     assert.equal(cols().has('era_reason'), true);
     assert.equal(cols().has('album_artist'), true);
     assert.equal(hasTable('era_override'), true);
-    assert.equal(d().pragma('user_version', { simple: true }) as number, 32);
+    assert.equal(d().pragma('user_version', { simple: true }) as number, 33);
     // Re-running the step must not throw (ADD COLUMN on an existing column does).
     assert.equal(cols().has('era_reason'), true);
   });
 });
 
-test('era_override refuses a verdict outside trusted/suspect', () => {
+test('step 33 rebuilds era_override with kind and forced year, keeping every v32 verdict', () => {
+  // Back to the v32 shape: verdict NOT NULL trusted/suspect, no kind, no year.
+  d().exec(`
+    DROP TABLE era_override;
+    CREATE TABLE era_override (
+      album_key TEXT PRIMARY KEY,
+      verdict   TEXT NOT NULL CHECK (verdict IN ('trusted','suspect')),
+      set_at    TEXT NOT NULL
+    );
+    ALTER TABLE tracks DROP COLUMN album_kind;
+  `);
+  // NUL inside exec() SQL would end the statement: bind the key.
+  d().prepare(`INSERT INTO era_override VALUES (?, 'trusted', '2026-10-24T00:00:00Z')`).run('a\u0000b');
+  d().pragma('user_version = 32');
+  db.close();
+  return db.open({ embeddingDim: 8, adoptStoredDim: true }).then(() => {
+    assert.equal(d().pragma('user_version', { simple: true }) as number, 33);
+    assert.ok(cols().has('album_kind'));
+    const oc = (d().pragma('table_info(era_override)') as Array<{ name: string }>).map(c => c.name);
+    assert.deepEqual(oc, ['album_key', 'verdict', 'forced_year', 'kind', 'set_at']);
+    const row = d().prepare(`SELECT verdict, kind, set_at FROM era_override WHERE album_key = ?`).get('a\u0000b') as any;
+    assert.deepEqual({ ...row }, { verdict: 'trusted', kind: null, set_at: '2026-10-24T00:00:00Z' });
+    // A kind alone (no decision) is now a valid row.
+    d().prepare(`INSERT INTO era_override (album_key, verdict, kind, set_at) VALUES (?, NULL, 'dj-mix', 'now')`).run('k\u0000only');
+    d().exec(`DELETE FROM era_override`);
+  });
+});
+
+test('era_override refuses a verdict outside trusted/suspect/year', () => {
   assert.throws(() => d()
     .prepare(`INSERT INTO era_override(album_key, verdict, set_at) VALUES ('k', 'maybe', 'now')`)
     .run());
@@ -107,19 +135,19 @@ test('upsertTrackMeta stores era_reason and album_artist, and a writer without t
 // ── (c) the override-aware walk write ────────────────────────────────────────
 
 test('a trusted override stores 0 while the walk reason survives', () => {
-  const overrides = new Map([[era.albumEraKey('Various Artists', 'Summer 1998'), 'trusted' as const]]);
+  const overrides = new Map([[era.albumEraKey('Various Artists', 'Summer 1998'), { verdict: 'trusted' as const, forcedYear: null, kind: null }]]);
   const f = era.eraWalkFields({
     albumArtist: 'Various Artists', album: 'Summer 1998',
     albumEraUntrusted: true, albumEraReason: 'various-artists',
   }, overrides);
-  assert.deepEqual(f, { eraUntrusted: false, eraReason: 'various-artists', albumArtist: 'Various Artists' });
+  assert.deepEqual(f, { eraUntrusted: false, eraReason: 'various-artists', albumArtist: 'Various Artists', albumKind: 'chart', forcedYear: null });
   db.upsertTrackMeta('w1', { title: 'Track One', artist: 'Band', album: 'Summer 1998', ...f });
   assert.equal(row('w1')!.era_untrusted, 0);
   assert.equal(row('w1')!.era_reason, 'various-artists', 'the walk reason is audit truth, the override never rewrites it');
 });
 
 test('a suspect override flips a walk verdict that was clear', () => {
-  const overrides = new Map([[era.albumEraKey('Solo Artist', 'The Anthology 1970-1975'), 'suspect' as const]]);
+  const overrides = new Map([[era.albumEraKey('Solo Artist', 'The Anthology 1970-1975'), { verdict: 'suspect' as const, forcedYear: null, kind: null }]]);
   const f = era.eraWalkFields({
     albumArtist: 'Solo Artist', album: 'The Anthology 1970-1975',
     albumEraUntrusted: false, albumEraReason: null,
@@ -131,7 +159,7 @@ test('a suspect override flips a walk verdict that was clear', () => {
 // ── (d) the override survives repeated walks ─────────────────────────────────
 
 test('trusted override survives a second walk and a third', () => {
-  const overrides = new Map([[era.albumEraKey('Various Artists', 'Summer 1998'), 'trusted' as const]]);
+  const overrides = new Map([[era.albumEraKey('Various Artists', 'Summer 1998'), { verdict: 'trusted' as const, forcedYear: null, kind: null }]]);
   for (let i = 0; i < 2; i++) {
     const f = era.eraWalkFields({
       albumArtist: 'Various Artists', album: 'Summer 1998',
@@ -175,7 +203,7 @@ test('setEraOverride flips existing rows at once and marks text_vector_dirty onl
   assert.equal(row('x4')!.era_untrusted, 0, 'NULL means no evidence, trusted normalizes it to 0');
   assert.equal(row('x4')!.text_vector_dirty, 1);
   // And the override itself is recorded, so the next walk agrees.
-  assert.equal(era.loadEraOverrides(d()).get(key), 'trusted');
+  assert.equal(era.loadEraOverrides(d()).get(key)!.verdict, 'trusted');
 
   // Suspect over a trusted row flips it the other way.
   assert.equal(era.setEraOverride(d(), key, 'suspect'), 4);
@@ -339,7 +367,7 @@ test('exportEraCsv: RFC4180 header, quoting, and year_state values', () => {
   const lines = csv.trimEnd().split('\r\n');
   assert.equal(
     lines[0],
-    'id,artist,title,album,album_artist,era_reason,overridden,year,original_year,year_state,file_path,file_suffix,bit_rate,file_size,duration_sec',
+    'id,artist,title,album,album_artist,era_reason,album_kind,decision,forced_year,overridden,year,original_year,original_year_source,year_state,file_path,file_suffix,bit_rate,file_size,duration_sec',
   );
   assert.ok(lines.some(l => l.includes('"Hello, ""World"""')), 'comma/quote title is quoted and escaped');
   const c1 = lines.find(l => l.startsWith('c1,'))!;

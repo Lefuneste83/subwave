@@ -530,6 +530,35 @@ export async function migrate(embeddingDim: number, reseed = false, adoptStoredD
     d.pragma('user_version = 32');
   }
 
+  if (userVersion < 33) {
+    // Era review, second shape. The override row becomes the album's whole
+    // record: an optional decision (`verdict`: 'trusted' = the album year is
+    // right, 'year' = one year for every track in `forced_year`, 'suspect' =
+    // per-track years), and/or the operator's `kind` (music/album-kind.ts).
+    // Either may be NULL, so the CHECK changes, and SQLite can only change a
+    // CHECK by rebuilding the table; existing verdicts carry over as they are.
+    // `tracks.album_kind` is the walk-written effective kind (the operator's,
+    // else the title's suggestion) that a show's excludedAlbumKinds reads.
+    // One transaction: a crash between the DROP and the RENAME must not leave
+    // the station with no override table.
+    d.transaction(() => runDdl(d, `
+      CREATE TABLE IF NOT EXISTS era_override_v33 (
+        album_key   TEXT PRIMARY KEY,
+        verdict     TEXT CHECK (verdict IS NULL OR verdict IN ('trusted','suspect','year')),
+        forced_year INTEGER,
+        kind        TEXT,
+        set_at      TEXT NOT NULL
+      );
+      INSERT OR IGNORE INTO era_override_v33 (album_key, verdict, set_at)
+        SELECT album_key, verdict, set_at FROM era_override;
+      DROP TABLE era_override;
+      ALTER TABLE era_override_v33 RENAME TO era_override;
+    `))();
+    const have = (d.prepare('PRAGMA table_info(tracks)').all() as Array<{ name: string }>).some(c => c.name === 'album_kind');
+    if (!have) runDdl(d, 'ALTER TABLE tracks ADD COLUMN album_kind TEXT;');
+    d.pragma('user_version = 33');
+  }
+
   // Before the vector reconcile below, which bumps it when it drops vectors.
   // Never throws. Its update trigger names tracks.genres and tracks.moods, and
   // SQLite refuses to DROP COLUMN either while it exists: a migration above
