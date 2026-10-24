@@ -20,12 +20,22 @@ import { syncTrackFacets } from './library-db/facets.js';
 
 export type EraVerdict = 'trusted' | 'suspect';
 
-/** The override table's primary key for an (album artist, album) pair. */
-export function albumEraKey(albumArtist: string | null | undefined, album: string | null | undefined): string {
-  return `${(albumArtist ?? '').trim().toLowerCase()}\u0000${(album ?? '').trim().toLowerCase()}`;
+/** SQLite's own fold, reproduced: LOWER() changes only ASCII A-Z and TRIM()
+ *  strips only spaces. JS toLowerCase()/trim() fold far more ('À' → 'à', tabs,
+ *  NBSP), and a key folded differently on the two sides never matches: the
+ *  override is refused as "not scanned" ('Volume 7 L'Homme À La Tête De Chou',
+ *  'Erlend Øye'). */
+function sqliteFold(s: string | null | undefined): string {
+  return (s ?? '').replace(/^ +| +$/g, '').replace(/[A-Z]/g, c => c.toLowerCase());
 }
 
-/** SQL twin of albumEraKey over the tracks columns. Keep the two in step. */
+/** The override table's primary key for an (album artist, album) pair. */
+export function albumEraKey(albumArtist: string | null | undefined, album: string | null | undefined): string {
+  return `${sqliteFold(albumArtist)}\u0000${sqliteFold(album)}`;
+}
+
+/** SQL twin of albumEraKey over the tracks columns. Keep the two in step
+ *  (albumEraKey folds the way these SQLite built-ins do). */
 export const ERA_ALBUM_KEY_SQL =
   "LOWER(TRIM(COALESCE(album_artist, ''))) || char(0) || LOWER(TRIM(COALESCE(album, '')))";
 
@@ -97,8 +107,11 @@ export function albumScanned(d: Database, albumKey: string): boolean {
  * Record, change, or remove an operator's verdict for one album, and apply it
  * to the existing rows immediately — the operator should not have to run a
  * walk for their click to take effect. An UPDATE restricted to rows whose
- * stored value actually changes, so text_vector_dirty is only set where the
- * era source text behind a vector genuinely moved (step 22's rule).
+ * stored value actually changes. text_vector_dirty is set only where the
+ * embedding's `Era:` line really moves (step 22's rule): the verdict decides
+ * that line only for a track with no resolved original year and a file year.
+ * A resolved track keeps its vector, so trusting a catalogue of resolved
+ * albums no longer queues a library-wide re-embed.
  *
  * `verdict: null` REMOVES the override and restores the walk's own verdict at
  * once: a walked row's era_reason is non-NULL exactly when the detector flagged
@@ -130,7 +143,13 @@ export function setEraOverride(d: Database, albumKey: string, verdict: EraVerdic
         WHERE ${ERA_ALBUM_KEY_SQL} = ? ${scope}
           AND era_untrusted IS NOT ${want}`,
     ).all(albumKey) as Array<{ id: string }>).map(r => r.id);
-    const flip = d.prepare(`UPDATE tracks SET era_untrusted = ${want}, text_vector_dirty = 1 WHERE id = ?`);
+    const flip = d.prepare(
+      `UPDATE tracks
+          SET era_untrusted = ${want},
+              text_vector_dirty = CASE WHEN COALESCE(original_year, 0) <= 0 AND year > 0
+                                       THEN 1 ELSE text_vector_dirty END
+        WHERE id = ?`,
+    );
     for (const id of ids) {
       flip.run(id);
       // The year facet reads the verdict (a trusted album needs no lookup), so

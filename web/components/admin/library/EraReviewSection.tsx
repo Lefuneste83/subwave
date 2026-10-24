@@ -47,13 +47,28 @@ const NO_SUMMARY: EraSummary = { albums: 0, tracks: 0, byReason: {}, overridden:
 // The detector's markers, in the operator's words. Keyed by the server's
 // reason codes (music/era-suspect.ts) so a new marker reads as its raw code
 // rather than vanishing from the table.
+// Which era-suspect.ts marker fired, in the order it checks them.
 const REASON_LABEL: Record<string, string> = {
-  'compilation-flag': 'compilation flag',
+  'compilation-flag': 'tagged compilation',
   'various-artists': 'various artists',
   'many-artists': 'many artists',
+  'title-compilation': 'best-of title',
   'title-year-range': 'year range in title',
-  'title-compilation': 'says compilation',
 };
+const REASON_HINT: Record<string, string> = {
+  'compilation-flag': "The files carry a compilation tag (COMPILATION / iTunes 'cpil'), so Navidrome marks the album a compilation.",
+  'various-artists': "The album artist is 'Various Artists' (or a variant of it).",
+  'many-artists': 'No lead artist dominates: at least 5 different lead artists over 8+ tracks, none on 30% of them. Catches anthologies with no compilation tag.',
+  'title-compilation': "One artist, but the title reads like a compilation: 'Best of', 'Greatest Hits', 'Anthology', 'Rarities', 'B-Sides', 'The Collection', 'Complete … Singles', a DJ mix…",
+  'title-year-range': "The title spans years, like 'Singles 1968-1974': a retrospective, so its release year is not the recordings'.",
+};
+const REASON_ORDER = ['compilation-flag', 'various-artists', 'many-artists', 'title-compilation', 'title-year-range'];
+
+// A quick filter from the summary line. `needs-year`: at least one track has no
+// recording year yet (not found or not checked) — the albums where a verdict
+// still changes something.
+type Pick = null | 'overridden' | 'needs-year' | `reason:${string}`;
+const needsYear = (a: EraAlbum) => a.yearNotFound + a.yearUnchecked > 0;
 
 const yearTally = (a: EraAlbum) =>
   `${a.yearResolved} resolved · ${a.yearNotFound} not found · ${a.yearUnchecked} unchecked`;
@@ -126,12 +141,23 @@ export default function EraReviewSection() {
 
   const summary = data.data?.summary ?? NO_SUMMARY;
   const albums = data.data?.albums ?? NO_ALBUMS;
+  const [pick, setPick] = useState<Pick>(null);
+  const toggle = (p: Pick) => setPick(cur => (cur === p ? null : p));
+  const reasonAlbums = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const a of albums) if (a.reason) m.set(a.reason, (m.get(a.reason) ?? 0) + 1);
+    return m;
+  }, [albums]);
+  const needsYearAlbums = useMemo(() => albums.filter(needsYear).length, [albums]);
   const shown = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    return q
-      ? albums.filter(a => (a.album ?? '').toLowerCase().includes(q) || (a.albumArtist ?? '').toLowerCase().includes(q))
-      : albums;
-  }, [albums, filter]);
+    return albums.filter(a => {
+      if (pick === 'overridden' && !a.overridden) return false;
+      if (pick === 'needs-year' && !needsYear(a)) return false;
+      if (pick?.startsWith('reason:') && a.reason !== pick.slice(7)) return false;
+      return !q || (a.album ?? '').toLowerCase().includes(q) || (a.albumArtist ?? '').toLowerCase().includes(q);
+    });
+  }, [albums, filter, pick]);
 
   return (
     <div className="grid gap-3 border border-ink bg-bg p-4">
@@ -139,14 +165,32 @@ export default function EraReviewSection() {
         <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-ink">
           <CalendarClock size={13} /> Era review
         </span>
-        <Pill tone="ink">{summary.albums} album{summary.albums === 1 ? '' : 's'}</Pill>
-        <Pill tone="ink">{summary.tracks} track{summary.tracks === 1 ? '' : 's'}</Pill>
-        {summary.overridden > 0 && <Pill tone="accent">{summary.overridden} overridden</Pill>}
-        {Object.entries(summary.byReason)
-          .sort((a, b) => b[1] - a[1])
-          .map(([reason, n]) => (
-            <Pill key={reason}>{REASON_LABEL[reason] ?? reason}: {n}</Pill>
-          ))}
+        <Pill tone={pick === null ? 'accent' : 'ink'} pressed={pick === null} onClick={() => setPick(null)}
+          title="Show every album">
+          all {summary.albums} album{summary.albums === 1 ? '' : 's'} · {summary.tracks} tracks
+        </Pill>
+        {summary.overridden > 0 && (
+          <Pill tone={pick === 'overridden' ? 'accent' : 'ink'} pressed={pick === 'overridden'}
+            onClick={() => toggle('overridden')} title="Albums you set Trust or Suspect on">
+            overridden: {summary.overridden}
+          </Pill>
+        )}
+        {needsYearAlbums > 0 && (
+          <Pill tone={pick === 'needs-year' ? 'accent' : 'ink'} pressed={pick === 'needs-year'}
+            onClick={() => toggle('needs-year')}
+            title="Albums with at least one track whose recording year is still unknown: there, Trust or Suspect changes what era shows hear">
+            needs a year: {needsYearAlbums}
+          </Pill>
+        )}
+        {REASON_ORDER.filter(r => reasonAlbums.has(r)).map(reason => {
+          const p: Pick = `reason:${reason}`;
+          return (
+            <Pill key={reason} tone={pick === p ? 'accent' : 'ink'} pressed={pick === p}
+              onClick={() => toggle(p)} title={REASON_HINT[reason]}>
+              {REASON_LABEL[reason] ?? reason}: {reasonAlbums.get(reason)}
+            </Pill>
+          );
+        })}
         <span className="ml-auto">
           <Btn sm onClick={downloadCsv} disabled={downloading} title="Every track on an era-suspect album, as CSV">
             <Download size={13} /> {downloading ? 'Preparing…' : 'Download CSV'}
@@ -171,8 +215,12 @@ export default function EraReviewSection() {
       {data.isPending ? (
         <span className="caption">loading…</span>
       ) : shown.length === 0 ? (
+        albums.length > 0 ? (
+          <span className="caption">No album matches this filter.</span>
+        ) : (
         <span className="caption">No era-suspect albums. The walk flags compilations, various-artist
           releases and titles like &ldquo;Best of&rdquo; or &ldquo;Singles 1968-1974&rdquo;.</span>
+        )
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full min-w-[640px] border-collapse text-[12px]">
@@ -195,7 +243,9 @@ export default function EraReviewSection() {
                     </span>
                   </td>
                   <td className="py-1.5 pr-3">
-                    <Pill tone={a.overridden ? 'accent' : 'ink'}>{a.reason ? (REASON_LABEL[a.reason] ?? a.reason) : 'operator'}</Pill>
+                    <Pill tone={a.overridden ? 'accent' : 'ink'} title={a.reason ? REASON_HINT[a.reason] : 'Only your override lists it'}>
+                      {a.reason ? (REASON_LABEL[a.reason] ?? a.reason) : 'operator'}
+                    </Pill>
                   </td>
                   <td className="mono-num py-1.5 pr-3">{a.tracks}</td>
                   <td className="caption py-1.5 pr-3 whitespace-nowrap">{yearTally(a)}</td>
