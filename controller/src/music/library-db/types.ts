@@ -196,6 +196,10 @@ export interface TrackMeta {
    *  ...). Walk-time audit truth; null when the walk flagged nothing. COALESCEd
    *  like the ids, so a non-walk writer never clears it. (C13) */
   eraReason?: string | null;
+  /** The album's effective kind (era-review.eraWalkFields): the operator's,
+   *  else the title's suggestion; null when the album is not flagged. Travels
+   *  with eraUntrusted like eraReason. */
+  albumKind?: string | null;
   /** The ALBUM artist the era judgement keyed on (Navidrome's album record),
    *  not the per-track `artist`. Walk only. (C13) */
   albumArtist?: string | null;

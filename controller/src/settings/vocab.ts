@@ -919,6 +919,8 @@ export interface NormalizedShow {
    *  order and resume across airings. Inert without it. */
   playlistInOrder: boolean;
   excludedPlaylistIds: string[];
+  /** Album kinds (Library → Era) this show never plays, e.g. 'dj-mix'. */
+  excludedAlbumKinds: string[];
   /** Operator organisation tags. Filters the admin list; steers nothing on
    *  air, which is why resolveShow() does not carry them through. */
   tags: string[];
