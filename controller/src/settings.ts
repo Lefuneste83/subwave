@@ -122,7 +122,7 @@ import {
   type JingleRotateOwner,
   type TtsPatch,
 } from './schemas/settings.js';
-import { jingleRotateOwner, setJingleRotateOwner } from './broadcast/jingle-rotate.js';
+import { jinglePlacement, jingleRotateOwner, setJingleRotateOwner } from './broadcast/jingle-rotate.js';
 import { minTrackSeconds, peek, setCache } from './settings/store.js';
 import {
   SKILL_RENAMES,
@@ -472,7 +472,8 @@ export async function load() {
     // Repaired, never trusted: a hand-edited settings.json is load()'s input
     // and an unrecognised owner here would decide whether TWO rotates run.
     // Anything but the explicit opt-in reads as the mixer (#1619).
-    jingleRotate: jingleRotateOwner(stored),
+    jingleRotate: jingleRotateOwner({ jingleRotate: stored.jingleRotate }),
+    jinglePlacement: jinglePlacement(stored),
     crossfadeDuration: stored.crossfadeDuration ?? DEFAULTS.crossfadeDuration,
     // Bounded here as well as at the save path: a hand-edited settings.json is
     // load()'s input, so it repairs rather than throws — and an out-of-range `p`
@@ -1370,6 +1371,16 @@ export async function load() {
         ? Math.min(365, Math.max(0, Math.round(Number(stored.likes.windowDays))))
         : DEFAULTS.likes.windowDays,
     },
+    lyrics: {
+      enabled:
+        typeof stored.lyrics?.enabled === 'boolean'
+          ? stored.lyrics.enabled
+          : DEFAULTS.lyrics.enabled,
+      lrclib:
+        typeof stored.lyrics?.lrclib === 'boolean'
+          ? stored.lyrics.lrclib
+          : DEFAULTS.lyrics.lrclib,
+    },
     musicSource: {
       reportRealPath:
         typeof stored.musicSource?.reportRealPath === 'boolean'
@@ -1385,7 +1396,7 @@ export async function load() {
   // Same shape, same reason (#1619): the queue subscribes to a real ownership
   // change so it can restart the rotate's boundary count, and it cannot be
   // called from here directly without closing a settings ↔ queue cycle.
-  setJingleRotateOwner(loaded.jingleRotate);
+  setJingleRotateOwner(jingleRotateOwner(loaded), loaded.jinglePlacement);
   return loaded;
 }
 
@@ -1418,6 +1429,13 @@ export async function prepareUpdate(patch, { themeIds }: { themeIds?: ReadonlySe
     const v = parseSettingsPatchKey<JingleRotateOwner>('jingleRotate', patch.jingleRotate);
     if (v !== cur.jingleRotate) {
       next.jingleRotate = v;
+      restart = true;
+    }
+  }
+  if ('jinglePlacement' in patch) {
+    const v = parseSettingsPatchKey<typeof cur.jinglePlacement>('jinglePlacement', patch.jinglePlacement);
+    if (v !== cur.jinglePlacement) {
+      next.jinglePlacement = v;
       restart = true;
     }
   }
@@ -2645,6 +2663,11 @@ export async function prepareUpdate(patch, { themeIds }: { themeIds?: ReadonlySe
       if (lk[k] !== undefined) (next.likes as Record<string, unknown>)[k] = lk[k];
     }
   }
+  if ('lyrics' in patch) {
+    const ly = parseSettingsPatchKey<Record<string, unknown>>('lyrics', patch.lyrics);
+    if (ly.enabled !== undefined) next.lyrics.enabled = ly.enabled as boolean;
+    if (ly.lrclib !== undefined) next.lyrics.lrclib = ly.lrclib as boolean;
+  }
   if ('musicSource' in patch) {
     const ms = parseSettingsPatchKey<Record<string, unknown>>('musicSource', patch.musicSource);
     if (ms.reportRealPath !== undefined) next.musicSource.reportRealPath = ms.reportRealPath as boolean;
@@ -2713,7 +2736,7 @@ export async function update(patch) {
   // Applied-on-save too, and unlike the zone this one DOES also need the mixer
   // restart the flag above raises — the counter reset is only the controller's
   // half (#1619).
-  setJingleRotateOwner(next.jingleRotate);
+  setJingleRotateOwner(jingleRotateOwner(next), next.jinglePlacement);
   // shows + schedule are persisted to their own file (schedule.json); strip
   // them from the settings.json payload so legacy installs migrate forward
   // on the first write. The in-memory `cache` keeps the full shape so

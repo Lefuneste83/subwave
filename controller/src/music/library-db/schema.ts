@@ -559,6 +559,36 @@ export async function migrate(embeddingDim: number, reseed = false, adoptStoredD
     d.pragma('user_version = 33');
   }
 
+  if (userVersion < 34) {
+    // Fork: upstream's lyric steps 30 (lyric_offsets) and 31 (lyrics_external),
+    // renumbered because the fork already shipped its own 30-33. Both tables are
+    // CREATE IF NOT EXISTS, so one step carries them.
+    // The operator's lyric timing correction, one per track (lyrics.ts). A
+    // property of the track's lyric file, so it is station-wide and keyed on the
+    // track alone; id-adoption.ts carries it across an ID rotation like plays.
+    // What LRCLIB answered for a track the music server has no timed lyrics
+    // for (music/lyrics-sources.ts). A row with neither body is a stored miss,
+    // so a track is asked about again only once its checked_at is old enough.
+    // id-adoption.ts carries it across an ID rotation like the offsets.
+    runDdl(d, `
+      CREATE TABLE IF NOT EXISTS lyric_offsets (
+        track_id   TEXT PRIMARY KEY,
+        offset_ms  INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS lyrics_external (
+        track_id     TEXT PRIMARY KEY,
+        source       TEXT NOT NULL,
+        synced_lrc   TEXT,
+        plain_text   TEXT,
+        instrumental INTEGER NOT NULL DEFAULT 0,
+        external_id  TEXT,
+        checked_at   TEXT NOT NULL
+      );
+    `);
+    d.pragma('user_version = 34');
+  }
+
   // Before the vector reconcile below, which bumps it when it drops vectors.
   // Never throws. Its update trigger names tracks.genres and tracks.moods, and
   // SQLite refuses to DROP COLUMN either while it exists: a migration above

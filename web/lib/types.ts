@@ -208,6 +208,8 @@ export interface StationState {
   /** Operator player defaults. `skin` indexes components/skins;
    *  `tuneInOverlay` gates the tap-to-tune gate (default on). */
   ui?: { boothBuddy?: boolean; skin?: string; tuneInOverlay?: boolean };
+  /** Whether the operator has the Lyrics panel on. Absent on an older controller. */
+  lyrics?: { enabled?: boolean };
   /** Private-station flags (#478) — booleans only, never credentials.
    *  `privatePlayer` swaps the player pages for a "private station" screen;
    *  `listenerAuth` means the mounts demand the shared listener password

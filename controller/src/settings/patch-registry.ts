@@ -45,8 +45,10 @@ import {
   fadeAtShowEndSchema,
   festivalsSchema,
   jingleRatioSchema,
+  jinglePlacementSchema,
   jingleRotateSchema,
   likesPatchSchema,
+  lyricsPatchSchema,
   musicSourcePatchSchema,
   localeSchema,
   loudnessPatchSchema,
@@ -111,6 +113,7 @@ import { firstMessage, flattenIssues } from '../util/zod-error.js';
 export const SETTINGS_PATCH_KEYS = [
   'jingleRatio',
   'jingleRotate',
+  'jinglePlacement',
   'crossfadeDuration',
   'ducking',
   'handover',
@@ -163,6 +166,7 @@ export const SETTINGS_PATCH_KEYS = [
   'webhooksPolicy',
   'scrobble',
   'likes',
+  'lyrics',
   'musicSource',
 ] as const;
 
@@ -210,6 +214,7 @@ type SettingsPatchEntry = ZodType | ((ctx: SettingsPatchContext) => ZodType);
 export const SETTINGS_PATCH_SCHEMAS: Readonly<Partial<Record<SettingsPatchKey, SettingsPatchEntry>>> = {
   jingleRatio: jingleRatioSchema,
   jingleRotate: jingleRotateSchema,
+  jinglePlacement: jinglePlacementSchema,
   crossfadeDuration: crossfadeDurationSchema,
   ducking: duckingPatchSchema,
   handover: handoverPatchSchema,
@@ -238,6 +243,7 @@ export const SETTINGS_PATCH_SCHEMAS: Readonly<Partial<Record<SettingsPatchKey, S
   webhooksPolicy: webhooksPolicyPatchSchema,
   scrobble: scrobblePatchSchema,
   likes: likesPatchSchema,
+  lyrics: lyricsPatchSchema,
   musicSource: musicSourcePatchSchema,
   moods: moodsSchema,
   moodSchedule: moodScheduleSchema,

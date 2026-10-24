@@ -10,6 +10,74 @@ skips, spoken-clock forecasting, air-time stamping, the listener buffer, the lis
 TTS engine routing, personas, guests, programmes and the policy switches
 (voice, clock, token budget).
 
+- **Optional jingle overlays** (`jinglePlacement`, default `between`): `over`
+  offers a pre-rendered ID on the intro channel after the opening crossfade;
+  `both` also keeps the controller's between-song talk-table row. Both opt-ins
+  force effective controller ownership and write mixer ratio `0`, preserving
+  the operator's stored `jingleRotate` preference for a return to `between`.
+  One offer per song is spent even when unsafe, never delayed into the middle
+  of the song. `broadcast/jingle-overlay.ts` owns frequency (`overlayDue`, the
+  only due check), the opening window (`overlayOpening`, the only lower bound)
+  and fit; the existing watcher drives them.
+
+  **Why it is not a talk-table row.** Every other automatic talker is a row in
+  `talk-scheduler.ts`, and the overlay is the one sanctioned exception. Its
+  only chance is a few seconds at a song's opening, right after the incoming
+  crossfade, which the per-minute tick lands on about one song in twenty; a
+  row would either miss it or have to fire at an arbitrary minute, mid-song,
+  which is exactly what the feature exists to avoid. So the now-playing
+  watcher, which already sees every song start, offers it once. It keeps the
+  table's rule by standing down rather than competing: a song carrying a link
+  or intro, any speech queued on it, a pending segment or handoff, speech
+  still being written or rendered (`queue.whileTalkInFlight`, wrapped around
+  every immediate talk-tick fire, and the count `announce()` keeps around its
+  own render), a pending press and a busy voice chain all skip the offer. It
+  is a jingle, not talk: it is not in `VOICE_KINDS`, takes no slot, resets
+  no quiet gap, and publishes no `voice.*` or `dj.say` webhook (a manual or
+  rotate jingle publishes none either), only its booth line and session turn.
+
+  **`both` never puts two IDs on one song.** A separate count per placement
+  starting from the same reset came due on the same song: the rotate then
+  either fired first and vetoed the ID, wrote `jingle-now.txt` while the ID
+  played (which the mixer's per-frame check used to cut mid-word), or put a
+  second ID at the end of that song. So in `both` the overlay rides the
+  rotate's own count (`bothOverlayCount`): offered once per rotate cycle, about
+  halfway between two between-songs IDs, and never at the count where the
+  rotate is due. A rotate the planner holds past its due song keeps counting
+  past that point, so the overlay cannot come round again in the same cycle.
+  `jingleRatio: 1` makes every song the rotate's and leaves `both` no room for
+  an overlay. `over` keeps its own N-song count.
+
+  `onTrackStarted` reserves songs carrying speech before any async work;
+  `onQueued` remembers later speech for the whole song. `airVoice`'s actual
+  holder count (not its forecast) refuses busy-chain overlays, with a final
+  pre-write freshness check. A mixer can still refuse an ID after consuming
+  its handoff, and a refused ID never starts, so the voice chain holds only
+  until the start marker is overdue (`OVERLAY_START_GRACE_MS`) and then, for
+  an ID that did start, for its clip from the measured start. `jingle_overlay_status`
+  proves the mixer's running ratio, live gates, remaining playable time and
+  crossfade bound; old/unreachable mixers fail silent. `poll_intro` rechecks
+  those gates and the target song's mixer timestamp for the annotated optional
+  ID, so a skip during a controller poll cannot move it to another song. Its marker is written at actual
+  intro playback with `placement: over`, so `jingleWindow` adds no cross offset
+  and `interposedSince` does not mistake it for a between-song seam. The current
+  song/ICY metadata stays intact; booth and voice events use `onSpoken` only
+  after the voice marker confirms air. The draw shares anti-repeat memory with
+  manual/controller jingles, and consults the latest marker when taking over
+  from mixer rotation. See [operator settings](../jingle-audio.md).
+  The opening wait uses the previous song's transition; the fit budget uses
+  the current song's stamped exit duration, falling back to the running mixer
+  default. Accepted lead-in/ID requests share a mixer cancellation generation:
+  idle/off-air entry invalidates it, and playback rechecks the generation,
+  target song, idle/off-air/starve and the voice queue on every frame. Cancelled requests are
+  muted and skipped, including prefetched requests invisible to `queue()`;
+  resuming after wall-clock holds expire never revives them. A manual press is
+  checked once, when the offer is consumed, never per frame: it waits for a
+  track boundary and for the `voice_until` the ID set, so it cannot meet the
+  ID mid-clip, and cutting the ID for it lost the ID for nothing. Verified overlays
+  poll for actual start even before the first voice marker exists, so the
+  first ID earns the same post-air bookkeeping as later IDs.
+
 - **Speech corrections (#1669)**: `tts.corrections` allows **500 rows** on
   save/load and in the web editor (was 100, which one station filled with year
   and decade respellings alone). `applyCorrections` in `audio/speech-text.ts`

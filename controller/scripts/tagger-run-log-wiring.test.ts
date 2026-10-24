@@ -1,19 +1,24 @@
 // Pins the wiring of broadcast/tagger-run-log.ts into broadcast/tagger.ts: a
 // maintenance child that prints faster than any poll still lands every line,
 // once, in order, in both the cursor feed and the run's file, ending with its
-// exit line, and a second run starts a new log.
+// exit line, and a second run starts a new log. The state dir sits under a
+// hidden directory, which is where a native clone under ~/.local keeps it.
 // Run: npm test -- tagger-run-log-wiring
 import { createTempDir } from './test-utils/temp-dir.js';
 import assert from 'node:assert/strict';
 import cp from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
+import type { Server } from 'node:http';
 import { syncBuiltinESMExports } from 'node:module';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-const STATE = createTempDir(join(tmpdir(), 'subwave-tagger-run-log-'));
+const STATE = createTempDir(join(tmpdir(), '.subwave-tagger-run-log-'));
 process.env.STATE_DIR = STATE;
+delete process.env.ADMIN_USER;
+delete process.env.ADMIN_PASS;
 // Nothing in this test may reach a real music server or mixer.
 process.env.NAVIDROME_URL = 'http://127.0.0.1:1';
 process.env.NAVIDROME_USER = 'test';
@@ -34,10 +39,20 @@ process.stdout.write(out);
 process.stdout.write('[tag] last words\\n', () => process.exit(0));
 `;
 
+// A child that exits while a grandchild still holds its stdout, the shape of
+// npx's wrapper leaving before the worker under it: 'exit' fires, then the
+// grandchild's line, then 'close'.
+const DRAINING_CHILD = `
+const { spawn } = require('node:child_process');
+spawn(process.execPath, ['-e', "setTimeout(() => process.stdout.write('[tag] drained after exit\\\\n'), 300)"], { stdio: ['ignore', 'inherit', 'inherit'] });
+process.stdout.write('[tag] parent done\\n', () => process.exit(0));
+`;
+let childScript = CHILD;
+
 const spawn = cp.spawn;
 cp.spawn = ((command: string, args: readonly string[], opts: cp.SpawnOptions) => {
   if (command === 'npx' && opts?.cwd === '/app') {
-    return spawn(process.execPath, ['-e', CHILD], { ...opts, cwd: STATE });
+    return spawn(process.execPath, ['-e', childScript], { ...opts, cwd: STATE });
   }
   return spawn(command, args, opts);
 }) as typeof cp.spawn;
@@ -71,6 +86,7 @@ test('every line of a fast run reaches the cursor feed and the file, once, in or
   ];
   assert.deepEqual(lines, expected, 'no line lost or doubled; the echo folds into its event');
   assert.deepEqual(page.entries.map(e => e.seq), expected.map((_, i) => i + 1));
+  assert.equal(page.closed, true, 'the pipes have closed');
   // The snapshot keeps its short tail, unchanged.
   assert.ok(t.taggerView().lastLog.length <= 30);
 
@@ -86,7 +102,7 @@ test('every line of a fast run reaches the cursor feed and the file, once, in or
 test('a second run gets its own log; a cursor from the first reads it from the start', async () => {
   const first = t.tagger.runLogId!;
   const end = t.taggerLogSince(0, first)!.nextSeq;
-  await new Promise((r) => setTimeout(r, 1100)); // ids are stamped to the second
+  // No wait: a run started in the same second as the first gets its own id.
   const second = await runOnce();
   assert.notEqual(second, first);
   const page = t.taggerLogSince(end, first);
@@ -95,6 +111,47 @@ test('a second run gets its own log; a cursor from the first reads it from the s
   const files = t.taggerLogFiles().map(f => f.id);
   assert.deepEqual(files, [second, first], 'newest first');
   assert.deepEqual(readdirSync(join(STATE, 'tagger-logs')).sort(), [`${first}.log`, `${second}.log`].sort());
+});
+
+test('a run started before the last one drained leaves that run\'s file whole', async () => {
+  childScript = DRAINING_CHILD;
+  t.startReconcile();
+  const draining = t.tagger.runLogId!;
+  while (t.tagger.running) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(t.taggerLogSince(0, draining)?.closed, false, "'exit' came first: a reader keeps polling");
+  // The first child has exited but its grandchild still holds the pipe, and
+  // the operator presses Start again.
+  childScript = CHILD;
+  const next = await runOnce();
+  assert.notEqual(next, draining);
+  const file = t.taggerLogFile(draining)!;
+  for (let i = 0; i < 200 && !readFileSync(file, 'utf8').includes('[exit'); i++) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  const body = readFileSync(file, 'utf8').trimEnd().split('\n').map(l => l.replace(/^\d\d:\d\d:\d\d {2}/, ''));
+  assert.deepEqual(body, ['[tag] parent done', '[tag] drained after exit', '[exit 0]']);
+});
+
+test('the download route serves the run\'s file, from under a hidden state dir too', async () => {
+  const express = (await import('express')).default;
+  const { router } = await import('../src/routes/library/maintenance.js');
+  const app = express();
+  app.use(router);
+  const server = await new Promise<Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  try {
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/library/tagger/logs`;
+    const id = t.tagger.runLogId!;
+    const res = await fetch(`${base}/${id}`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'text/plain; charset=utf-8');
+    assert.equal(res.headers.get('content-disposition'), `attachment; filename="${id}.log"`);
+    assert.equal(await res.text(), readFileSync(t.taggerLogFile(id)!, 'utf8'));
+    const missing = await fetch(`${base}/tagger-run-20200101-000000-tag`);
+    assert.equal(missing.status, 404);
+    assert.equal(missing.headers.get('content-disposition'), null);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
 });
 
 test('a log id outside the writer\'s pattern reads nothing', () => {

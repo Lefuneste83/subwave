@@ -16,13 +16,13 @@ import {
   runLogId,
   isRunLogId,
   parseRunLogId,
+  openRunLog,
   openRunLogSink,
   listRunLogs,
   runLogPath,
   pruneRunLogs,
 } from '../src/broadcast/tagger-run-log.js';
-
-// ─── Fixtures ─────────────────────────────────────────────────────────────────
+import { createTempDir, removeTempDir } from './test-utils/temp-dir.js';
 
 let t = 1_000_000;
 const now = () => t;
@@ -31,7 +31,15 @@ function makeSink() {
   return { lines: [] as string[], closedCount: 0, write(s: string) { this.lines.push(s); }, close() { this.closedCount++; } };
 }
 
-// ─── (a) seq contiguity ──────────────────────────────────────────────────────
+// A dir for each file test, removed however the test ends.
+async function withTempDir(fn: (dir: string) => void | Promise<void>): Promise<void> {
+  const dir = createTempDir(path.join(os.tmpdir(), 'tagger-run-log-'));
+  try {
+    await fn(dir);
+  } finally {
+    await removeTempDir(dir);
+  }
+}
 
 test('seq starts at 1 and is contiguous; since(0) returns everything', () => {
   t = 1_000_000;
@@ -49,9 +57,8 @@ test('seq starts at 1 and is contiguous; since(0) returns everything', () => {
   const p2 = log.since(p.nextSeq);
   assert.equal(p2.entries.length, 0);
   assert.equal(p2.nextSeq, 2);
+  assert.equal(p2.closed, false, 'an open run is still printing');
 });
-
-// ─── (b) pending raw line held then committed after holdMs ───────────────────
 
 test('a raw line is held until holdMs elapses', () => {
   t = 1_000_000;
@@ -69,8 +76,6 @@ test('a raw line is held until holdMs elapses', () => {
   assert.equal(p2.entries[0].seq, 1);
 });
 
-// ─── (c) second raw flushes the first immediately ────────────────────────────
-
 test('a second raw commits the first without waiting for holdMs', () => {
   t = 1_000_000;
   const log = new RunLog({ runId: 'r3', now });
@@ -82,8 +87,6 @@ test('a second raw commits the first without waiting for holdMs', () => {
   assert.equal(p.entries[0].line, 'a');
   assert.equal(p.entries[0].seq, 1);
 });
-
-// ─── (d) echo dropped ────────────────────────────────────────────────────────
 
 test('event echo suppresses the preceding raw line', () => {
   t = 1_000_000;
@@ -102,8 +105,6 @@ test('event echo suppresses the preceding raw line', () => {
   assert.equal(sink.lines[0], '05:27:41  [success] Tagged 3 tracks\n');
 });
 
-// ─── (e) non-echo raw kept before event ──────────────────────────────────────
-
 test('non-echo raw is committed before the event', () => {
   t = 1_000_000;
   const log = new RunLog({ runId: 'r5', now });
@@ -116,8 +117,6 @@ test('non-echo raw is committed before the event', () => {
   assert.deepEqual(p.entries[1].line, { kind: 'info', text: 'y', at: '2026-10-21T05:00:00.000Z' });
   assert.equal(p.entries[1].seq, 2);
 });
-
-// ─── (f) cap and gap ─────────────────────────────────────────────────────────
 
 test('cap evicts oldest entries and reports gap correctly', () => {
   t = 1_000_000;
@@ -139,8 +138,6 @@ test('cap evicts oldest entries and reports gap correctly', () => {
   assert.equal(p4.gap, false);
 });
 
-// ─── (g) since() sanitises after ─────────────────────────────────────────────
-
 test('since() sanitises NaN, negative, Infinity, and fractional cursors', () => {
   t = 1_000_000;
   const log = new RunLog({ runId: 'r7', now });
@@ -159,21 +156,17 @@ test('since() sanitises NaN, negative, Infinity, and fractional cursors', () => 
   assert.equal(p.entries[0].seq, 2);
 });
 
-// ─── (h) returned entries are copies ─────────────────────────────────────────
-
 test('mutating a returned entry does not alter the log', () => {
   t = 1_000_000;
   const log = new RunLog({ runId: 'r8', now });
   log.event({ kind: 'info', text: 'original', at: '2026-10-21T05:00:00.000Z' }, () => false);
 
   const p1 = log.since(0);
-  (p1.entries[0].line as any).text = 'MUTATED';
+  (p1.entries[0].line as unknown as { text: string }).text = 'MUTATED';
 
   const p2 = log.since(0);
-  assert.equal((p2.entries[0].line as any).text, 'original');
+  assert.equal((p2.entries[0].line as unknown as { text: string }).text, 'original');
 });
-
-// ─── (i) close commits pending and is idempotent ─────────────────────────────
 
 test('close() flushes pending, calls sink.close once, ignores subsequent writes', () => {
   t = 1_000_000;
@@ -182,10 +175,11 @@ test('close() flushes pending, calls sink.close once, ignores subsequent writes'
   log.raw('pending');
   log.close();
 
-  // Pending was committed.
+  // Pending was committed, and the page says the run's output is all in.
   const p = log.since(0);
   assert.equal(p.entries.length, 1);
   assert.equal(p.entries[0].line, 'pending');
+  assert.equal(p.closed, true);
   assert.equal(sink.closedCount, 1);
 
   // Writes after close are silently ignored.
@@ -201,17 +195,16 @@ test('close() flushes pending, calls sink.close once, ignores subsequent writes'
   assert.equal(log.since(0).entries.length, 1);
 });
 
-// ─── (j) sink failure ────────────────────────────────────────────────────────
-
 test('a sink that throws on write does not crash the run', () => {
   t = 1_000_000;
   let writeCount = 0;
+  let closeCount = 0;
   const badSink: { write(text: string): void; close(): void } = {
     write(_text: string): void {
       writeCount++;
       if (writeCount === 2) throw new Error('disk full');
     },
-    close() { /* no-op */ },
+    close() { closeCount++; },
   };
   const log = new RunLog({ runId: 'r10', now, sink: badSink });
   log.event({ kind: 'info', text: 'one', at: '2026-10-21T05:00:00.000Z' }, () => false); // write 1 ok
@@ -222,13 +215,13 @@ test('a sink that throws on write does not crash the run', () => {
   const p = log.since(0);
   assert.equal(p.entries.length, 3);
   assert.equal(writeCount, 2); // not called a 3rd time
+  assert.equal(closeCount, 1, 'the failed file is closed straight away, not held open for the run');
 
-  // close() must not call write again.
+  // close() must not call write again, nor close the dropped file twice.
   log.close();
   assert.equal(writeCount, 2);
+  assert.equal(closeCount, 1);
 });
-
-// ─── (k) sink line format ────────────────────────────────────────────────────
 
 test('sink line format: HH:MM:SS prefix and newlines collapsed', () => {
   t = Date.parse('2026-10-21T05:27:41Z');
@@ -243,14 +236,28 @@ test('sink line format: HH:MM:SS prefix and newlines collapsed', () => {
   assert.equal(sink.lines[1], '05:27:41  line1 line2\n');
 });
 
-// ─── (l) runLogId / isRunLogId / parseRunLogId ───────────────────────────────
+test('a held line keeps its arrival time in the file, however late it is committed', () => {
+  t = Date.parse('2026-10-21T10:00:00Z');
+  const sink = makeSink();
+  const log = new RunLog({ runId: 'r11b', now, sink });
+  log.raw('[tag] batch 3: asking the model');
+  t += 5 * 60_000; // a slow model call, and no page polling
+  log.raw('[tag] batch 3: model answered');
+  t += 1_000;
+  log.close();
+  assert.deepEqual(sink.lines, [
+    '10:00:00  [tag] batch 3: asking the model\n',
+    '10:05:00  [tag] batch 3: model answered\n',
+  ]);
+});
 
 test('runLogId / isRunLogId / parseRunLogId contract', () => {
   const d = new Date('2026-10-21T05:27:41.123Z');
   assert.equal(runLogId(d, 'analyze'), 'tagger-run-20261021-052741-analyze');
   assert.equal(runLogId(d, 'tag'), 'tagger-run-20261021-052741-tag');
   assert.equal(runLogId(d, 'reconcile'), 'tagger-run-20261021-052741-reconcile');
-  assert.throws(() => runLogId(d, 'other'), /unknown run mode/);
+  assert.equal(runLogId(d, 'tag', 2), 'tagger-run-20261021-052741-tag-2');
+  assert.throws(() => runLogId(d, 'other' as never), /unknown run mode/);
 
   // isRunLogId
   assert.equal(isRunLogId('tagger-run-20261021-052741-analyze'), true);
@@ -260,18 +267,20 @@ test('runLogId / isRunLogId / parseRunLogId contract', () => {
   assert.equal(isRunLogId(42), false);
   assert.equal(isRunLogId(null), false);
   assert.equal(isRunLogId('tagger-run-20261021-052741-analyze/../../etc'), false);
+  assert.equal(isRunLogId('tagger-run-20261021-052741-analyze-2'), true);
+  assert.equal(isRunLogId('tagger-run-20261021-052741-analyze-x'), false);
+  assert.equal(isRunLogId('tagger-run-20261021-052741-analyze-100'), false);
+  assert.equal(isRunLogId('tagger-run-20261021-052741-2-analyze'), false);
 
   // parseRunLogId
   const parsed = parseRunLogId('tagger-run-20261021-052741-analyze');
-  assert.deepEqual(parsed, { mode: 'analyze', startedAt: '2026-10-21T05:27:41.000Z' });
+  assert.deepEqual(parsed, { mode: 'analyze', startedAt: '2026-10-21T05:27:41.000Z', n: 1 });
+  assert.deepEqual(parseRunLogId('tagger-run-20261021-052741-tag-3'), { mode: 'tag', startedAt: '2026-10-21T05:27:41.000Z', n: 3 });
   assert.equal(parseRunLogId('nope'), null);
   assert.equal(parseRunLogId('tagger-run-20261021-052741-other'), null);
 });
 
-// ─── (m) openRunLogSink file I/O ─────────────────────────────────────────────
-
-test('openRunLogSink creates nested dirs, appends, rejects bad ids', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tagger-run-log-'));
+test('openRunLogSink creates nested dirs, appends, rejects bad ids', () => withTempDir((tmp) => {
   const nested = path.join(tmp, 'a', 'b');
   const id = 'tagger-run-20261021-052741-analyze';
 
@@ -293,13 +302,9 @@ test('openRunLogSink creates nested dirs, appends, rejects bad ids', () => {
   const sBad = openRunLogSink(tmp, '../evil');
   assert.equal(sBad, null);
 
-  fs.rmSync(tmp, { recursive: true, force: true });
-});
+}));
 
-// ─── (n) listRunLogs ─────────────────────────────────────────────────────────
-
-test('listRunLogs returns only valid .log files, newest first', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tagger-run-log-'));
+test('listRunLogs returns only valid .log files, newest first', () => withTempDir((tmp) => {
   const ids = [
     'tagger-run-20261021-050000-tag',
     'tagger-run-20261021-050001-analyze',
@@ -323,17 +328,68 @@ test('listRunLogs returns only valid .log files, newest first', () => {
   assert.equal(list[0].startedAt, '2026-10-21T05:00:02.000Z');
   assert.equal(list[0].bytes, 'tagger-run-20261021-050002-reconcile'.length);
 
-  fs.rmSync(tmp, { recursive: true, force: true });
-});
+}));
+
+test('listRunLogs orders runs within one second by their count', () => withTempDir((tmp) => {
+  for (const id of [
+    'tagger-run-20261021-050000-tag-10',
+    'tagger-run-20261021-045959-reconcile',
+    'tagger-run-20261021-050000-tag',
+    'tagger-run-20261021-050000-reconcile-2',
+  ]) fs.writeFileSync(path.join(tmp, `${id}.log`), 'x');
+  assert.deepEqual(listRunLogs(tmp).map(f => f.id), [
+    'tagger-run-20261021-050000-tag-10',
+    'tagger-run-20261021-050000-reconcile-2',
+    'tagger-run-20261021-050000-tag',
+    'tagger-run-20261021-045959-reconcile',
+  ]);
+}));
+
+test('openRunLog gives a run started in the same second its own id and file', () => withTempDir((tmp) => {
+  const at = new Date('2026-10-21T05:27:41.100Z');
+  const a = openRunLog(tmp, at, 'tag', null);
+  a.event({ kind: 'info', text: 'first run', at: at.toISOString() }, () => false);
+  a.close();
+  const b = openRunLog(tmp, new Date('2026-10-21T05:27:41.900Z'), 'tag', a.runId);
+  b.event({ kind: 'info', text: 'second run', at: at.toISOString() }, () => false);
+  b.close();
+  // Another mode in the same second still counts on, so the count orders them.
+  const c = openRunLog(tmp, at, 'reconcile', b.runId);
+  c.close();
+  assert.equal(a.runId, 'tagger-run-20261021-052741-tag');
+  assert.equal(b.runId, 'tagger-run-20261021-052741-tag-2');
+  assert.equal(c.runId, 'tagger-run-20261021-052741-reconcile-3');
+  assert.equal(fs.readFileSync(path.join(tmp, `${a.runId}.log`), 'utf8'), '05:27:41  [info] first run\n');
+  assert.equal(fs.readFileSync(path.join(tmp, `${b.runId}.log`), 'utf8'), '05:27:41  [info] second run\n');
+  assert.deepEqual(listRunLogs(tmp).map(f => f.id), [c.runId, b.runId, a.runId]);
+
+  // A run in another second starts the count again.
+  const d = openRunLog(tmp, new Date('2026-10-21T05:27:42Z'), 'tag', c.runId);
+  d.close();
+  assert.equal(d.runId, 'tagger-run-20261021-052742-tag');
+}));
+
+test('openRunLog counts the previous run even when its file never opened', () => withTempDir((empty) => {
+  const log = openRunLog(empty, new Date('2026-10-21T05:27:41.100Z'), 'tag', 'tagger-run-20261021-052741-tag');
+  log.close();
+  assert.equal(log.runId, 'tagger-run-20261021-052741-tag-2');
+}));
+
+test('openRunLog keeps the newest nine files, so the new one is the tenth', () => withTempDir((tmp) => {
+  for (let i = 0; i < RUN_LOG_KEEP + 2; i++) {
+    fs.writeFileSync(path.join(tmp, `tagger-run-20261021-0400${String(i).padStart(2, '0')}-tag.log`), 'x');
+  }
+  openRunLog(tmp, new Date('2026-10-21T05:00:00Z'), 'tag', null).close();
+  const ids = listRunLogs(tmp).map(f => f.id);
+  assert.equal(ids.length, RUN_LOG_KEEP);
+  assert.equal(ids[0], 'tagger-run-20261021-050000-tag');
+}));
 
 test('listRunLogs on a missing directory returns []', () => {
   assert.deepEqual(listRunLogs('/no/such/dir/xyzzy'), []);
 });
 
-// ─── (o) pruneRunLogs ────────────────────────────────────────────────────────
-
-test('pruneRunLogs removes oldest beyond keep, leaves non-log files', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tagger-run-log-'));
+test('pruneRunLogs removes oldest beyond keep, leaves non-log files', () => withTempDir((tmp) => {
   // Create 12 valid log files with sequential timestamps.
   const validIds: string[] = [];
   for (let i = 0; i < 12; i++) {
@@ -369,17 +425,13 @@ test('pruneRunLogs removes oldest beyond keep, leaves non-log files', () => {
   assert.equal(fs.existsSync(path.join(tmp, 'notes.log')), true);
   assert.equal(fs.existsSync(path.join(tmp, 'subwave-auto-backup-2026-10-21-000000.zip')), true);
 
-  fs.rmSync(tmp, { recursive: true, force: true });
-});
+}));
 
 test('pruneRunLogs on a missing directory returns 0', () => {
   assert.equal(pruneRunLogs('/no/such/dir/prune-xyzzy'), 0);
 });
 
-// ─── (p) runLogPath ──────────────────────────────────────────────────────────
-
-test('runLogPath returns existing valid path or null', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tagger-run-log-'));
+test('runLogPath returns existing valid path or null', () => withTempDir((tmp) => {
   const id = 'tagger-run-20261021-052741-tag';
   fs.writeFileSync(path.join(tmp, `${id}.log`), 'x');
 
@@ -392,21 +444,18 @@ test('runLogPath returns existing valid path or null', () => {
   // Path traversal attempt.
   assert.equal(runLogPath(tmp, '../etc/passwd'), null);
 
-  fs.rmSync(tmp, { recursive: true, force: true });
-});
+}));
 
-test('the defaults: 5000 lines in memory, ten files on disk, under state/tagger-logs', () => {
+test('the defaults: 5000 lines in memory, ten files on disk, under state/tagger-logs', () => withTempDir((tmp) => {
   assert.equal(RUN_LOG_DIR_NAME, 'tagger-logs');
   const log = new RunLog({ runId: 'defaults' });
   for (let i = 0; i <= RUN_LOG_CAP; i++) log.event({ kind: 'info', text: `l${i}`, at: '2026-10-21T05:00:00.000Z' }, () => false);
   const page = log.since(0);
   assert.equal(page.entries.length, RUN_LOG_CAP);
   assert.equal(page.gap, true);
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tagger-run-log-'));
   for (let i = 0; i < RUN_LOG_KEEP + 3; i++) {
     fs.writeFileSync(path.join(tmp, `tagger-run-20261021-0600${String(i).padStart(2, '0')}-analyze.log`), 'x');
   }
   assert.equal(pruneRunLogs(tmp), 3);
   assert.equal(listRunLogs(tmp).length, RUN_LOG_KEEP);
-  fs.rmSync(tmp, { recursive: true, force: true });
-});
+}));

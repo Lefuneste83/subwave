@@ -1,4 +1,4 @@
-// O1 — the playing FILE's own format, for the operator's Dash.
+// the playing FILE's own format, for the operator's Dash.
 //
 // These are properties of the file Navidrome stores (suffix, sample rate, bit
 // depth, bit rate, channels), not of the stream the mixer sends: /debug's
@@ -11,9 +11,10 @@
 // Unknown is ABSENT, never zero: Navidrome reports bitDepth 0 for a lossy
 // file, and "0-bit" is not a property any file has.
 
+import { FILE_FORMAT_RETRY_MS } from '../schemas/file-format.js';
+
 export interface FileFormat {
   suffix?: string;
-  contentType?: string;
   /** kbps, as Subsonic reports it. */
   bitRate?: number;
   /** Hz. */
@@ -22,7 +23,7 @@ export interface FileFormat {
   channelCount?: number;
 }
 
-const pos = (v: unknown): number | undefined =>
+const positiveInt = (v: unknown): number | undefined =>
   typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.round(v) : undefined;
 
 /** Pure projection of a Subsonic song onto the fields the Dash shows. */
@@ -30,24 +31,20 @@ export function fileFormatOf(song: unknown): FileFormat {
   const s = (song && typeof song === 'object' ? song : {}) as Record<string, unknown>;
   const out: FileFormat = {};
   if (typeof s.suffix === 'string' && s.suffix.trim()) out.suffix = s.suffix.trim().toLowerCase();
-  if (typeof s.contentType === 'string' && s.contentType.trim()) out.contentType = s.contentType.trim();
-  const bitRate = pos(s.bitRate); if (bitRate) out.bitRate = bitRate;
-  const samplingRate = pos(s.samplingRate); if (samplingRate) out.samplingRate = samplingRate;
-  const bitDepth = pos(s.bitDepth); if (bitDepth) out.bitDepth = bitDepth;
-  const channelCount = pos(s.channelCount); if (channelCount) out.channelCount = channelCount;
+  const bitRate = positiveInt(s.bitRate); if (bitRate) out.bitRate = bitRate;
+  const samplingRate = positiveInt(s.samplingRate); if (samplingRate) out.samplingRate = samplingRate;
+  const bitDepth = positiveInt(s.bitDepth); if (bitDepth) out.bitDepth = bitDepth;
+  const channelCount = positiveInt(s.channelCount); if (channelCount) out.channelCount = channelCount;
   return out;
 }
-
-/** A failed lookup is not retried before this: a Dash polling a down
- *  Navidrome every 3 s must cost one call a minute, not twenty. */
-export const FAILURE_RETRY_MS = 60_000;
 
 type Entry = { format: FileFormat } | { failedAt: number };
 
 /**
  * One getSong per track id, shared by every concurrent ask, held in a small
  * LRU (the Dash only ever asks about the track on air, so a handful covers a
- * skip back and forth). A failure answers null and backs off.
+ * skip back and forth). A failure answers null and backs off for
+ * FILE_FORMAT_RETRY_MS.
  */
 export function createFileFormatLookup(deps: {
   getSong: (id: string) => Promise<unknown>;
@@ -71,7 +68,7 @@ export function createFileFormatLookup(deps: {
       remember(id, hit); // LRU touch
       return hit.format;
     }
-    if (hit && now() - hit.failedAt < FAILURE_RETRY_MS) return null;
+    if (hit && now() - hit.failedAt < FILE_FORMAT_RETRY_MS) return null;
     const running = inflight.get(id);
     if (running) return running;
     const p = (async () => {

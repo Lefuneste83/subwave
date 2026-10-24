@@ -17,8 +17,8 @@ import { writePidfile, clearPidfile, readPidfile, isPidAlive, MANAGED_ENV } from
 import path from 'node:path';
 import { STATE_DIR } from '../config.js';
 import {
-  RunLog, runLogId, openRunLogSink, pruneRunLogs, listRunLogs, runLogPath,
-  RUN_LOG_DIR_NAME, RUN_LOG_KEEP, type RunLogPage, type RunLogFileInfo,
+  openRunLog, listRunLogs, runLogPath, RUN_LOG_DIR_NAME,
+  type RunLog, type RunLogPage, type RunLogFileInfo,
 } from './tagger-run-log.js';
 
 type TaggerMode = MaintenanceMode;
@@ -74,7 +74,7 @@ export function taggerLogFiles(): RunLogFileInfo[] {
   return listRunLogs(RUN_LOG_DIR);
 }
 
-// Absolute, because Express's sendFile refuses a relative path.
+// Absolute, so the route can split it into sendFile's root and name.
 export function taggerLogFile(id: unknown): string | null {
   const p = runLogPath(RUN_LOG_DIR, id);
   return p ? path.resolve(p) : null;
@@ -273,13 +273,13 @@ function spawnChild(
   tagger.lastLog = [];
   tagger.mode = mode;
   tagger.progress = null;
-  // One file per run, the newest RUN_LOG_KEEP kept. A disk that refuses the file
-  // costs the download, never the run: the log then lives in memory only.
-  runLog?.close();
-  const logId = runLogId(new Date(startedAt), mode);
-  try { pruneRunLogs(RUN_LOG_DIR, RUN_LOG_KEEP - 1); } catch { /* retention is best effort */ }
-  runLog = new RunLog({ runId: logId, sink: openRunLogSink(RUN_LOG_DIR, logId) });
-  tagger.runLogId = logId;
+  // One log and one file per run; openRunLog owns the id, retention and the
+  // refused-file fallback. The previous id is passed so a run started in the
+  // same second never shares it. The previous log is left open: 'exit' (which
+  // frees the slot) can come before its child's last output has drained, and
+  // its own 'close' handler below closes it once that output is in the file.
+  runLog = openRunLog(RUN_LOG_DIR, new Date(startedAt), mode, runLog?.runId ?? null);
+  tagger.runLogId = runLog.runId;
   const thisRunLog = runLog;
 
   let catalogueReady = false;

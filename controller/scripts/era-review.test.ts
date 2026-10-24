@@ -72,7 +72,7 @@ test('step 32 adds era_reason, album_artist and the era_override table on an old
     assert.equal(cols().has('era_reason'), true);
     assert.equal(cols().has('album_artist'), true);
     assert.equal(hasTable('era_override'), true);
-    assert.equal(d().pragma('user_version', { simple: true }) as number, 33);
+    assert.equal(d().pragma('user_version', { simple: true }) as number, 34);
     // Re-running the step must not throw (ADD COLUMN on an existing column does).
     assert.equal(cols().has('era_reason'), true);
   });
@@ -94,7 +94,7 @@ test('step 33 rebuilds era_override with kind and forced year, keeping every v32
   d().pragma('user_version = 32');
   db.close();
   return db.open({ embeddingDim: 8, adoptStoredDim: true }).then(() => {
-    assert.equal(d().pragma('user_version', { simple: true }) as number, 33);
+    assert.equal(d().pragma('user_version', { simple: true }) as number, 34);
     assert.ok(cols().has('album_kind'));
     const oc = (d().pragma('table_info(era_override)') as Array<{ name: string }>).map(c => c.name);
     assert.deepEqual(oc, ['album_key', 'verdict', 'forced_year', 'kind', 'set_at']);
