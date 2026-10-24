@@ -324,7 +324,11 @@ export default function EraReviewSection() {
                               <Input type="number" inputMode="numeric" className="h-7 w-[68px] px-1.5 text-xs"
                                 aria-label={`One year for every track of ${a.album}`}
                                 value={yearDraft[a.albumKey] ?? String(a.forcedYear ?? a.year ?? '')}
-                                onChange={e => setYearDraft(d => ({ ...d, [a.albumKey]: e.currentTarget.value }))} />
+                                onChange={e => {
+                                  // Read now: React clears currentTarget before a functional update runs.
+                                  const v = e.currentTarget.value;
+                                  setYearDraft(d => ({ ...d, [a.albumKey]: v }));
+                                }} />
                               <Btn sm tone={a.verdict === 'year' ? 'accent' : undefined} disabled={pending}
                                 onClick={() => postYear(a)} title={DECISION_HINT.year}>
                                 {DECISION_LABEL.year}
@@ -416,7 +420,7 @@ function AlbumTracks({ album }: { album: EraAlbum }) {
               <span className="inline-flex items-center gap-1">
                 <Input type="number" inputMode="numeric" className="h-6 w-[64px] px-1.5 text-[11px]"
                   aria-label={`Recording year of ${t.title}`} placeholder="year"
-                  value={draft[t.id] ?? ''} onChange={e => setDraft(d => ({ ...d, [t.id]: e.currentTarget.value }))}
+                  value={draft[t.id] ?? ''} onChange={e => { const v = e.currentTarget.value; setDraft(d => ({ ...d, [t.id]: v })); }}
                   onKeyDown={e => { if (e.key === 'Enter') commit(t); }} />
                 <Btn sm disabled={save.isPending || !(draft[t.id] ?? '').trim()} onClick={() => commit(t)}>Set</Btn>
                 {t.originalYearSource === 'manual' && (
