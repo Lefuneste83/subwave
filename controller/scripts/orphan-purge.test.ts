@@ -11,7 +11,7 @@
 
 import { createTempDir } from './test-utils/temp-dir.js';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 
@@ -29,6 +29,8 @@ mkdirSync(ROOT, { recursive: true });
 // test below.
 writeFileSync(join(ROOT, cache.STEMS_MARKER), '{}');
 const NOW_BASE = Date.now();
+// The containers' default: mkdir's mode is masked by it.
+process.umask(0o022);
 
 let seq = 0;
 function seedStem(opts: { fresh?: boolean } = {}): string {
@@ -52,6 +54,16 @@ test('an orphan is moved into the quarantine, and it leaves the cache root', asy
   assert.ok(!existsSync(join(ROOT, gone)));
   assert.ok(existsSync(join(QU, gone)));
   assert.ok(existsSync(join(ROOT, kept)));
+});
+
+test('the quarantine is shared 777 like the cache root, whatever the umask', async () => {
+  // mkdir({ mode: 0o777 }) alone comes out 755 under umask 022; a 755 left by
+  // an older controller is opened up on the next move.
+  assert.equal(statSync(QU).mode & 0o777, 0o777);
+  chmodSync(QU, 0o755);
+  seedStem();
+  await purge.runOrphanPurge({ knownIds: ['_sentinel'], confirm: true, now: NOW_BASE });
+  assert.equal(statSync(QU).mode & 0o777, 0o777);
 });
 
 test('an unconfirmed pass is a dry run: the report counts, the disk does not change', async () => {
