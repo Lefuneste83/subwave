@@ -259,8 +259,13 @@ async function stampQuarantine(entryDir: string, now: number): Promise<void> {
   } catch { /* the mtime fallback covers it */ }
 }
 
+// Shared like the cache root (stem-cache.ts): mkdir's mode is masked by the
+// umask, so 0o777 alone comes out 755. The chmod also opens up a quarantine an
+// older controller left at 755; a refused chmod leaves the folder as it is.
 async function mkdirSafe(dir: string): Promise<void> {
-  try { await (await import('node:fs/promises')).mkdir(dir, { recursive: true, mode: 0o777 }); } catch { /* reported by the move failures */ }
+  const fs = await import('node:fs/promises');
+  try { await fs.mkdir(dir, { recursive: true, mode: 0o777 }); } catch { /* reported by the move failures */ }
+  try { await fs.chmod(dir, 0o777); } catch { /* not ours to change; the moves report failures */ }
 }
 
 /** Dry-run convenience for the doctor and the admin route. */
