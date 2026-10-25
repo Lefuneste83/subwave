@@ -31,6 +31,7 @@ import type Database from 'better-sqlite3';
 import { syncTrackFacets } from './library-db/facets.js';
 import { getTrack, setManualOriginalYear } from './library-db/tracks.js';
 import { isAlbumKind, suggestAlbumKind, suggestedDecision, type AlbumKind, type EraDecision } from './album-kind.js';
+import { fileNameOf, folderOf, groupCopies, mainFolderOf, type CopyInput } from './era-copies.js';
 
 export type EraVerdict = EraDecision;
 
@@ -322,6 +323,11 @@ export interface EraAlbumRow {
   suggestedVerdict: EraVerdict | null;
   /** Out of the review list: trusted, one year, or every track has a year. */
   done: boolean;
+  /** The folder holding most of the album's files (era-copies.mainFolderOf). */
+  mainFolder: string | null;
+  /** Files that are another copy of a recording already counted (a playlist
+   *  folder's copy, a file kept twice); `tracks` still counts them. */
+  copies: number;
 }
 
 export function listEraAlbums(d: Database): EraAlbumRow[] {
@@ -353,7 +359,20 @@ export function listEraAlbums(d: Database): EraAlbumRow[] {
     year: number | null; overridden: number; scanned: number; verdict: EraVerdict | null;
     forced_year: number | null; kind_set: string | null; album_kind: string | null;
   }>;
+  const files = new Map<string, CopyInput[]>();
+  for (const f of d.prepare(
+    `SELECT ${ERA_ALBUM_KEY_SQL} AS k, t.id, t.title, t.artist, t.duration_sec, t.file_path
+       FROM tracks t
+       LEFT JOIN era_override o ON o.album_key = ${ERA_ALBUM_KEY_SQL}
+      WHERE ${ERA_SELECTION_SQL}`,
+  ).all() as Array<{ k: string; id: string; title: string | null; artist: string | null; duration_sec: number | null; file_path: string | null }>) {
+    const list = files.get(f.k) ?? [];
+    list.push({ id: f.id, title: f.title, artist: f.artist, durationSec: f.duration_sec, filePath: f.file_path });
+    files.set(f.k, list);
+  }
   return rows.map(r => {
+    const albumFiles = files.get(r.era_album_key) ?? [];
+    const groups = groupCopies(albumFiles);
     const kindSet = isAlbumKind(r.kind_set);
     const kind = kindSet ? r.kind_set as AlbumKind : isAlbumKind(r.album_kind) ? r.album_kind : null;
     const verdict = r.verdict ?? null;
@@ -375,6 +394,8 @@ export function listEraAlbums(d: Database): EraAlbumRow[] {
     kindSet,
     suggestedVerdict: suggestedDecision(kind),
     done: verdict === 'trusted' || verdict === 'year' || r.year_not_found + r.year_unchecked === 0,
+    mainFolder: mainFolderOf(albumFiles),
+    copies: albumFiles.length - groups.length,
     };
   });
 }
@@ -387,21 +408,37 @@ export interface EraTrackRow {
   originalYear: number | null;
   originalYearSource: string | null;
   yearState: 'resolved' | 'not found' | 'unchecked';
+  durationSec: number | null;
+  /** The file's own name, which usually carries the track number. */
+  fileName: string | null;
+  /** The file's folder, only when it is NOT the album's main folder. */
+  folder: string | null;
+  /** Other copies of this recording (same title, artist and length): a year
+   *  set here is written to them too. */
+  copies: Array<{ id: string; folder: string | null }>;
 }
 
-/** One album's tracks, for the per-track year editor. */
+/** One album's tracks for the per-track year editor, a recording's copies
+ *  folded under one entry (era-copies.ts). */
 export function listEraAlbumTracks(d: Database, albumKey: string): EraTrackRow[] {
   const rows = d.prepare(
-    `SELECT t.id, t.title, t.artist, t.year, t.original_year, t.original_year_source, ${YEAR_STATE_SQL} AS year_state
-       FROM tracks t WHERE ${ERA_ALBUM_KEY_SQL} = ?
-      ORDER BY t.title COLLATE NOCASE, t.id`,
+    `SELECT t.id, t.title, t.artist, t.year, t.original_year, t.original_year_source, ${YEAR_STATE_SQL} AS year_state,
+            t.duration_sec, t.file_path
+       FROM tracks t WHERE ${ERA_ALBUM_KEY_SQL} = ?`,
   ).all(albumKey) as Array<{
     id: string; title: string | null; artist: string | null; year: number | null;
     original_year: number | null; original_year_source: string | null; year_state: EraTrackRow['yearState'];
+    duration_sec: number | null; file_path: string | null;
   }>;
-  return rows.map(r => ({
+  const input = rows.map(r => ({ ...r, durationSec: r.duration_sec, filePath: r.file_path }));
+  const main = mainFolderOf(input);
+  return groupCopies(input, main).map(({ primary: r, copies }) => ({
     id: r.id, title: r.title, artist: r.artist, year: r.year,
     originalYear: r.original_year, originalYearSource: r.original_year_source, yearState: r.year_state,
+    durationSec: r.duration_sec,
+    fileName: fileNameOf(r.file_path),
+    folder: folderOf(r.file_path) === main ? null : folderOf(r.file_path),
+    copies: copies.map(c => ({ id: c.id, folder: folderOf(c.file_path) })),
   }));
 }
 

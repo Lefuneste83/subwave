@@ -18,6 +18,7 @@ import { ALBUM_KINDS, ALBUM_KIND_LABELS, type AlbumKind } from '../../../lib/sch
 import { Btn, Pill } from '../ui';
 import { Input } from '../../ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../ui/select';
+import { formatTrackLength, shortFolder, yearTargets } from './era-display';
 import { applyEraYearEvent, libraryKeys } from './queries';
 import { useLibrary } from './LibraryContext';
 import { useAdminMutation, useAdminQuery } from './useAdminQuery';
@@ -45,6 +46,10 @@ export interface EraAlbum {
   suggestedVerdict: Verdict | null;
   /** Out of "To review". */
   done: boolean;
+  /** The folder holding most of the album's files. */
+  mainFolder: string | null;
+  /** Files that are another copy of a recording already listed. */
+  copies: number;
 }
 
 export interface EraSummary {
@@ -62,6 +67,12 @@ interface EraTrack {
   originalYear: number | null;
   originalYearSource: string | null;
   yearState: 'resolved' | 'not found' | 'unchecked';
+  durationSec: number | null;
+  fileName: string | null;
+  /** Set only when the file is outside the album's main folder. */
+  folder: string | null;
+  /** Other copies of the same recording; a year set here goes to them too. */
+  copies: Array<{ id: string; folder: string | null }>;
 }
 
 interface EraResponse { albums: EraAlbum[]; summary: EraSummary }
@@ -286,7 +297,11 @@ export default function EraReviewSection() {
                             <span className="block truncate text-ink">{a.album ?? '(no album tag)'}</span>
                             <span className="caption block truncate">
                               {a.albumArtist ?? '(no album artist)'}{a.year != null ? ` · ${a.year}` : ''} · {a.tracks} tracks
+                              {a.copies > 0 && ` (${a.copies} ${a.copies === 1 ? 'is a copy' : 'are copies'})`}
                             </span>
+                            {a.mainFolder && (
+                              <span className="caption block truncate" title={a.mainFolder}>📁 {shortFolder(a.mainFolder, 3)}</span>
+                            )}
                           </span>
                         </button>
                         {a.reason && (
@@ -382,14 +397,22 @@ function AlbumTracks({ album }: { album: EraAlbum }) {
     path: `/library/era/album?${q}`,
     toastOnError: true,
   });
-  const save = useAdminMutation<{ ok: boolean }, { id: string; originalYear: number | null }>({
-    request: (vars, fetcher) => adminJson<{ ok: boolean }>(fetcher, '/library/original-year', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: vars.id, originalYear: vars.originalYear, applyToAlbum: false }),
-    }),
+  // A year goes to the entry and to every copy folded under it, one call each
+  // (the route sets one track), in order so a failure stops the rest.
+  const save = useAdminMutation<{ ok: boolean }, { ids: string[]; originalYear: number | null }>({
+    request: async (vars, fetcher) => {
+      for (const id of vars.ids) {
+        await adminJson<{ ok: boolean }>(fetcher, '/library/original-year', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, originalYear: vars.originalYear, applyToAlbum: false }),
+        });
+      }
+      return { ok: true };
+    },
     onDone: async (_out, vars, qc) => {
-      notify.ok(vars.originalYear == null ? 'Year cleared' : `Year ${vars.originalYear} saved`);
-      applyEraYearEvent(qc, { originalYear: vars.originalYear, trackIds: [vars.id] });
+      const scope = vars.ids.length > 1 ? ` (${vars.ids.length} copies)` : '';
+      notify.ok(vars.originalYear == null ? `Year cleared${scope}` : `Year ${vars.originalYear} saved${scope}`);
+      applyEraYearEvent(qc, { originalYear: vars.originalYear, trackIds: vars.ids });
       await qc.invalidateQueries({ queryKey: libraryKeys.era() });
     },
   });
@@ -399,7 +422,7 @@ function AlbumTracks({ album }: { album: EraAlbum }) {
     if (raw === '') return;
     const y = Number(raw);
     if (!Number.isInteger(y) || y < 1000) { notify.err('Type a four-digit year'); return; }
-    save.mutate({ id: t.id, originalYear: y });
+    save.mutate({ ids: yearTargets(t), originalYear: y });
   };
 
   if (tracks.isPending) return <span className="caption">loading tracks…</span>;
@@ -409,7 +432,17 @@ function AlbumTracks({ album }: { album: EraAlbum }) {
       <tbody>
         {rows.map(t => (
           <tr key={t.id} className="border-t border-[var(--separator)]">
-            <td className="max-w-[320px] truncate py-1 pr-3">{t.title ?? '(untitled)'} <span className="caption">— {t.artist ?? '?'}</span></td>
+            <td className="max-w-[320px] py-1 pr-3">
+              <span className="block truncate" title={t.fileName ?? undefined}>
+                {t.title ?? '(untitled)'} <span className="caption">— {t.artist ?? '?'}{t.durationSec ? ` · ${formatTrackLength(t.durationSec)}` : ''}</span>
+              </span>
+              {t.fileName && <span className="caption block truncate" title={t.folder ?? album.mainFolder ?? undefined}>{t.folder ? `${shortFolder(t.folder)}/` : ''}{t.fileName}</span>}
+              {t.copies.length > 0 && (
+                <span className="caption block truncate" title={t.copies.map(c => c.folder ?? '').join('\n')}>
+                  also in {t.copies.map(c => shortFolder(c.folder)).join(', ')}
+                </span>
+              )}
+            </td>
             <td className="caption py-1 pr-3 whitespace-nowrap">file {t.year ?? '—'}</td>
             <td className="py-1 pr-3 whitespace-nowrap">
               {t.originalYear != null
@@ -424,7 +457,7 @@ function AlbumTracks({ album }: { album: EraAlbum }) {
                   onKeyDown={e => { if (e.key === 'Enter') commit(t); }} />
                 <Btn sm disabled={save.isPending || !(draft[t.id] ?? '').trim()} onClick={() => commit(t)}>Set</Btn>
                 {t.originalYearSource === 'manual' && (
-                  <Btn sm disabled={save.isPending} onClick={() => save.mutate({ id: t.id, originalYear: null })}
+                  <Btn sm disabled={save.isPending} onClick={() => save.mutate({ ids: yearTargets(t), originalYear: null })}
                     title="Clear the hand-set year; the lookups take the track back">Clear</Btn>
                 )}
               </span>
