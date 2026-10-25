@@ -1527,6 +1527,32 @@ def stems_dir_to_write(stems_dir, require_marker):
     return None
 
 
+# The analyzer image runs as an unprivileged user with umask 022, so a plain
+# makedirs/open leaves what it shares with the controller at 755/644. Where the
+# controller is another user on that share (a remote analyzer, or NFS squashing
+# root to nobody), it then cannot delete inside stems/<id>/ when it evicts the
+# track. Shared folders get 777 and shared files 666, the state bootstrap's
+# rule (docker/broadcast-entrypoint.sh), set explicitly so no umask can narrow them.
+SHARED_DIR_MODE = 0o777
+SHARED_FILE_MODE = 0o666
+
+
+def make_shared_dir(path):
+    """makedirs + an explicit 777. A folder another user owns cannot be
+    chmod-ed (EPERM): its own mode then decides, and the write goes ahead."""
+    os.makedirs(path, exist_ok=True)
+    try:
+        os.chmod(path, SHARED_DIR_MODE)
+    except OSError:
+        pass
+
+
+def publish_shared_file(tmp, path):
+    """666 on the finished temp file, then the atomic rename into place."""
+    os.chmod(tmp, SHARED_FILE_MODE)
+    os.replace(tmp, path)
+
+
 def write_stems(stems, window, dest_dir):
     """Persist a separate() result as 16-bit FLAC at DEMUCS_SR into dest_dir
     as <window>-<stem>.flac (feature: stem-blend transitions — the cache that
@@ -1535,12 +1561,12 @@ def write_stems(stems, window, dest_dir):
     the render op to trust. Raises on failure; callers degrade."""
     import soundfile as sf
 
-    os.makedirs(dest_dir, exist_ok=True)
+    make_shared_dir(dest_dir)
     for name, data in stems.items():
         path = os.path.join(dest_dir, f"{window}-{name}.flac")
         tmp = path + ".tmp"
         sf.write(tmp, data.T, DEMUCS_SR, subtype="PCM_16", format="FLAC")
-        os.replace(tmp, path)
+        publish_shared_file(tmp, path)
 
 
 def write_tail_meta(dest_dir, tail_start_s, duration_s):
@@ -1557,7 +1583,7 @@ def write_tail_meta(dest_dir, tail_start_s, duration_s):
             "tail_start_sec": round(float(tail_start_s), 3),
             "duration_sec": round(float(duration_s), 3),
         }, f)
-    os.replace(tmp, path)
+    publish_shared_file(tmp, path)
 
 
 def render_transition(req):
@@ -1768,11 +1794,11 @@ def render_transition(req):
     mix_buf[:e] *= ramp
     mix_buf[-e:] *= ramp[::-1]
 
-    os.makedirs(out_dir, exist_ok=True)
+    make_shared_dir(out_dir)
     out_path = os.path.join(out_dir, os.path.basename(clip_name))
     tmp = out_path + ".tmp"
     sf.write(tmp, mix_buf, sr, subtype="PCM_16", format="WAV")
-    os.replace(tmp, out_path)
+    publish_shared_file(tmp, out_path)
     return {
         "ok": True,
         "path": out_path,
