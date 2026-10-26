@@ -22,6 +22,10 @@ const HW = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve';
 const HOUR = `(?:${HW}|1[0-2]|[1-9])`;
 const HOUR_OR_MID = `(?:${HW}|midnight|noon|midday|1[0-2]|[1-9])`;
 const OC = `(?:\\s+o[\\s']?clock)?`;
+// An optional am/pm the approach pattern swallows with the hour, so the whole
+// phrase is what gets replaced. The trailing dot is optional and backtracked
+// away when a word boundary must follow.
+const AMPM = `(?:\\s*(?:a\\.?m|p\\.?m)\\.?)?`;
 // What may follow the hour in "just after ten" / "approaching ten" for it to
 // be a time at all: the end of a clause or a word that carries the sentence on
 // ("on a Monday", "and", "here"). Without it, "back after two years" and
@@ -139,8 +143,13 @@ export function findClockPhrases(text: string): ClockPhrase[] {
     return [(H % 12) * 60, (H % 12) * 60 + 25];
   });
 
-  // e. approaching|nearly|almost|coming up on|coming up to H (o'clock) -> [B-25, B]
-  add(new RegExp(`\\b(?:(?:approaching|nearly|almost|coming\\s+up\\s+(?:on|to))\\s+)(${HOUR})${OC}\\b${TIME_FOLLOWER}`, 'gi'), 4, (g) => {
+  // e. approaching|nearly|almost|coming up on|coming up to|(getting) close to|
+  //    closing in on H (o'clock)(am|pm) -> [B-25, B]. The am/pm rides inside
+  //    the match so a replacement never leaves a stray "pm" behind it, and
+  //    "getting" so it never leaves "It is getting approaching 8pm".
+  //    "(getting) close to seven pm" was missing: on 18 Oct it was neither
+  //    stripped from the recap nor checked on air, and re-aired 31 min late.
+  add(new RegExp(`\\b(?:(?:approaching|nearly|almost|coming\\s+up\\s+(?:on|to)|(?:getting\\s+)?close\\s+to|closing\\s+in\\s+on)\\s+)(${HOUR})${OC}${AMPM}\\b${TIME_FOLLOWER}`, 'gi'), 4, (g) => {
     const H = hourVal(g[0]); if (!Number.isFinite(H)) return null;
     return [(H % 12) * 60 - 25, (H % 12) * 60];
   });
@@ -205,6 +214,14 @@ export function findClockPhrases(text: string): ClockPhrase[] {
   return kept.map((r) => ({ start: r.start, end: r.end, text: r.text, lo: r.lo, hi: r.hi }));
 }
 
+// Prompt memory: drop every SENTENCE that states a time, not just the phrase.
+// Cutting the phrase out ("Just gone one in the afternoon on The Free
+// Electron.") left a fragment ("in the afternoon on The Free Electron.") that
+// a model which parrots its recap aired as an opener or as a whole line —
+// 27 of 218 spoken lines on 18 Oct, none on the three days before M1. A
+// model that does not parrot loses nothing it needed: the sentence's only
+// fresh content was the time, and the time is supplied anew every prompt.
+// A line whose every sentence states a time comes back empty; callers drop it.
 export function stripClockPhrases(text: string): string {
   const phrases = findClockPhrases(text);
   if (phrases.length === 0) return text;
@@ -212,17 +229,9 @@ export function stripClockPhrases(text: string): string {
   let out = text;
   for (let i = phrases.length - 1; i >= 0; i--) {
     const p = phrases[i];
-    let removeStart = p.start;
-    const before = out.slice(0, p.start);
-    // Remove one directly preceding preposition ("at", "around", "about", "by").
-    const preM = before.match(/(at|around|about|by)\s*$/i);
-    if (preM) {
-      const preStart = p.start - preM[0].length;
-      if (preStart === 0 || /\s/.test(out[preStart - 1])) {
-        removeStart = preStart;
-      }
-    }
-    out = out.slice(0, removeStart) + out.slice(p.end);
+    // Already gone with a later phrase's sentence.
+    if (p.start >= out.length || out.slice(p.start, p.end) !== p.text) continue;
+    out = out.slice(0, sentenceStart(out, p.start)) + out.slice(sentenceEnd(out, p.end));
   }
   return tidy(out);
 }
@@ -238,10 +247,23 @@ export function clockOffMinutes(phrase: ClockPhrase, hhmm: string): number | nul
   return Math.min(circDist(t, phrase.lo), circDist(t, phrase.hi));
 }
 
+// A [.!?] ends a sentence only when whitespace (or the end) follows it and it
+// is not the dot of an abbreviation. Without both checks "Bar.ba drop…" was
+// cut at "Bar." and "four p.m. here…" at "p.m.", leaving the rest of the
+// sentence behind as a fragment — the thing the strip exists to prevent.
+const ABBREV_BEFORE_DOT = /(?:\b[a-z]|\b(?:a\.m|p\.m|mr|mrs|ms|dr|st|vol|vs|no|feat|ft|jr|sr|op|inc|ltd))$/i;
+
+function isSentenceEnd(text: string, i: number): boolean {
+  if (!/[.!?]/.test(text[i])) return false;
+  if (i + 1 < text.length && !/\s/.test(text[i + 1])) return false;
+  if (text[i] === '.' && ABBREV_BEFORE_DOT.test(text.slice(Math.max(0, i - 6), i))) return false;
+  return true;
+}
+
 function sentenceStart(text: string, pos: number): number {
   let i = pos - 1;
   while (i >= 0) {
-    if (/[.!?]/.test(text[i]) && (i + 1 >= text.length || /\s/.test(text[i + 1]))) {
+    if (isSentenceEnd(text, i)) {
       let j = i + 1;
       while (j < text.length && /\s/.test(text[j])) j++;
       return j;
@@ -254,7 +276,7 @@ function sentenceStart(text: string, pos: number): number {
 function sentenceEnd(text: string, pos: number): number {
   let i = pos;
   while (i < text.length) {
-    if (/[.!?]/.test(text[i])) {
+    if (isSentenceEnd(text, i)) {
       let j = i + 1;
       while (j < text.length && /\s/.test(text[j])) j++;
       return j;
