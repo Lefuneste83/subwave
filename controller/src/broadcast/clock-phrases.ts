@@ -20,6 +20,7 @@ export const CLOCK_CHECK_EXEMPT_KINDS: ReadonlySet<string> = new Set(['hourly-ch
 
 const HW = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve';
 const HOUR = `(?:${HW}|1[0-2]|[1-9])`;
+const HOUR_OR_MID = `(?:${HW}|midnight|noon|midday|1[0-2]|[1-9])`;
 const OC = `(?:\\s+o[\\s']?clock)?`;
 // What may follow the hour in "just after ten" / "approaching ten" for it to
 // be a time at all: the end of a clause or a word that carries the sentence on
@@ -34,6 +35,7 @@ function hourVal(w: string): number {
   const m: Record<string, number> = {
     one: 1, two: 2, three: 3, four: 4, five: 5, six: 6,
     seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+    midnight: 12, noon: 12, midday: 12,
   };
   return m[w.toLowerCase()] ?? NaN;
 }
@@ -114,19 +116,19 @@ export function findClockPhrases(text: string): ClockPhrase[] {
   }
 
   // a. half past H / half-past H / half H -> [B+20, B+40]
-  add(new RegExp(`\\bhalf(?:[-\\s]?past)?\\s+(${HOUR})\\b`, 'gi'), 0, (g) => {
+  add(new RegExp(`\\bhalf(?:[-\\s]?past)?\\s+(${HOUR_OR_MID})\\b`, 'gi'), 0, (g) => {
     const H = hourVal(g[0]); if (!Number.isFinite(H)) return null;
     return [(H % 12) * 60 + 20, (H % 12) * 60 + 40];
   });
 
   // b. quarter past H -> [B+10, B+20]
-  add(new RegExp(`\\bquarter\\s+past\\s+(${HOUR})\\b`, 'gi'), 1, (g) => {
+  add(new RegExp(`\\bquarter\\s+past\\s+(${HOUR_OR_MID})\\b`, 'gi'), 1, (g) => {
     const H = hourVal(g[0]); if (!Number.isFinite(H)) return null;
     return [(H % 12) * 60 + 10, (H % 12) * 60 + 20];
   });
 
   // c. quarter to H -> [B-20, B-10]
-  add(new RegExp(`\\bquarter\\s+to\\s+(${HOUR})\\b`, 'gi'), 2, (g) => {
+  add(new RegExp(`\\bquarter\\s+to\\s+(${HOUR_OR_MID})\\b`, 'gi'), 2, (g) => {
     const H = hourVal(g[0]); if (!Number.isFinite(H)) return null;
     return [(H % 12) * 60 - 20, (H % 12) * 60 - 10];
   });
@@ -154,6 +156,9 @@ export function findClockPhrases(text: string): ClockPhrase[] {
   // "just" is required: a bare "after midnight" names a stretch of the night,
   // not a reading of the clock.
   add(new RegExp(`\\b(?:just\\s+(?:after|past|gone)\\s+)(noon|midday|midnight)\\b`, 'gi'), 6, () => [0, 25]);
+  // A deictic "it is past midnight" IS a reading of the clock (the bare
+  // "after midnight" above is not): it claims the hour has only just turned.
+  add(new RegExp(`(?<=\\b(?:it\\s+is|it's|it\u2019s)\\s+(?:now\\s+)?)(?:past|gone|after)\\s+(noon|midday|midnight)\\b`, 'gi'), 6, () => [0, 59]);
 
   // i. H am/pm -> [B-10, B+59] only with deictic context
   add(new RegExp(`\\b(${HOUR})\\s*(?:a\\.?m\\.?|p\\.?m\\.?)\\b`, 'gi'), 7, (g) => {
