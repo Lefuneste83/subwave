@@ -503,7 +503,9 @@ export async function migrate(embeddingDim: number, reseed = false, adoptStoredD
     // `tail_version` says which window outro_json/tail_silence_ms/tail_start_ms
     // were measured on: NULL = the file's last ANALYZE_OUTRO_SECONDS, 2 = a
     // window ending where the music stops, placed from the stored edges and
-    // confirmed by the analyzer. Added only when missing, like step 30.
+    // confirmed by the analyzer; 3 = the same placed window with its
+    // short-term loudness curve in outro_json (facets.ts placedTailVersion).
+    // Added only when missing, like step 30.
     const have = (d.prepare('PRAGMA table_info(tracks)').all() as Array<{ name: string }>).some(c => c.name === 'tail_version');
     if (!have) runDdl(d, 'ALTER TABLE tracks ADD COLUMN tail_version INTEGER;');
     d.pragma('user_version = 31');

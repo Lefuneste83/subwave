@@ -1034,6 +1034,56 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
                     effects, stem blends, jingles and beds keep their own curves.
                   </div>
                 </div>
+                <div className="field">
+                  <Label>Cut fade endings at their audible end</Label>
+                  <div className="flex items-center gap-2">
+                    <Seg
+                      options={[
+                        { id: 'off', label: 'Off' },
+                        { id: 'on', label: 'On' },
+                      ]}
+                      value={form.transitions.fadeAudibleEnd ? 'on' : 'off'}
+                      onChange={id =>
+                        setForm(f =>
+                          f ? { ...f, transitions: { ...f.transitions, fadeAudibleEnd: id === 'on' } } : f,
+                        )
+                      }
+                    />
+                  </div>
+                  <SettingsFieldError path="transitions.fadeAudibleEnd" errors={fieldErrors} />
+                  <div className="field-hint">
+                    A song that fades out keeps playing well after you can hear it: the dead-air
+                    trim waits for true silence, so the next track starts over a near-silent tail.
+                    With this on, a fade is cut where it stops being audible and the crossfade
+                    spans the fade up to that point. Applies from the next queued track, no mixer
+                    restart. Tracks not yet re-analysed keep today&apos;s cut.
+                  </div>
+                </div>
+                <div className="field">
+                  <Label>Audible end (dB under the track&apos;s loudness)</Label>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      className="mono-num w-28"
+                      aria-label="Audible end (dB under the track's loudness)"
+                      type="number"
+                      step={1}
+                      min={15}
+                      max={35}
+                      value={form.transitions.fadeAudibleEndDb}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                        const v = e.currentTarget.value;
+                        setForm(f => (f ? { ...f, transitions: { ...f.transitions, fadeAudibleEndDb: v } } : f));
+                      }}
+                    />
+                    <span className="text-[12px] text-muted">dB</span>
+                  </div>
+                  <SettingsFieldError path="transitions.fadeAudibleEndDb" errors={fieldErrors} />
+                  <div className="field-hint">
+                    How far under the song&apos;s own loudness its fade counts as gone, from 15 to 35
+                    (default 20). A smaller number cuts earlier. Applies from the next queued track,
+                    no mixer restart; tracks not yet re-analysed keep today&apos;s cut.
+                  </div>
+                </div>
                 </div>
               </Card>
             )}
@@ -1813,7 +1863,7 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
               onSave={saveBroadcast}
               saveLabel="Save broadcast & mixer"
               errors={fieldErrors}
-              ownedKeys={['crossfadeDuration', 'ducking', 'maxTrackSeconds', 'maxTrackLengthMode', 'fadeAtShowEnd', 'silenceTrim', 'audio', 'loudness', 'stream']}
+              ownedKeys={['crossfadeDuration', 'ducking', 'maxTrackSeconds', 'maxTrackLengthMode', 'fadeAtShowEnd', 'silenceTrim', 'audio', 'loudness', 'stream', 'transitions.equalPowerCrossfade', 'transitions.fadeAudibleEnd', 'transitions.fadeAudibleEndDb']}
             />
           </>
         )}

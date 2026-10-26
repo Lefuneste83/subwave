@@ -50,6 +50,8 @@ export function dangerSavePayload(form: FormState) {
       pairDrain: form.transitions.pairDrain,
       stemBlends: form.transitions.stemBlends,
       equalPowerCrossfade: form.transitions.equalPowerCrossfade,
+      fadeAudibleEnd: form.transitions.fadeAudibleEnd,
+      fadeAudibleEndDb: n.float('transitions.fadeAudibleEndDb', form.transitions.fadeAudibleEndDb),
       effects: form.transitions.effects,
     },
     audio: {

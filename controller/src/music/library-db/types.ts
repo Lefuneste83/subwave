@@ -1,6 +1,8 @@
 // Record shapes library-db reads and writes. TrackRow is the raw SQLite row;
 // the rest are the consumer-facing shapes rows.ts maps it to.
 
+import type { LoudnessCurve } from '../loudness-curve.js';
+
 export type EnergyValue = 'low' | 'medium' | 'high' | null;
 export type TagSource = 'llm' | 'propagated' | 'uncertain-llm' | 'legacy-v1' | 'manual';
 
@@ -93,6 +95,9 @@ export interface TrackOutro {
   // not computed (the backfill probes the raw JSON for it); parseOutroJson
   // materialises it as null on read.
   vocalRanges?: Array<{ startMs: number; endMs: number }> | null;
+  // Short-term loudness over the tail window (tail v3; music/loudness-curve.ts
+  // has the stored form). ABSENT when not measured or malformed, never null.
+  loudnessCurve?: LoudnessCurve;
 }
 
 // Tonic note (sharps) + mode over a time range.

@@ -690,7 +690,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
         w.edges = { leadMs: r.edgeLeadMs, tailMs: r.edgeTailMs, durationMs: r.decodedDurationMs };
       } else if (f === 'tail') {
         w.tail = { outro: r.outro, tailSilenceMs: r.tailSilenceMs, tailStartMs: r.tailStartMs,
-          version: r.tailPlaced ? 2 : null };
+          version: r.tailPlaced ? db.placedTailVersion(r.outro) : null };
       } else if (f === 'clap' && r.audioEmbedding?.length === db.AUDIO_EMBEDDING_DIM) {
         w.clap = r.audioEmbedding;
         wroteClap = true;
@@ -822,7 +822,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
           leadSilenceMs: a.leadSilenceMs,
           tailSilenceMs: a.tailSilenceMs,
           tailStartMs: a.tailStartMs,
-          tailVersion: a.tailPlaced ? 2 : null,
+          tailVersion: a.tailPlaced ? db.placedTailVersion(outro) : null,
           stemsAttempted: a.stemsCached !== null,
           // Recorded on the facet rows; 'capped' explains a missing tail.
           source: viaUrl
