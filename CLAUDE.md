@@ -94,7 +94,7 @@ The pieces are Broadcast (Icecast + Liquidsoap), Controller (Express, ESM, TypeS
 - **A rendered segment is placed, not trimmed**: the lever at a boundary is which boundary it takes (`broadcast/vocal-runway.ts`).
 - **A pause-and-talk break is silence on the music timeline.** The voice still goes through `say.txt`.
 - **A show handoff is prepared for the confirmed final outgoing track**, never by look-ahead alone (`show-boundary-handoffs.md`).
-- **A spoken clock is a forecast**, guarded by two paired checks in `broadcast/queue/pure.ts`.
+- **A spoken clock is a forecast**, guarded by two paired checks in `broadcast/queue/pure.ts`. What time a generated line may SAY is `broadcast/clock-phrases.ts`: time-stating sentences never reach a prompt's memory, and a stated time off the air time is corrected to the supplied clock, or its sentence dropped, before air.
 - **A show-boundary cut is a fade through the existing `liq_cue_out` path.** It is measured from the pick's expected air time, and that forecast must count the bed.
 - **Anything that detects starvation fires immediately and ramps the level**: a guard that waits before firing does not fire.
 - **Degrade silently and immediately, never through a timeout.** An unmeasured value is `estimated: true`, with its timestamps absent, not zeroed.
