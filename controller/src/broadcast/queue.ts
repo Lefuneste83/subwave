@@ -1517,9 +1517,15 @@ class Queue {
         // the silence we are about to cut as part of the ramp and sizes the
         // exit canvas longer than the track has left.
         const trimEndSec = silenceTrim.resolveSilenceTrim(item.track).cueOutSec;
-        const endSec = trimEndSec != null && durSec > 0
-          ? Math.min(durSec, trimEndSec)
-          : (trimEndSec ?? durSec);
+        // A fade cut at its AUDIBLE end (transitions.fadeAudibleEnd): the
+        // canvas spans the wind-down up to that cut, sized by its own rule in
+        // endingCrossSecondsFor. Decided once, in silence-trim.
+        const audibleEnd = silenceTrim.resolveAudibleEnd(item.track);
+        const endSec = audibleEnd != null
+          ? audibleEnd.endSec
+          : trimEndSec != null && durSec > 0
+            ? Math.min(durSec, trimEndSec)
+            : (trimEndSec ?? durSec);
         const windDownSec = endSec > 0 && Number.isFinite(outro.startMs)
           ? Math.max(0, endSec - outro.startMs / 1000)
           : null;
@@ -1531,12 +1537,13 @@ class Queue {
         const exitSecs = mix.endingCrossSecondsFor(
           { bpm: outro.bpm ?? next.bpm, key: next.key, ending: outro.ending },
           windDownSec,
-          { maxSec, tailLufs: outro.lufs ?? null, bodyLufs, vocalTail: next.vocalTail },
+          { maxSec, tailLufs: outro.lufs ?? null, bodyLufs, vocalTail: next.vocalTail, audibleEnd },
         );
         if (exitSecs != null) {
           item.track.crossSec = exitSecs;
           const sung = next.vocalTail === true ? ', vocal tail' : '';
-          this.log('mix', `exit canvas ${exitSecs}s (${outro.ending} ending${sung}) → ${item.track.title}`);
+          const cut = audibleEnd != null && outro.ending === 'fade' ? `, cut at audible end ${audibleEnd.endSec}s` : '';
+          this.log('mix', `exit canvas ${exitSecs}s (${outro.ending} ending${sung}${cut}) → ${item.track.title}`);
         }
       }
     }

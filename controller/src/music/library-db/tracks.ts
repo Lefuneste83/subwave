@@ -462,9 +462,10 @@ interface TrackAnalysisWrite {
   leadSilenceMs?: number | null;
   tailSilenceMs?: number | null;
   tailStartMs?: number | null;
-  // 2 = the analyzer placed the tail window from the stored edges; it then
-  // replaces whatever tail is stored. Absent = the end-of-file window, which
-  // never replaces a placed tail.
+  // 2 = the analyzer placed the tail window from the stored edges, 3 = placed
+  // with the loudness curve (facets.placedTailVersion); it then replaces
+  // whatever tail is stored and is stamped as given. Absent = the end-of-file
+  // window, which never replaces a placed tail.
   tailVersion?: number | null;
   // true stamps stems_at so the backfill scope drops the track. Pass true for a
   // MISS too: the stamp records the attempt, not disk presence (migration 17).
@@ -522,7 +523,7 @@ export function upsertTrackAnalysis(id: string, a: TrackAnalysisWrite): void {
         outro_json          = CASE WHEN COALESCE(tail_version, 1) >= 2 AND ? = 0 THEN outro_json ELSE COALESCE(?, outro_json) END,
         tail_silence_ms     = CASE WHEN COALESCE(tail_version, 1) >= 2 AND ? = 0 THEN tail_silence_ms ELSE COALESCE(?, tail_silence_ms) END,
         tail_start_ms       = CASE WHEN COALESCE(tail_version, 1) >= 2 AND ? = 0 THEN tail_start_ms ELSE COALESCE(?, tail_start_ms) END,
-        tail_version        = CASE WHEN ? = 1 THEN 2 ELSE tail_version END,
+        tail_version        = CASE WHEN ? = 1 THEN ? ELSE tail_version END,
         -- A pass with the stem cache off passes null and must not clear an
         -- earlier stem pass's stamp.
         stems_at            = COALESCE(?, stems_at),
@@ -551,7 +552,7 @@ export function upsertTrackAnalysis(id: string, a: TrackAnalysisWrite): void {
       placed, outro != null ? JSON.stringify(outro) : null,
       placed, Number.isFinite(a.tailSilenceMs as number) ? Math.max(0, Math.round(a.tailSilenceMs as number)) : null,
       placed, Number.isFinite(a.tailStartMs as number) ? Math.max(0, Math.round(a.tailStartMs as number)) : null,
-      placed,
+      placed, placed ? Math.round(a.tailVersion as number) : null,
       a.stemsAttempted ? new Date().toISOString() : null,
       ANALYSIS_VERSION,
       id,
@@ -613,8 +614,9 @@ export interface FacetWrite {
     loudnessRangeLu?: number | null;
     version?: number | null;
   } | { unmeasurable: string };
-  // `version` 2 = the analyzer placed the window from the stored edges; absent
-  // = the end-of-file window (an older analyzer, or no edges to place it).
+  // `version` 2 = the analyzer placed the window from the stored edges (3 with
+  // the loudness curve, facets.placedTailVersion); absent = the end-of-file
+  // window (an older analyzer, or no edges to place it).
   tail?: { outro: TrackOutro | null; tailSilenceMs: number | null; tailStartMs: number | null; version?: number | null }
     | { unmeasurable: string };
   clap?: number[];

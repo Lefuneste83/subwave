@@ -1244,6 +1244,14 @@ export async function load() {
       pairDrain: typeof stored.transitions?.pairDrain === 'boolean' ? stored.transitions.pairDrain : DEFAULTS.transitions.pairDrain,
       stemBlends: typeof stored.transitions?.stemBlends === 'boolean' ? stored.transitions.stemBlends : DEFAULTS.transitions.stemBlends,
       equalPowerCrossfade: typeof stored.transitions?.equalPowerCrossfade === 'boolean' ? stored.transitions.equalPowerCrossfade : DEFAULTS.transitions.equalPowerCrossfade,
+      fadeAudibleEnd: typeof stored.transitions?.fadeAudibleEnd === 'boolean' ? stored.transitions.fadeAudibleEnd : DEFAULTS.transitions.fadeAudibleEnd,
+      // A hand edit out of range (or not a number) repairs to the default.
+      fadeAudibleEndDb:
+        typeof stored.transitions?.fadeAudibleEndDb === 'number' &&
+        stored.transitions.fadeAudibleEndDb >= BOUNDS.fadeAudibleEndDb.min &&
+        stored.transitions.fadeAudibleEndDb <= BOUNDS.fadeAudibleEndDb.max
+          ? stored.transitions.fadeAudibleEndDb
+          : DEFAULTS.transitions.fadeAudibleEndDb,
       // Per-effect kill switches (#1565) — same absent-means-default repair as
       // every sibling, and the default is `true`, so a stored block missing a
       // field (or missing entirely) normalises to the whole kit on.
@@ -2464,7 +2472,9 @@ export async function prepareUpdate(patch, { themeIds }: { themeIds?: ReadonlySe
   }
   if ('transitions' in patch) {
     const tr = parseSettingsPatchKey<Record<string, unknown>>('transitions', patch.transitions);
-    for (const k of ['pairDrain', 'stemBlends'] as const) {
+    // fadeAudibleEnd(Db) are controller-side cue points read per queued track
+    // (music/silence-trim.ts), so they need no mixer restart.
+    for (const k of ['pairDrain', 'stemBlends', 'fadeAudibleEnd', 'fadeAudibleEndDb'] as const) {
       if (tr[k] !== undefined) (next.transitions as Record<string, unknown>)[k] = tr[k];
     }
     // Read once by the mixer at startup (liquidsoap_equal_power_crossfade.txt),
