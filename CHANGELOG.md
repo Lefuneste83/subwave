@@ -12,6 +12,35 @@
   independent. Operators who already reconfigured profiles under #1777 must
   mark those profiles before upgrading. See [upgrade and recovery steps](docs/multi-station.md#upgrading-existing-profiles).
 
+## [1.28.0](https://github.com/perminder-klair/subwave/compare/v1.27.0...v1.28.0) (2026-10-26)
+
+
+### Features
+
+* **app:** show synced lyrics on the Live page ([#2088](https://github.com/perminder-klair/subwave/issues/2088)) ([90c1777](https://github.com/perminder-klair/subwave/commit/90c1777bb9c08b396c4ee2d090a5b3a1a8aa7f9b))
+* **axo:** draw AXO-1 in pen again ([#2075](https://github.com/perminder-klair/subwave/issues/2075)) ([1210f4f](https://github.com/perminder-klair/subwave/commit/1210f4f9253f2b4029cb24c9b8d7a782ff75540e))
+* **dash:** show the playing file's format and rate next to the track ([#2010](https://github.com/perminder-klair/subwave/issues/2010)) ([eba648a](https://github.com/perminder-klair/subwave/commit/eba648a8cfc7a57ea07e686b1e0b5c44f4109900))
+* expose current track lyrics to players ([#1316](https://github.com/perminder-klair/subwave/issues/1316)) ([c4ef3d7](https://github.com/perminder-klair/subwave/commit/c4ef3d75ab53ff7a8e897abdb8fb4274161c1bd1))
+* **jingles:** opt-in station IDs over song openings ([#2009](https://github.com/perminder-klair/subwave/issues/2009)) ([7f4b96e](https://github.com/perminder-klair/subwave/commit/7f4b96e853eb287860d0934e3f22ed63cc57f3fb))
+* **library:** the whole run log on the Library page, and a file per run ([#2063](https://github.com/perminder-klair/subwave/issues/2063)) ([ae0eb06](https://github.com/perminder-klair/subwave/commit/ae0eb06c35b5c8693ba72d4907f945f6ade38fa3))
+* **lyrics:** LRCLIB fallback, and synced lyrics in the Classic and Drift skins ([#2074](https://github.com/perminder-klair/subwave/issues/2074)) ([a433b1f](https://github.com/perminder-klair/subwave/commit/a433b1f74f4c8d4ec271c58e82f9af2052ef1428))
+* **lyrics:** lyrics on by default, and look tracks up on LRCLIB when queued ([#2082](https://github.com/perminder-klair/subwave/issues/2082)) ([b1e6181](https://github.com/perminder-klair/subwave/commit/b1e61819ac93fa578f8b4353a0118293cc53079c))
+
+
+### Bug Fixes
+
+* **dj:** drop hourly tone that asks for the dark ([#2056](https://github.com/perminder-klair/subwave/issues/2056)) ([0cabbad](https://github.com/perminder-klair/subwave/commit/0cabbadf2939750048ba7a2d9597c5ac629a34b8))
+* **liquidsoap:** compensate liq_cue_in's codec-frame landing at the stem-blend clip → Y seam ([#2078](https://github.com/perminder-klair/subwave/issues/2078)) ([09692ec](https://github.com/perminder-klair/subwave/commit/09692ecef96f15e69565210ead15da95c7f76b4a))
+* **liquidsoap:** start an early MP3 Y sooner at the stem-blend clip → Y seam ([#2077](https://github.com/perminder-klair/subwave/issues/2077)) ([#2086](https://github.com/perminder-klair/subwave/issues/2086)) ([f5a055b](https://github.com/perminder-klair/subwave/commit/f5a055b1170bb0d945a4c9095eed9898aa244f7d))
+* **lyrics:** give lyrics the phone screen on the Classic skin ([#2085](https://github.com/perminder-klair/subwave/issues/2085)) ([d640883](https://github.com/perminder-klair/subwave/commit/d6408836384826ce4b3b23c53ce625dec866a565))
+* **web:** fit the appearance modal to the mobile viewport ([#2084](https://github.com/perminder-klair/subwave/issues/2084)) ([bc219b7](https://github.com/perminder-klair/subwave/commit/bc219b7fe9495e3d65b30dd40157840227c9ffe4))
+
+
+### Documentation
+
+* **news:** lyrics are on by default, and LRCLIB is asked when a song is queued ([#2083](https://github.com/perminder-klair/subwave/issues/2083)) ([9c2b54d](https://github.com/perminder-klair/subwave/commit/9c2b54d0265df1ff760d7a54a62cc9c630cb4378))
+* **news:** sing along with the station, a dispatch on synced lyrics ([#2079](https://github.com/perminder-klair/subwave/issues/2079)) ([37528d6](https://github.com/perminder-klair/subwave/commit/37528d6554a47c758583c169bef012e277bd1d1c))
+
 ## [1.27.0](https://github.com/perminder-klair/subwave/compare/v1.26.0...v1.27.0) (2026-10-22)
 
 
