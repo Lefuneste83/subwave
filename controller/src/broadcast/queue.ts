@@ -55,6 +55,8 @@ import { recordPlaybackFailure } from '../observability/playback-failures.js';
 import { djCallsAllowed, presentListeners } from './listeners.js';
 import { autoVoiceAllowed } from './voice-policy.js';
 import { speakClockAllowed, stationIdDaypartDrifted, stationIdDaypartStamp } from './clock-policy.js';
+import { CLOCK_CHECK_EXEMPT_KINDS, isEnglishSpeech, reconcileClockPhrases, stripClockPhrases } from './clock-phrases.js';
+import { fuzzyAirTime } from '../llm/internal/prompts/scripts.js';
 import {
   currentTalkAir,
   suppressScheduledSpeechDuringHandoff,
@@ -880,7 +882,9 @@ class Queue {
     const out: string[] = [];
     for (const entry of prior ? session.priorPromptMemory() : session.promptMemory()) {
       if (!VOICE_KINDS.has(entry.kind)) continue;
-      const msg = (entry.message || '').replace(/^["'\s]+/, '').replace(/\s+/g, ' ').trim();
+      // Same reason as the recap (prompt-memory): an opener that names the
+      // time hands the next prompt a stale clock to copy.
+      const msg = stripClockPhrases((entry.message || '').replace(/^["'\s]+/, '').replace(/\s+/g, ' ').trim());
       if (!msg) continue;
       const opener = msg.split(/\s+/).slice(0, 5).join(' ');
       if (seen.has(opener.toLowerCase())) continue;
@@ -2428,6 +2432,30 @@ class Queue {
     return reason ? { reason, onAirId } : null;
   }
 
+  // A generated line may state a time copied from the DJ's earlier speech (M1:
+  // "just after ten" airing at 11:48). Judge every stated clock against the
+  // time it will air, the same live-edge clock the prompts are given: one in
+  // tolerance stays, a wrong one becomes the supplied phrase, and with no clock
+  // allowed the sentence carrying it is dropped. The hourly check IS the
+  // clock and a reminiscence states a past time, so both are exempt
+  // (clock-phrases.CLOCK_CHECK_EXEMPT_KINDS), and so is verbatim operator
+  // text. English only: any other language passes unchanged.
+  clockChecked(text: string, kind: string, persona: Persona | null, { verbatim = false } = {}): string {
+    if (verbatim || !text || CLOCK_CHECK_EXEMPT_KINDS.has(kind)) return text;
+    const speaker = persona ?? settings.getEffectivePersona();
+    if (!isEnglishSpeech(speaker?.language)) return text;
+    const clock = getClockContext(new Date());
+    const supplied = speakClockAllowed() ? fuzzyAirTime(clock) : null;
+    const out = reconcileClockPhrases(text, { airHhmm: clock.hhmm, supplied });
+    for (const c of out.changes) {
+      this.log('dj', c.to
+        ? `${kind}: stated time "${c.from}" corrected to "${c.to}" (airs ${clock.hhmm})`
+        : `${kind}: stated time "${c.from}" removed with its sentence (airs ${clock.hhmm}, no clock may be spoken)`);
+      logEvent('speech.clockCorrected', { kind, from: c.from, to: c.to, offMin: c.offMin, airHhmm: clock.hhmm });
+    }
+    return out.text;
+  }
+
   // Speak something without queueing a track — hourly time checks, weather,
   // station IDs, auto-DJ links. Two Liquidsoap voice channels, picked by kind:
   //   - 'link' → intro.txt → intro_queue → LIGHT duck (talk-over feel: the song
@@ -2439,8 +2467,8 @@ class Queue {
   async announce(
     text,
     kind = 'announcement',
-    { persona = null, meta = {}, pauseTalkEligible = false, sfx: selectedSfx = null, hostSpeech = null }:
-      { persona?: Persona | null; meta?: TurnMeta; pauseTalkEligible?: boolean; sfx?: string | null; hostSpeech?: HostSpeechStamp | null } = {},
+    { persona = null, meta = {}, pauseTalkEligible = false, sfx: selectedSfx = null, hostSpeech = null, verbatim = false }:
+      { persona?: Persona | null; meta?: TurnMeta; pauseTalkEligible?: boolean; sfx?: string | null; hostSpeech?: HostSpeechStamp | null; verbatim?: boolean } = {},
   ): Promise<AnnounceOutcome> {
     // Single-voice paths leak the label too — a styled POST /dj/say came back as
     // "Iris : Bonsoir…" with one persona and one voice (#1707).
@@ -2452,9 +2480,9 @@ class Queue {
     // truth than _speak is what made the fix miss the very path that reported
     // the bug.
     const speaker = persona ?? settings.getEffectivePersona();
-    const safeText = normalizeForDisplay(
+    const safeText = this.clockChecked(normalizeForDisplay(
       speaker?.name ? stripSpeakerLabel(text || '', [speaker.name]) : (text || ''),
-    );
+    ), kind, speaker, { verbatim });
     if (!safeText) return { accepted: false, deferred: false, completed: Promise.resolve(false) };
     if (hostSpeech && !session.isHostSpeechCurrent(hostSpeech)) {
       return { accepted: false, deferred: false, completed: Promise.resolve(false) };
@@ -2660,7 +2688,7 @@ class Queue {
       // Each clip owns its speaker's gain, attribution and live-edge marker.
       // Conversational batching must preserve those before it can air here.
       for (const l of lines) {
-        const text = normalizeForDisplay(stripSpeakerLabel(l.text || '', knownNames));
+        const text = this.clockChecked(normalizeForDisplay(stripSpeakerLabel(l.text || '', knownNames)), kind, l.persona);
         if (!text) continue;
         const wavPath = await this._speak(text, { kind, persona: l.persona });
         rendered.push({ ...l, text, wavPath });
@@ -2730,9 +2758,9 @@ class Queue {
     // guard as announce(): a label the model prefixed would otherwise be read
     // aloud. Same speaker resolution, for the same reason.
     const scheduledSpeaker = persona ?? settings.getEffectivePersona();
-    const safeText = normalizeForDisplay(
+    const safeText = this.clockChecked(normalizeForDisplay(
       scheduledSpeaker?.name ? stripSpeakerLabel(text || '', [scheduledSpeaker.name]) : (text || ''),
-    );
+    ), kind, scheduledSpeaker);
     if (!safeText) return;
     if (hostSpeech && !session.isHostSpeechCurrent(hostSpeech)) return;
     if (suppressScheduledSpeechDuringHandoff(kind, session.handoffInProgress())) {

@@ -17,6 +17,8 @@ import { announceLine, nextAnnounceForm } from '../../../broadcast/announce-line
 import * as library from '../../../music/library.js';
 import { contextSleeveNotesFor, releaseYearMentionEligible, selectSleeveNotes, stationHistoryNoteFor } from './sleeve-notes.js';
 import { stripRecapSpokenTags, stripSpokenTags } from './recent-speech.js';
+import { isEnglishSpeech, reconcileClockPhrases } from '../../../broadcast/clock-phrases.js';
+import { logEvent } from '../../../observability/events.js';
 
 // The feel note appended to a track line (track-feel.ts) is a STEER, not copy.
 // Without this the model reads the label out — "high-energy" spoken flat is
@@ -454,7 +456,7 @@ export async function generateLink(args: any) {
       kind: 'generateAnnounceLinkFallback',
     });
   }
-  return djText({
+  const link = await djText({
     system: djSystem(speaker),
     prompt: linkPrompt({ ...args, persona: speaker }),
     temperature: 0.95,
@@ -463,6 +465,28 @@ export async function generateLink(args: any) {
     seed: randomSeed(),
     kind: 'generateLink',
   });
+  return clockCheckedLink(link, args, speaker);
+}
+
+// A link is written for the moment its track starts, so its stated time is
+// judged against THAT clock (context.clock is the air-time clock when
+// clockIsAirTime), never against now. Without a verified air time no clock may
+// be spoken at all, so any stated time drops its sentence. M1: small models
+// copied "just after ten" from the recap into links airing an hour later.
+function clockCheckedLink(
+  link: string,
+  args: { clockIsAirTime?: boolean; context?: { clock?: { hhmm?: unknown } } | null },
+  speaker: { language?: unknown } | null | undefined,
+): string {
+  if (!link || !isEnglishSpeech(speaker?.language)) return link;
+  const clock = args?.clockIsAirTime ? args.context?.clock : null;
+  const airHhmm = clock && typeof clock.hhmm === 'string' ? clock.hhmm : null;
+  const supplied = airHhmm ? fuzzyAirTime(clock) : null;
+  const out = reconcileClockPhrases(link, { airHhmm, supplied });
+  for (const c of out.changes) {
+    logEvent('speech.clockCorrected', { kind: 'link', from: c.from, to: c.to, offMin: c.offMin, airHhmm });
+  }
+  return out.text;
 }
 
 // The time clause of the hourly check — the one sentence that fixes what the
