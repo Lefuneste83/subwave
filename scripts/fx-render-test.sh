@@ -245,9 +245,9 @@ def t(a, b) =
       # track in the mix however deep the cutoff dives.
       swept = filter.rc(frequency=sweep_cut, mode="low", wetness=1.,
                 filter.rc(frequency=sweep_cut, mode="low", wetness=1., a_src))
-      amplify(sweep_gain, add(normalize=false,
-        [amplify(fun () -> 1.0 - 0.70 * sweep_engage(), a_src),
-         amplify(fun () -> 0.75 * sweep_engage(), swept)]))
+      amplify(override=null, sweep_gain, add(normalize=false,
+        [amplify(override=null, fun () -> 1.0 - 0.70 * sweep_engage(), a_src),
+         amplify(override=null, fun () -> 0.75 * sweep_engage(), swept)]))
     else a_src end
   a_src =
     if blend_on then
@@ -261,7 +261,7 @@ def t(a, b) =
         30.0 * pow(1800.0 / 30.0, sxx)
       end
       blend_low = filter.rc(frequency=blend_hp, mode="low", wetness=1., a_src)
-      add(normalize=false, [a_src, amplify(-1., blend_low)])
+      add(normalize=false, [a_src, amplify(override=null, -1., blend_low)])
     else a_src end
   a_src =
     if washout_on then
@@ -314,7 +314,7 @@ def t(a, b) =
       washed = comb(delay=0.30, feedback=wash_fb, a_src)   # radio.liq's default tap
       washed = filter.rc(frequency=tail_cut, mode="low", wetness=tail_wet,
                  filter.rc(frequency=tail_cut, mode="low", wetness=tail_wet, washed))
-      amplify(wash_gain, washed)
+      amplify(override=null, wash_gain, washed)
     else a_src end
   # DISSOLVE — keep in lockstep with radio.liq's dissolve block: 4 parallel
   # combs at mutually prime delays, shared swell/hold/release feedback, ONE
@@ -373,11 +373,11 @@ def t(a, b) =
          comb(delay=0.113, feedback=diss_fb, a_src),
          comb(delay=0.151, feedback=diss_fb, a_src),
          comb(delay=0.181, feedback=diss_fb, a_src),
-         amplify(-4., a_src)])
-      washed = amplify(0.7, washed)
+         amplify(override=null, -4., a_src)])
+      washed = amplify(override=null, 0.7, washed)
       washed = filter.rc(frequency=diss_cut, mode="low", wetness=diss_wet,
                  filter.rc(frequency=diss_cut, mode="low", wetness=diss_wet, washed))
-      add(normalize=false, [a_src, amplify(diss_gain, washed)])
+      add(normalize=false, [a_src, amplify(override=null, diss_gain, washed)])
     else a_src end
   # CHOP — keep in lockstep with radio.liq's chop block: compressed clock
   # dd=min(d,10) shared with the incoming fade, accelerating gate (beat →
@@ -448,7 +448,7 @@ def t(a, b) =
           end
         g * master
       end
-      amplify(chop_gain, a_src)
+      amplify(override=null, chop_gain, a_src)
     else a_src end
   # LOOP — keep in lockstep with radio.liq's loop block: comb is a one-shot
   # feed-forward echo, so the loop is a cascade of doubling delays (taps at every
@@ -491,14 +491,14 @@ def t(a, b) =
         e = if e < 0. then 0. else e end
         if e >= d then 0.0 else 1.0 - e / d end
       end
-      gated  = amplify(loop_dry, a_src)
+      gated  = amplify(override=null, loop_dry, a_src)
       looped = comb(delay=bar, feedback=0.0, gated)
       looped = comb(delay=2.0 * bar, feedback=0.0, looped)
       looped = if 4.0 * bar < d then comb(delay=4.0 * bar, feedback=0.0, looped) else looped end
       looped = if 8.0 * bar < d then comb(delay=8.0 * bar, feedback=0.0, looped) else looped end
       looped = filter.rc(frequency=loop_cut, mode="low", wetness=loop_wet,
                  filter.rc(frequency=loop_cut, mode="low", wetness=loop_wet, looped))
-      amplify(loop_gain, looped)
+      amplify(override=null, loop_gain, looped)
     else a_src end
   b_fade = if chop_on then chop_dd else d end
   b_src = fade.in(duration=b_fade, b.source)
@@ -554,7 +554,7 @@ def t(a, b) =
       bsf = filter.rc(frequency=surf_cut, mode="low", wetness=surf_wet,
               filter.rc(frequency=surf_cut, mode="low", wetness=surf_wet, in_src))
       bsf_low = filter.rc(frequency=160., mode="low", wetness=1., bsf)
-      add(normalize=false, [bsf, amplify(bass_amt, bsf_low)])
+      add(normalize=false, [bsf, amplify(override=null, bass_amt, bsf_low)])
     else b_src end
   add(normalize=false, [a_src, b_src])
 end
