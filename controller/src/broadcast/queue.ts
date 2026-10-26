@@ -1516,16 +1516,15 @@ class Queue {
         // decay into silence reads as a fade), so an untrimmed durSec counts
         // the silence we are about to cut as part of the ramp and sizes the
         // exit canvas longer than the track has left.
+        // A fade cut at its AUDIBLE end (transitions.fadeAudibleEnd) arrives
+        // here as that cueOutSec, so the wind-down already ends at the cut;
+        // resolveAudibleEnd (decided once, in silence-trim) only tells
+        // endingCrossSecondsFor to size it by its own rule.
         const trimEndSec = silenceTrim.resolveSilenceTrim(item.track).cueOutSec;
-        // A fade cut at its AUDIBLE end (transitions.fadeAudibleEnd): the
-        // canvas spans the wind-down up to that cut, sized by its own rule in
-        // endingCrossSecondsFor. Decided once, in silence-trim.
         const audibleEnd = silenceTrim.resolveAudibleEnd(item.track);
-        const endSec = audibleEnd != null
-          ? audibleEnd.endSec
-          : trimEndSec != null && durSec > 0
-            ? Math.min(durSec, trimEndSec)
-            : (trimEndSec ?? durSec);
+        const endSec = trimEndSec != null && durSec > 0
+          ? Math.min(durSec, trimEndSec)
+          : (trimEndSec ?? durSec);
         const windDownSec = endSec > 0 && Number.isFinite(outro.startMs)
           ? Math.max(0, endSec - outro.startMs / 1000)
           : null;

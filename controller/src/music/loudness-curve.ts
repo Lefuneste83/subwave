@@ -50,8 +50,13 @@ export function parseLoudnessCurve(v: unknown): LoudnessCurve | null {
 // `bodyLufs - dropDb`, or null when none qualifies or the body loudness is
 // unknown. The last such point, not the first under: a fade that dips and
 // swells is still audible at the later point.
-export function audibleEndSec(curve: LoudnessCurve, bodyLufs: number, dropDb: number): number | null {
-  if (!Number.isFinite(bodyLufs) || !Number.isFinite(dropDb)) return null;
+export function audibleEndSec(
+  curve: LoudnessCurve,
+  bodyLufs: number | null | undefined,
+  dropDb: number,
+): number | null {
+  if (typeof bodyLufs !== 'number' || !Number.isFinite(bodyLufs)) return null;
+  // An unreadable dial (NaN) makes the threshold NaN, which no point reaches.
   const threshold = bodyLufs - dropDb;
   for (let i = curve.lufs.length - 1; i >= 0; i--) {
     if (curve.lufs[i] / 10 >= threshold) return (curve.startMs + i * curve.stepMs) / 1000;

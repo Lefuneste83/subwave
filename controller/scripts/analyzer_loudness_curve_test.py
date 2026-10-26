@@ -161,6 +161,11 @@ def case_silence_floor():
     y = np.zeros((2, SR * 5), dtype=np.float32)
     curve = aw.loudness_curve(y, SR, 0.0)
     assert curve["lufs"] and all(v == aw.LOUDNESS_CURVE_FLOOR_TENTHS for v in curve["lufs"]), curve["lufs"]
+    # A finite level far under it (dither-quiet, about -160 LUFS) is held at
+    # the floor too: one stored meaning for "nothing audible".
+    faint = fading_stereo(sec=5.0, hold=4.9) * 1e-8
+    curve = aw.loudness_curve(faint, SR, 0.0)
+    assert all(v == aw.LOUDNESS_CURVE_FLOOR_TENTHS for v in curve["lufs"]), curve["lufs"]
 
 
 def case_without_pyloudnorm():

@@ -172,7 +172,6 @@ function audibleEndFor(track: SilenceTrimTrack, m: Measured, cut: SilenceTrimRes
   const curve = parseLoudnessCurve(outro.loudnessCurve);
   if (!curve) return null;
   const body = track.loudnessLufs ?? rec?.loudnessLufs ?? null;
-  if (typeof body !== 'number' || !Number.isFinite(body)) return null;
   // The dial is bounded by load() (repair) and update() (refusal); an
   // unreadable one reads as no audible end, never as some other depth.
   const e = audibleEndSec(curve, body, Number(tr.fadeAudibleEndDb));

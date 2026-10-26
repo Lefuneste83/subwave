@@ -89,6 +89,9 @@ test('no qualifying point → null', () => {
   assert.equal(audibleEndSec(c, -10, 20), null);
   assert.equal(audibleEndSec(parseLoudnessCurve(curveOf([]))!, -10, 20), null, 'empty curve');
   assert.equal(audibleEndSec(c, Number.NaN, 20), null, 'unknown body loudness');
+  assert.equal(audibleEndSec(c, null, 20), null, 'no body loudness at all');
+  assert.equal(audibleEndSec(c, Number.NEGATIVE_INFINITY, 20), null, 'a broken body loudness');
+  assert.equal(audibleEndSec(c, -10, Number.NaN), null, 'an unreadable dial');
 });
 
 test('a malformed curve is dropped whole, never repaired', () => {
@@ -128,7 +131,7 @@ test('absent/malformed settings coerce to off and 20 dB', async () => {
   await coldLoad({ transitions: { fadeAudibleEnd: 'yes', fadeAudibleEndDb: 'loud' } });
   assert.equal(settings.get().transitions.fadeAudibleEnd, false);
   assert.equal(settings.get().transitions.fadeAudibleEndDb, 20);
-  for (const db of [14.9, 35.1, -20, Number.NaN, null]) {
+  for (const db of [14.9, 35.1, -20, Number.NaN, null, '25']) {
     await coldLoad({ transitions: { fadeAudibleEndDb: db } });
     assert.equal(settings.get().transitions.fadeAudibleEndDb, 20, String(db));
   }
@@ -279,4 +282,42 @@ test('exit canvas on the audible-end path: clamp 6..12, no floor, no shaping, no
   assert.equal(endingCrossSecondsFor(fade, 10, { audibleEnd: ae(9.5, null) }), 8.5);
   // A cold ending ignores it: the old 4 s, bar-snapped.
   assert.equal(endingCrossSecondsFor({ ...fade, ending: 'cold' }, 6, { audibleEnd: ae(212) }), 4);
+});
+
+// ── the queue's exit stamp ───────────────────────────────────────────────────
+
+test('the drain stamps the audible-end canvas only when the cut applied', async () => {
+  const { queue } = await import('../src/broadcast/queue.js');
+  const q = queue as unknown as {
+    current: unknown; upcoming: unknown[]; djLog: Array<{ kind: string; message: string }>;
+    applyMixTransition(item: unknown): void;
+  };
+  const djMode = async (transitions: Record<string, unknown>) => {
+    await coldLoad({ transitions });
+    const personas = settings.get().personas.map((p, i) => (i === 0 ? { ...p, djMode: true } : p));
+    await settings.update({ personas } as never);
+  };
+  // Outro tempo 120 BPM (2 s bars): the old path snaps, the audible one does not.
+  const track = () => ({ ...FADE, id: undefined, title: 'Fade', artist: 'A', bpm: 120,
+    outro: { ...FADE.outro, bpm: 120, lufs: -20, beats: null, bars: null } });
+  q.current = { track: { title: 'On air', artist: 'B', duration: 300 } };
+
+  await djMode({ fadeAudibleEnd: true });
+  const cut = { track: track() } as { track: Record<string, unknown> };
+  q.upcoming = [cut];
+  q.applyMixTransition(cut);
+  // E = 212 s, wind-down from 205.3 s: 6.7 s, under the 10 s ceiling.
+  assert.equal(cut.track.crossSec, 6.7);
+  assert.ok(q.djLog.some(e => e.kind === 'mix' && e.message.includes('cut at audible end 212s')));
+
+  await djMode({ fadeAudibleEnd: false });
+  const plain = { track: track() } as { track: Record<string, unknown> };
+  q.upcoming = [plain];
+  q.applyMixTransition(plain);
+  // Off: today's canvas — the wind-down to 220 s (14.7 s) clamps to 12, then
+  // the operator's 10 s ceiling.
+  assert.equal(plain.track.crossSec, 10);
+  const qq = queue as unknown as { _persistTimer?: NodeJS.Timeout; _recentPlaysTimer?: NodeJS.Timeout };
+  if (qq._persistTimer) clearTimeout(qq._persistTimer);
+  if (qq._recentPlaysTimer) clearTimeout(qq._recentPlaysTimer);
 });
