@@ -111,7 +111,7 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
         a.analysisFailed ? `${plural(a.analysisFailed, 'analysis failure')}` : null,
       ].filter(Boolean).join(' · ') || 'all clear'
     : '…';
-  const gap = o && serverTotal != null ? serverTotal - o.canAir : null;
+  const gap = o && serverTotal != null ? serverTotal - o.library : null;
 
   return (
     <TooltipProvider delayDuration={250}>
@@ -202,12 +202,12 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
           label="Music server"
           value={serverTotal != null ? num(serverTotal) : scanning ? 'counting…' : '—'}
           sub={countedAt
-            ? <>counted {relTime(countedAt)} ago · blocked excluded</>
+            ? <>counted {relTime(countedAt)} ago</>
             : scanning ? 'counting…' : 'not counted yet'}
           tip={<>
             Your music server&apos;s own track count, from the last full count (one request per album,
-            so it is not live). It leaves out blocked tracks and the station archive, so it should
-            match Can air.
+            so it is not live). Never-play tracks are on the server too, so they are counted; only
+            the station archive is left out. It should match Library.
             <br />The Recount button next to &ldquo;Your library&rdquo; refreshes it.
           </>}
         />
@@ -234,7 +234,7 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
               ? 'The music server agrees.'
               : gap > 0
                 ? <>The music server has <b className="mono-num">{num(gap)}</b> more: new tracks not in the library yet; the next tagging run walks them in.</>
-                : <>The music server has <b className="mono-num">{num(-gap)}</b> fewer: a change on the server or in the never-play list since its last count{countedAt ? ` (${relTime(countedAt)} ago)` : ''}, or tracks gone from it that Reconcile removes.</>}
+                : <>The music server has <b className="mono-num">{num(-gap)}</b> fewer: tracks gone from it since they were mirrored, which Reconcile removes{countedAt ? `, or tracks mirrored after its last count (${relTime(countedAt)} ago)` : ''}.</>}
         </div>
       )}
     </TooltipProvider>
