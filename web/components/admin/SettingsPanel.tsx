@@ -49,6 +49,7 @@ import { BrainSection } from './settings/BrainSection';
 import { SearchSection } from './settings/SearchSection';
 import { LibrarySection } from './settings/LibrarySection';
 import { StationSection } from './settings/StationSection';
+import { StationLogoCard } from './settings/StationLogoCard';
 import { ThemeSection } from './settings/ThemeSection';
 import { ListenersSection } from './settings/ListenersSection';
 import { NavidromeSection } from './settings/NavidromeSection';
@@ -597,10 +598,13 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
               />
             )}
             {activeSection === 'station' && (
-              <StationSection
-                data={data} form={form} setForm={updateForm} busy={busy}
-                saveSettings={saveSettings} fieldErrors={fieldErrors}
-              />
+              <>
+                <StationSection
+                  data={data} form={form} setForm={updateForm} busy={busy}
+                  saveSettings={saveSettings} fieldErrors={fieldErrors}
+                />
+                <StationLogoCard adminFetch={adminFetch} />
+              </>
             )}
             {activeSection === 'music' && (
               <NavidromeSection data={data} adminFetch={adminFetch} refresh={refresh} />

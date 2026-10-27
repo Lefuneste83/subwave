@@ -35,6 +35,8 @@ export const INCLUDE_DIRS = [
   'voices',
   'themes',
   'skills',
+  // The station logo (branding/station-logo.ts).
+  'branding',
 ] as const;
 
 export const appVersion = (() => {

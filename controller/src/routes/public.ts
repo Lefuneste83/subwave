@@ -29,6 +29,8 @@ import { resolveSilenceTrim } from '../music/silence-trim.js';
 import { playableDurationSec } from '../broadcast/drain-policy.js';
 import { lifetimeTokenCount } from '../llm/log.js';
 import { fetchWithTimeout } from '../util/fetch-timeout.js';
+import * as stationLogo from '../branding/station-logo.js';
+import { isErrorDocument, isPlaceholder } from '../branding/cover-fallback.js';
 import { requireAdminUi } from '../middleware/auth.js';
 import { forwardedByProxy, listenerAuthDecision, stationAuthDecision } from '../util/listener-auth.js';
 import { publicGuestIds, publicPersonaShape, soulsArePublic } from '../util/public-persona.js';
@@ -102,8 +104,16 @@ export function publicOrigin(req: express.Request): string {
 
 // Proxy Subsonic cover art so browsers get MediaSession artwork without the
 // Subsonic credentials. Cached at the edge and in a small in-process LRU.
+// With a station logo set (branding/station-logo.ts), a track with no artwork
+// (the server's placeholder, or an error document for an id it does not know;
+// branding/cover-fallback.ts) gets the logo instead. Without one, nothing here
+// differs from before, not even a request. The LRU remembers only that the art
+// was missing, never the logo bytes, so a new logo shows at once; those
+// answers are cached for an hour, not a day, for the same reason.
 const COVER_CACHE_MAX = 20;
-const coverCache = new Map<string, { buf: Buffer; contentType: string }>();
+const COVER_SIZE = 512;
+type CoverEntry = { buf: Buffer; contentType: string; missing: boolean | null };
+const coverCache = new Map<string, CoverEntry>();
 
 router.get('/cover/:id', async (req, res) => {
   const { id } = req.params;
@@ -111,7 +121,18 @@ router.get('/cover/:id', async (req, res) => {
   // surface.
   if (!/^[\w-]{1,64}$/.test(id)) return res.status(400).end();
 
-  const sendCover = (entry: { buf: Buffer; contentType: string }) => {
+  const sendCover = async (entry: CoverEntry) => {
+    const logo = await stationLogo.read();
+    if (logo) {
+      if (entry.missing == null) {
+        entry.missing = isErrorDocument(entry.contentType) || await isPlaceholder(entry.buf, COVER_SIZE);
+      }
+      if (entry.missing) {
+        res.setHeader('Content-Type', logo.mime);
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+        return res.send(logo.buf);
+      }
+    }
     res.setHeader('Content-Type', entry.contentType);
     res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
     res.send(entry.buf);
@@ -126,22 +147,40 @@ router.get('/cover/:id', async (req, res) => {
   }
 
   try {
-    const url = subsonic.getCoverArtUrl(id, 512);
+    const url = subsonic.getCoverArtUrl(id, COVER_SIZE);
     recordHttpAttempt('getCoverArt', 'cover');
     const r = await fetchWithTimeout(url, { timeoutMs: 5000 });
     if (!r.ok) return res.status(502).end();
-    const entry = {
+    const entry: CoverEntry = {
       buf: Buffer.from(await r.arrayBuffer()),
       contentType: r.headers.get('content-type') || 'image/jpeg',
+      missing: null,
     };
     coverCache.set(id, entry);
     if (coverCache.size > COVER_CACHE_MAX) {
       coverCache.delete(coverCache.keys().next().value!);
     }
-    sendCover(entry);
+    await sendCover(entry);
   } catch {
-    res.status(502).end();
+    if (!res.headersSent) res.status(502).end();
   }
+});
+
+// The station logo, public, for players and directory listings
+// (radio-browser.info's "favicon" field). Without one it redirects to the
+// drawn app icon, so the URL is always a picture.
+router.get('/station-logo', async (req, res) => {
+  const logo = await stationLogo.read();
+  if (!logo) {
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    return res.redirect(302, '/icons/512');
+  }
+  const etag = `"${logo.version}"`;
+  res.setHeader('ETag', etag);
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  if (req.headers['if-none-match'] === etag) return res.status(304).end();
+  res.setHeader('Content-Type', logo.mime);
+  res.send(logo.buf);
 });
 
 // Persona portrait; serves the transparent placeholder when no avatar is set.

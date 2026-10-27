@@ -32,6 +32,7 @@ const DUPLICATE_COPY = new Set([
   'schedule.json', 'jingles.m3u', 'jingles.json', 'beds.json', 'bed.mp3',
   'voices', 'persona-avatars', 'jingles', 'beds', 'skills', 'sfx',
   'icecast_listener_auth.txt', 'themes', 'sfx.json',
+  'branding', // the station logo: identity, like the avatars and themes
 ]);
 
 export function duplicateAction(entry: string): 'copy' | 'skip' {

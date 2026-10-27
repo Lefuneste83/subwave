@@ -52,6 +52,7 @@ import { router as scrobbleRoutes } from './routes/scrobble.js';
 import { router as likesRoutes } from './routes/likes.js';
 import { router as lyricsRoutes } from './routes/lyrics.js';
 import { router as personasRoutes } from './routes/personas.js';
+import { router as stationLogoRoutes } from './routes/station-logo.js';
 import { router as showsRoutes } from './routes/shows.js';
 import { router as communityRoutes } from './routes/community.js';
 import { router as backupRoutes } from './routes/backup.js';
@@ -118,6 +119,7 @@ app.use(startup.middleware);
 
 // Routes. `requireAdmin` is applied per-route inside the admin modules.
 app.use(publicRoutes);
+app.use(stationLogoRoutes);
 app.use(authRoutes);
 app.use(requestRoutes);
 app.use(settingsRoutes);

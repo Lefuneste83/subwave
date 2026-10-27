@@ -78,6 +78,10 @@ export function useMediaSession({
       : null;
     const appIcon: MediaImage = { src: '/icons/192', sizes: '192x192', type: 'image/png' };
     const appIconLg: MediaImage = { src: '/icons/512', sizes: '512x512', type: 'image/png' };
+    // The operator's station logo; the controller redirects to the app icon
+    // when none is set, so it is always a picture. No `type`: it may be a
+    // PNG, JPEG or WebP.
+    const stationLogo: MediaImage = { src: client.resolve('/station-logo'), sizes: '512x512' };
 
     // Lock screen / CarPlay picks the first usable artwork entry, so leading
     // with the persona wins while the DJ talks. The cover stays in the chain so
@@ -93,11 +97,12 @@ export function useMediaSession({
 
     let artwork: MediaImage[];
     if (useAvatar && personaArt) {
-      artwork = [personaArt, ...(coverArt ? [coverArt] : []), appIcon];
+      artwork = [personaArt, ...(coverArt ? [coverArt] : []), stationLogo, appIcon];
     } else if (coverArt) {
       artwork = [coverArt, appIcon];
     } else {
-      artwork = [appIcon, appIconLg];
+      // Jingles, idents, nothing on air: the station's own picture.
+      artwork = [stationLogo, appIconLg, appIcon];
     }
 
     navigator.mediaSession.metadata = new window.MediaMetadata({
