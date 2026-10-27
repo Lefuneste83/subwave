@@ -432,6 +432,7 @@ function realPathView(st: RealPathStatus) {
   return {
     state: st.state,
     reason: st.reason ?? null,
+    server: st.server ?? null,
     switched: st.switched.length,
     autoEnable: settings.get().musicSource?.reportRealPath === true,
     players: st.players.map(p => ({

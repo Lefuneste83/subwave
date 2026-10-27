@@ -9,13 +9,15 @@ import { Btn, Card, Pill, Seg } from '../ui';
 // Navidrome sends a `path` built from the tags rather than the file on disk.
 // The controller reads and switches the rows (routes/settings/core.ts,
 // music/navidrome-players.ts); this card shows them, offers a one-off switch
-// and the opt-in that keeps them on.
+// and the opt-in that keeps them on. The setting is Navidrome's own, so on any
+// other Subsonic server the card shrinks to one line and offers nothing.
 
-type RealPathState = 'on' | 'off' | 'no-players' | 'refused' | 'unavailable';
+type RealPathState = 'on' | 'off' | 'no-players' | 'refused' | 'not-navidrome' | 'unavailable';
 
 interface RealPathView {
   state: RealPathState;
   reason: string | null;
+  server: { type: string; version: string | null } | null;
   switched: number;
   autoEnable: boolean;
   players: { client: string; userAgent: string; reportRealPath: boolean; lastSeen: string | null }[];
@@ -28,6 +30,7 @@ const STATE_TEXT: Record<RealPathState, string> = {
   off: 'Some SUB/WAVE players still send tag-built paths.',
   'no-players': 'Navidrome has no SUB/WAVE player yet — it appears after the first request.',
   refused: 'Navidrome refused the change for this account. Tick it by hand in Navidrome → Settings → Players.',
+  'not-navidrome': 'Report Real Path is a Navidrome setting; there is nothing to switch on this music server.',
   unavailable: "Navidrome's player list can't be read",
 };
 
@@ -76,6 +79,19 @@ export function NavidromeRealPathCard({ adminFetch }: { adminFetch: AdminFetch }
   const view = query.data;
   const busy = switchNow.isPending || setAuto.isPending;
   const canSwitch = view?.state === 'off' || view?.state === 'refused';
+
+  if (view?.state === 'not-navidrome') {
+    const name = view.server?.type
+      ? [view.server.type, view.server.version].filter(Boolean).join(' ')
+      : 'this server';
+    return (
+      <Card title="Real file paths" sub="navidrome only">
+        <div className="text-[12px] leading-[1.5]">
+          {STATE_TEXT['not-navidrome']} Your music server is <b>{name}</b>.
+        </div>
+      </Card>
+    );
+  }
 
   return (
     <Card title="Real file paths" sub="navidrome · report real path">

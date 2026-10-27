@@ -76,7 +76,9 @@ export type RealPathState =
   | 'no-players'
   /** Navidrome refused the write (a 401/403: the account may not edit players). */
   | 'refused'
-  /** No native API to ask: not Navidrome, an old Navidrome, or unreachable. */
+  /** The music server says it is not Navidrome: the flag does not exist there. */
+  | 'not-navidrome'
+  /** No native API to ask: an old Navidrome, a server that does not say what it is, or unreachable. */
   | 'unavailable';
 
 export interface RealPathStatus {
@@ -86,6 +88,34 @@ export interface RealPathStatus {
   switched: string[];
   /** Why the state is `refused` / `unavailable`. */
   reason?: string;
+  /** What the Subsonic ping said the server is, when it answered. */
+  server?: ServerIdentity;
+}
+
+export interface ServerIdentity {
+  /** The ping's `type` (`navidrome`, `gonic`, …); empty when the server does not say. */
+  type: string;
+  version: string | null;
+}
+
+// SUB/WAVE talks to any Subsonic-compatible server; "Report Real Path" and the
+// player rows behind it are Navidrome's own. The Subsonic ping's `type` says
+// which server answered (OpenSubsonic servers fill it; older ones leave it
+// out). A named server that is not Navidrome is never sent Navidrome's native
+// API; a server that does not name itself is tried as before, and its failure
+// reads as `unavailable`.
+export type ServerKind = 'navidrome' | 'other' | 'unknown';
+
+export function serverKind(type: string | null | undefined): ServerKind {
+  const t = String(type ?? '').trim().toLowerCase();
+  if (!t || t === 'unknown') return 'unknown';
+  return t === 'navidrome' ? 'navidrome' : 'other';
+}
+
+/** `gonic 0.16.4`, the way the server named itself. */
+export function serverLabel(s: ServerIdentity | undefined): string {
+  if (!s?.type) return 'this server';
+  return s.version ? `${s.type} ${s.version}` : s.type;
 }
 
 export function stateOf(players: readonly NavidromePlayerRow[]): RealPathState {
@@ -116,6 +146,8 @@ export function realPathFinding(
       return { status: 'ok', detail: `on for all ${st.players.length} SUB/WAVE player(s)` };
     case 'no-players':
       return { status: 'skip', detail: 'no SUB/WAVE player registered in Navidrome yet' };
+    case 'not-navidrome':
+      return { status: 'skip', detail: `a Navidrome setting; the music server is ${serverLabel(st.server)}` };
     case 'unavailable':
       return { status: 'skip', detail: `cannot read Navidrome's players (${st.reason || 'no native API'})` };
     case 'refused':

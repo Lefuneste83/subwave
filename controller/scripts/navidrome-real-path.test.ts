@@ -15,6 +15,7 @@ import {
   normalizePlayerRow,
   ownPlayers,
   realPathFinding,
+  serverKind,
   stateOf,
   type NavidromePlayerRow,
   type RealPathStatus,
@@ -26,6 +27,8 @@ type Row = Record<string, unknown> & { id: string; reportRealPath: boolean };
 
 const fake = {
   mode: 'navidrome' as 'navidrome' | 'not-navidrome' | 'refuse-put',
+  // What the Subsonic ping names the server: '' leaves `type` out (a server that does not say).
+  serverType: 'navidrome',
   rows: [] as Row[],
   puts: [] as { id: string; body: Record<string, unknown> }[],
   requests: 0,
@@ -62,6 +65,9 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
   };
   const url = new URL(req.url || '/', 'http://x');
   if (fake.mode === 'not-navidrome') return send(404, { error: 'not found' });
+  if (url.pathname === '/rest/ping') {
+    return send(200, { 'subsonic-response': { status: 'ok', version: '1.16.1', ...(fake.serverType ? { type: fake.serverType, serverVersion: '0.16.4' } : {}) } });
+  }
   if (req.method === 'POST' && url.pathname === '/auth/login') {
     const b = JSON.parse(await readBody(req));
     if (b.username !== 'radio' || b.password !== 'secret') return send(401, { error: 'bad creds' });
@@ -88,6 +94,7 @@ after(() => new Promise<void>(resolve => server.close(() => resolve())));
 
 beforeEach(() => {
   fake.mode = 'navidrome';
+  fake.serverType = 'navidrome';
   fake.puts = [];
   fake.requests = 0;
   seed();
@@ -172,6 +179,38 @@ test('a server without Navidrome\'s native API, or no connection, reads as unava
   const none = await realPathStatus();
   assert.equal(none.state, 'unavailable');
   assert.equal(fake.requests, 0, 'an unconfigured station asks nothing');
+});
+
+test('the server kind comes from the Subsonic ping type; an unnamed server is unknown', () => {
+  assert.equal(serverKind('navidrome'), 'navidrome');
+  assert.equal(serverKind('Navidrome'), 'navidrome');
+  assert.equal(serverKind('gonic'), 'other');
+  assert.equal(serverKind(''), 'unknown');
+  assert.equal(serverKind('unknown'), 'unknown');
+  assert.equal(serverKind(undefined), 'unknown');
+});
+
+test('a music server that names itself as not Navidrome is never sent Navidrome\'s API, and nothing is logged', async () => {
+  fake.serverType = 'gonic';
+  const st = await realPathStatus({ enable: true });
+  assert.equal(st.state, 'not-navidrome');
+  assert.deepEqual(st.server, { type: 'gonic', version: '0.16.4' });
+  assert.equal(fake.requests, 1, 'only the Subsonic ping');
+  assert.deepEqual(fake.puts, []);
+  const lines: string[] = [];
+  await autoEnableRealPath(l => lines.push(l));
+  await autoEnableRealPath(l => lines.push(l));
+  assert.deepEqual(lines, [], 'the hourly pass stays quiet on a server without the setting');
+  const f = realPathFinding(st, { localMount: true });
+  assert.equal(f.status, 'skip');
+  assert.match(f.detail, /Navidrome setting.*gonic 0\.16\.4/);
+});
+
+test('a server that does not name itself is tried through the native API, as before', async () => {
+  fake.serverType = '';
+  const st = await realPathStatus();
+  assert.equal(st.state, 'off');
+  assert.equal(st.server?.type, '');
 });
 
 test('the automatic pass logs what it switched, and a repeated refusal only once', async () => {

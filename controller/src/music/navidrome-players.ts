@@ -12,10 +12,13 @@ import { config } from '../config.js';
 import {
   normalizePlayerRow,
   ownPlayers,
+  serverKind,
   stateOf,
   type NavidromePlayerRow,
   type RealPathStatus,
+  type ServerIdentity,
 } from './navidrome-players-policy.js';
+import { pingWith } from './subsonic.js';
 
 const TIMEOUT_MS = 5_000;
 // Navidrome's list endpoint pages; this covers every realistic player table.
@@ -98,7 +101,16 @@ function ownership() {
  */
 export async function realPathStatus({ enable = false }: { enable?: boolean } = {}): Promise<RealPathStatus> {
   if (!config.navidrome.url || !config.navidrome.user || !config.navidrome.password) {
-    return { state: 'unavailable', players: [], switched: [], reason: 'Navidrome is not configured' };
+    return { state: 'unavailable', players: [], switched: [], reason: 'the music server is not configured' };
+  }
+  // Ask the Subsonic API which server this is before touching Navidrome's own.
+  // A failed ping is not a verdict: the native login below reports the outage.
+  const ping = await pingWith({ url: config.navidrome.url, user: config.navidrome.user, pass: config.navidrome.password });
+  const server: ServerIdentity | undefined = ping.ok
+    ? { type: ping.serverType && ping.serverType !== 'unknown' ? ping.serverType : '', version: ping.serverSoftwareVersion ?? null }
+    : undefined;
+  if (serverKind(server?.type) === 'other') {
+    return { state: 'not-navidrome', players: [], switched: [], server };
   }
   let token: string;
   let players: NavidromePlayerRow[];
@@ -106,7 +118,7 @@ export async function realPathStatus({ enable = false }: { enable?: boolean } = 
     token = await login();
     players = ownPlayers(await listPlayers(token), ownership());
   } catch (err) {
-    return { state: 'unavailable', players: [], switched: [], reason: errMessage(err, 'unreachable') };
+    return { state: 'unavailable', players: [], switched: [], server, reason: errMessage(err, 'unreachable') };
   }
 
   const switched: string[] = [];
@@ -122,11 +134,11 @@ export async function realPathStatus({ enable = false }: { enable?: boolean } = 
         const reason = status === 401 || status === 403
           ? `HTTP ${status}: this account may not edit its players`
           : errMessage(err, 'write failed');
-        return { state: 'refused', players, switched, reason };
+        return { state: 'refused', players, switched, server, reason };
       }
     }
   }
-  return { state: stateOf(players), players, switched };
+  return { state: stateOf(players), players, switched, server };
 }
 
 // The automatic pass (scheduler + boot) logs a change of outcome, not every
