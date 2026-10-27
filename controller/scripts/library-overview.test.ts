@@ -114,11 +114,12 @@ test('the needs-you sum adds analysis failures, unmeasurable facets (not year) a
   d().exec('DELETE FROM track_facet_status');
   const ins = d().prepare(`INSERT INTO track_facet_status (track_id, facet, status, version, attempts, at) VALUES (?, ?, ?, 1, 1, '2026-10-27')`);
   ins.run('x', 'loudness', 'unmeasurable');
+  ins.run('x', 'tail', 'unmeasurable'); // the same damaged file, a second facet
   ins.run('y', 'year', 'unmeasurable');
   ins.run('x', 'year', 'failed');
   const a = ov.computeOverview(NOW).attention;
   assert.equal(a.analysisFailed, 1);
-  assert.equal(a.unmeasurable, 1, 'year has its own surface, the Era tab');
+  assert.equal(a.unmeasurable, 1, 'one track, however many facets; year has its own surface, the Era tab');
   assert.equal(a.yearFailed, 1);
   assert.equal(a.total, a.eraAlbums + a.unmeasurable + a.yearFailed + a.analysisFailed);
 });
@@ -154,15 +155,23 @@ test('the row pass and the era count read their indexes, never the wide rows (#1
   assert.match(plan(ov.overviewRowsSql()), /COVERING INDEX idx_tracks_overview/, 'still chosen once ANALYZE has run');
 });
 
-test('albums to review match the Era tab: untrusted albums without a decision', () => {
-  track('e1', { era_untrusted: 1, album_artist: 'A', album: 'One' });
-  track('e2', { era_untrusted: 1, album_artist: 'A', album: 'One' });
-  track('e3', { era_untrusted: 1, album_artist: 'B', album: 'Two' });
-  track('e4', { era_untrusted: 0, album_artist: 'C', album: 'Three' });
-  // 'suspect' keeps era_untrusted = 1: decided, so not to review.
-  era.setEraOverride(d(), era.albumEraKey('B', 'Two'), 'suspect');
-  const s = era.countEraSummary(d());
-  const n = ov.computeOverview(NOW).attention.eraAlbums;
-  assert.equal(n, s.albums - s.overridden);
-  assert.equal(n, 1);
+test('albums to review are exactly the Era tab\'s "To review"', () => {
+  // Untrusted, no decision, a track without a year: to review.
+  track('a1', { era_untrusted: 1, album_artist: 'A', album: 'One' });
+  track('a2', { era_untrusted: 1, album_artist: 'A', album: 'One', original_year: 1971 });
+  // Untrusted, no decision, but every track has a year: done, though never decided.
+  track('b1', { era_untrusted: 1, album_artist: 'B', album: 'Two', original_year: 1980 });
+  // Decided per track ('suspect') and one track still without a year: to review.
+  track('c1', { era_untrusted: 1, album_artist: 'C', album: 'Three' });
+  // Trusted: done.
+  track('d1', { era_untrusted: 1, album_artist: 'D', album: 'Four' });
+  // A kind set and nothing else: no decision, so still to review.
+  track('e1', { era_untrusted: 1, album_artist: 'E', album: 'Five' });
+  era.setEraOverride(d(), era.albumEraKey('C', 'Three'), 'suspect');
+  era.setEraOverride(d(), era.albumEraKey('D', 'Four'), 'trusted');
+  era.setEraKind(d(), era.albumEraKey('E', 'Five'), 'live');
+  const listed = era.listEraAlbums(d()).filter(x => !x.done).map(x => x.albumKey).sort();
+  assert.deepEqual(listed, [era.albumEraKey('A', 'One'), era.albumEraKey('C', 'Three'), era.albumEraKey('E', 'Five')].sort());
+  assert.equal(era.countEraToReview(d()), listed.length);
+  assert.equal(ov.computeOverview(NOW).attention.eraAlbums, listed.length);
 });

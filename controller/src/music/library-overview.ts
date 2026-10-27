@@ -13,7 +13,7 @@
 
 import * as db from './library-db.js';
 import * as blocklist from './blocklist.js';
-import { ERA_ALBUM_KEY_SQL } from './era-review.js';
+import { countEraToReview } from './era-review.js';
 import { effectiveMinTrackSec, effectiveTrackLengthLimits, resolveActiveShow } from '../settings.js';
 
 const MIN_RECOUNT_MS = 60_000;
@@ -169,24 +169,21 @@ const safeCount = (f: () => number) => {
 };
 
 /**
- * Era albums nobody has decided yet: albums with a track the walk marked
- * untrusted and no override. The same set as era-review's countEraSummary()
- * `albums - overridden`, read from idx_tracks_era_review instead of the rows.
+ * Era albums still under "To review": era-review's own count, through the
+ * same rule as the Era tab's list (eraAlbumDone), read from indexes.
  */
 function readEraToReview(): number {
-  return safeCount(() => (db.requireDb().prepare(
-    `SELECT COUNT(DISTINCT k) AS n FROM (
-       SELECT ${ERA_ALBUM_KEY_SQL} AS k FROM tracks WHERE era_untrusted = 1
-     ) WHERE k NOT IN (SELECT album_key FROM era_override)`,
-  ).get() as { n: number }).n);
+  return safeCount(() => countEraToReview(db.requireDb()));
 }
 
 function readAttention(eraAlbums: number): LibraryOverview['attention'] {
   const d = db.requireDb();
   // `year` unmeasurable means no source knows the year: the Era tab already
   // carries those albums, so they are not counted twice here.
+  // Tracks, not facet rows: one damaged file is often unmeasurable for
+  // several facets, and the operator acts on files.
   const unmeasurable = safeCount(() => (d.prepare(
-    `SELECT COUNT(*) AS n FROM track_facet_status WHERE status = 'unmeasurable' AND facet <> 'year'`,
+    `SELECT COUNT(DISTINCT track_id) AS n FROM track_facet_status WHERE status = 'unmeasurable' AND facet <> 'year'`,
   ).get() as { n: number }).n);
   const yearFailed = safeCount(() => (d.prepare(
     `SELECT COUNT(*) AS n FROM track_facet_status WHERE status = 'failed' AND facet = 'year'`,
@@ -241,15 +238,13 @@ export function computeOverview(now = Date.now()): LibraryOverview {
 //  - rows (can air, blocked, DJ-ready, length limits): the never-play list's
 //    state, the limits in force, or the library's shape (row count, newest
 //    rowid, and the caller's tagged/analysed counts); else every SLOW_TTL_MS;
-//  - era: the overrides table or the library's shape; else every SLOW_TTL_MS;
-//  - plays and the attention counts (a few ms): any commit, at most once per
-//    MIN_RECOUNT_MS, since every play commits.
+//  - plays and the attention counts, Era albums included (30 ms together):
+//    any commit, at most once per MIN_RECOUNT_MS, since every play commits.
 const SLOW_TTL_MS = 30 * 60_000;
 
 interface Snapshot {
   value: LibraryOverview;
   rows: { key: string; context: string; at: number; summary: RowSummary; limits: Limits };
-  era: { key: string; at: number; albums: number };
   token: string;
   at: number;
 }
@@ -261,15 +256,6 @@ const yieldTurn = () => new Promise<void>(resolve => setImmediate(resolve));
 function shapeKey(hint: string): string {
   const r = db.requireDb().prepare('SELECT COUNT(*) AS n, MAX(rowid) AS m FROM tracks').get() as { n: number; m: number | null };
   return `${r.n}.${r.m ?? 0}.${hint}`;
-}
-
-function eraKey(shape: string): string {
-  let o = 'none';
-  try {
-    const r = db.requireDb().prepare('SELECT COUNT(*) AS n, MAX(set_at) AS t FROM era_override').get() as { n: number; t: string | null };
-    o = `${r.n}.${r.t ?? ''}`;
-  } catch { /* no era table on this schema */ }
-  return `${shape}|${o}`;
 }
 
 async function refresh(hint: string): Promise<void> {
@@ -284,13 +270,7 @@ async function refresh(hint: string): Promise<void> {
     rows = { key: rowsKey, context, at: now, limits, summary: summariseRows(readRows(), r => blocklist.hitOf(r), limits) };
     await yieldTurn();
   }
-  const ek = eraKey(shape);
-  let era = snap?.era;
-  if (!era || era.key !== ek || now - era.at > SLOW_TTL_MS) {
-    era = { key: ek, at: now, albums: readEraToReview() };
-    await yieldTurn();
-  }
-  snap = { value: assemble(rows.summary, rows.limits, era.albums, now), rows, era, token, at: now };
+  snap = { value: assemble(rows.summary, rows.limits, readEraToReview(), now), rows, token, at: now };
 }
 
 /**

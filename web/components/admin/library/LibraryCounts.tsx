@@ -106,9 +106,9 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
   const attentionParts = a
     ? [
         a.eraAlbums ? `${plural(a.eraAlbums, 'album')} to review (Era)` : null,
-        a.unmeasurable ? `${plural(a.unmeasurable, 'unreadable result')}` : null,
-        a.yearFailed ? `${plural(a.yearFailed, 'year lookup')} failed` : null,
-        a.analysisFailed ? `${plural(a.analysisFailed, 'analysis failure')}` : null,
+        a.unmeasurable ? `${plural(a.unmeasurable, 'track')} unreadable` : null,
+        a.yearFailed ? `${plural(a.yearFailed, 'track')}: year lookup failed` : null,
+        a.analysisFailed ? `${plural(a.analysisFailed, 'track')}: analysis gave up` : null,
       ].filter(Boolean).join(' · ') || 'all clear'
     : '…';
   const gap = o && serverTotal != null ? serverTotal - o.library : null;
@@ -188,11 +188,11 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
           onOpen={onOpenTab && a && a.eraAlbums > 0 ? () => onOpenTab('era') : undefined}
           openLabel="Open the Era tab"
           tip={<>
-            What only you can settle:
-            <br />· albums whose year looks wrong, not reviewed yet (Era tab)
-            <br />· analysis results the analyzer could not read (corrupt or unusual files)
-            <br />· original-year lookups that failed
-            <br />· tracks the analysis gave up on
+            What only you can settle, as one sum of albums and tracks:
+            <br />· <b>albums</b> to review in the Era tab (the same count as its &ldquo;To review&rdquo;)
+            <br />· <b>tracks</b> the analyzer could not read for some measure (a corrupt or unusual file), each counted once
+            <br />· <b>tracks</b> whose original-year lookup failed
+            <br />· <b>tracks</b> the analysis gave up on after repeated failures
             <br />All clear at 0.
           </>}
         />
