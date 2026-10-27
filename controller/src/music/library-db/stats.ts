@@ -167,6 +167,12 @@ const STATS_INDEXES: Array<[name: string, sql: string]> = [
   ['idx_tracks_vocal_measured', 'CREATE INDEX IF NOT EXISTS idx_tracks_vocal_measured ON tracks((vocal_ranges_json IS NOT NULL))'],
   ['idx_tracks_fail_count', 'CREATE INDEX IF NOT EXISTS idx_tracks_fail_count ON tracks(analyze_fail_count) WHERE analyze_fail_count IS NOT NULL'],
   ['idx_tracks_stats', 'CREATE INDEX IF NOT EXISTS idx_tracks_stats ON tracks(energy, source, tagged_at, artist, genres, moods) WHERE moods IS NOT NULL'],
+  // The Library counts line (library-overview.ts): every column its one pass
+  // reads, so the pass walks this index and never the wide rows, and the era
+  // albums still to review. Last: they name fork columns, and a failed build
+  // stops the loop.
+  ['idx_tracks_overview', 'CREATE INDEX IF NOT EXISTS idx_tracks_overview ON tracks(id, album_id, artist_id, artist, album, title, genres, moods, audio_moods, lastfm_tags, duration_sec, bpm, musical_key, loudness_lufs, loudness_version)'],
+  ['idx_tracks_era_review', 'CREATE INDEX IF NOT EXISTS idx_tracks_era_review ON tracks(era_untrusted, album_artist, album)'],
 ];
 
 export function ensureStatsIndexes(): void {

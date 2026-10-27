@@ -112,6 +112,7 @@ function LibraryBody() {
         onRescan={tag.rescanTagger}
         onReconcile={tag.reconcile}
         onCountLibrary={tag.countLibrary}
+        onOpenTab={setTab}
         countingLibrary={tag.countingLibrary}
         onReset={tag.resetLibrary}
         audioEnabled={tag.audioEnabled}

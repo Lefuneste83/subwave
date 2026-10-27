@@ -58,7 +58,10 @@ test('step 32 adds era_reason, album_artist and the era_override table on an old
   // A fresh open already ran every step; wind the db back to before 32 by
   // removing exactly what that step owns, then reopen and watch it rebuild.
   assert.equal(d().pragma('user_version', { simple: true }) as number >= 32, true);
+  // idx_tracks_era_review (a count accelerator, rebuilt at every open) names
+  // album_artist, and SQLite refuses to drop an indexed column.
   d().exec(`
+    DROP INDEX IF EXISTS idx_tracks_era_review;
     DROP TABLE era_override;
     ALTER TABLE tracks DROP COLUMN era_reason;
     ALTER TABLE tracks DROP COLUMN album_artist;
