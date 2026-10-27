@@ -3,12 +3,10 @@
 // and what is waiting on the operator. Every figure is a library.db read; the
 // music server's own count stays `coverage.total`, which only refresh() walks.
 //
-// The library figure (`library`) and the server's count differ by design: the
-// server count goes through `subsonic.iterateAllSongs()`, which drops the
-// station archive and every blocked track, while the library mirror keeps
-// blocked rows (they stay visible, badged, in the admin). So the honest
-// comparison is `canAir` against the server count, and `library = canAir +
-// blocked.total` always holds.
+// The library figure (`library`) compares with the server's count: both hold
+// blocked tracks (the mirror keeps their rows, badged in the admin, and the
+// count walks with `includeBlocked`), and both leave the station archive out.
+// `library = canAir + blocked.total` always holds.
 //
 // Cost and caching: see "The cache the page reads" below. The page never
 // waits on a count.

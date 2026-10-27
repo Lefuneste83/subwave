@@ -159,7 +159,10 @@ async function doScan() {
   cache.scanError = null;
   try {
     let count = 0;
-    for await (const _song of subsonic.iterateAllSongs()) count++;
+    // Blocked songs included: this is what the server holds, compared with
+    // the library mirror, which keeps blocked rows. Only the station archive
+    // is left out, as it is never part of the library.
+    for await (const _song of subsonic.iterateAllSongs({ includeBlocked: true })) count++;
     cache.total = count;
     cache.scannedAt = new Date().toISOString();
     persistCount();
