@@ -30,7 +30,8 @@
 import type Database from 'better-sqlite3';
 import { syncTrackFacets } from './library-db/facets.js';
 import { getTrack, setManualOriginalYear } from './library-db/tracks.js';
-import { isAlbumKind, suggestAlbumKind, suggestedDecision, type AlbumKind, type EraDecision } from './album-kind.js';
+import { isAlbumKind, labelOwner, ownerFolderOf, suggestAlbumKind, suggestedDecision, type AlbumKind, type EraDecision, type OwnerContext, type OwnerInput } from './album-kind.js';
+import { artistParticipantKeys } from './recency.js';
 import { fileNameOf, folderOf, groupCopies, mainFolderOf, type CopyInput } from './era-copies.js';
 
 export type EraVerdict = EraDecision;
@@ -108,6 +109,8 @@ export interface EraWalkSong {
   album?: string | null;
   albumEraUntrusted?: boolean | null;
   albumEraReason?: string | null;
+  /** The walk's album-level inputs to album-kind.labelOwner(). */
+  albumOwner?: OwnerInput | null;
 }
 
 export interface EraWalkFields {
@@ -151,6 +154,7 @@ function verdictFor(o: EraOverride | null | undefined, walk: boolean | null): bo
 export function eraWalkFields(
   song: EraWalkSong,
   overrides: ReadonlyMap<string, EraOverride>,
+  ownerCtx?: OwnerContext,
 ): EraWalkFields {
   const albumArtist = song.albumArtist ?? null;
   const o = overrides.get(albumEraKey(albumArtist, song.album));
@@ -159,9 +163,50 @@ export function eraWalkFields(
     eraUntrusted: verdictFor(o, song.albumEraUntrusted ?? null),
     eraReason: reason,
     albumArtist,
-    albumKind: o?.kind ?? (song.albumEraUntrusted ? suggestAlbumKind({ album: song.album, reason }) : null),
+    albumKind: o?.kind ?? (song.albumEraUntrusted
+      ? suggestAlbumKind({ album: song.album, reason, label: song.albumOwner ? labelOwner(song.albumOwner, ownerCtx) : null })
+      : null),
     forcedYear: o?.forcedYear ?? null,
   };
+}
+
+// A folder holding albums by at least this many different album artists is
+// one of the library's own sorting folders, not an owner (album-kind).
+const CONTAINER_FOLDER_OWNERS = 5;
+const OWNER_CONTEXT_TTL_MS = 10 * 60_000;
+let ownerContextMemo: { at: number; d: Database; ctx: OwnerContext } | null = null;
+
+/**
+ * What album-kind.labelOwner() needs to know about the whole library: whether
+ * a name is an artist on any track (every act credited, folded as the artist
+ * guards fold names, recency.artistParticipantKeys, so "Bob Sinclar & DJ
+ * Gregory" is an artist because Bob Sinclar is), and whether a folder sorts
+ * many owners' albums. One pass over the tracks (file_path is a wide-row
+ * read, about a second on 72k tracks): taken once per walk, and memoised for
+ * ten minutes for the Era tab's clicks.
+ */
+export function libraryOwnerContext(d: Database, { fresh = false } = {}): OwnerContext {
+  const now = Date.now();
+  if (!fresh && ownerContextMemo && ownerContextMemo.d === d && now - ownerContextMemo.at < OWNER_CONTEXT_TTL_MS) {
+    return ownerContextMemo.ctx;
+  }
+  const known = new Set<string>();
+  const owners = new Map<string, Set<string>>();
+  for (const r of d.prepare('SELECT artist, album_artist, file_path FROM tracks').iterate() as Iterable<{ artist: string | null; album_artist: string | null; file_path: string | null }>) {
+    if (r.artist) for (const k of artistParticipantKeys(r.artist)) known.add(k);
+    const folder = ownerFolderOf(r.file_path);
+    if (folder && r.album_artist) {
+      const set = owners.get(folder) ?? new Set<string>();
+      if (set.size < CONTAINER_FOLDER_OWNERS) set.add(r.album_artist.trim().toLowerCase());
+      owners.set(folder, set);
+    }
+  }
+  const ctx: OwnerContext = {
+    isArtist: (name: string) => artistParticipantKeys(name).some(k => known.has(k)),
+    isContainerFolder: (name: string) => (owners.get(name)?.size ?? 0) >= CONTAINER_FOLDER_OWNERS,
+  };
+  ownerContextMemo = { at: now, d, ctx };
+  return ctx;
 }
 
 /** A row the walk has judged since step 32: it stored the album artist, or a
@@ -280,12 +325,21 @@ export function setEraKind(d: Database, albumKey: string, kind: AlbumKind | null
       kind,
     });
     const rows = d.prepare(
-      `SELECT id, album, era_reason, album_kind FROM tracks WHERE ${ERA_ALBUM_KEY_SQL} = ?`,
-    ).all(albumKey) as Array<{ id: string; album: string | null; era_reason: string | null; album_kind: string | null }>;
+      `SELECT id, album, era_reason, album_kind, album_artist, artist, file_path FROM tracks WHERE ${ERA_ALBUM_KEY_SQL} = ?`,
+    ).all(albumKey) as Array<{
+      id: string; album: string | null; era_reason: string | null; album_kind: string | null;
+      album_artist: string | null; artist: string | null; file_path: string | null;
+    }>;
     const set = d.prepare(`UPDATE tracks SET album_kind = ? WHERE id = ?`);
+    // The walk's own label signal, read back from the stored rows.
+    const label = labelOwner({
+      albumArtist: rows.find(r => r.album_artist)?.album_artist ?? null,
+      path: rows.find(r => r.file_path)?.file_path ?? null,
+      trackArtists: rows.map(r => r.artist),
+    }, libraryOwnerContext(d));
     let n = 0;
     for (const r of rows) {
-      const want = kind ?? (r.era_reason ? suggestAlbumKind({ album: r.album, reason: r.era_reason }) : null);
+      const want = kind ?? (r.era_reason ? suggestAlbumKind({ album: r.album, reason: r.era_reason, label }) : null);
       if (want === r.album_kind) continue;
       set.run(want, r.id);
       n += 1;

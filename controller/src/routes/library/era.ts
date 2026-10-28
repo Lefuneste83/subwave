@@ -12,6 +12,7 @@ import {
   setEraKind, setEraOverride, type EraVerdict,
 } from '../../music/era-review.js';
 import { ALBUM_KINDS, isAlbumKind, type AlbumKind } from '../../music/album-kind.js';
+import { ORIGINAL_YEAR_MIN } from '../../schemas/library.js';
 
 export const router = express.Router();
 
@@ -70,9 +71,10 @@ router.post('/library/era/override', requireAdmin, (req, res) => {
   if (verdict !== null && verdict !== 'trusted' && verdict !== 'suspect' && verdict !== 'year') {
     return res.status(400).json({ error: "verdict must be 'trusted', 'year', 'suspect' or null" });
   }
-  const maxYear = new Date().getFullYear() + 1;
-  if (verdict === 'year' && !(Number.isInteger(year) && (year as number) >= 1000 && (year as number) <= maxYear)) {
-    return res.status(400).json({ error: `year must be a whole year between 1000 and ${maxYear}` });
+  // The same window as a per-track year (schemas/library.ts originalYearSchema).
+  const maxYear = new Date().getUTCFullYear() + 1;
+  if (verdict === 'year' && !(Number.isInteger(year) && (year as number) >= ORIGINAL_YEAR_MIN && (year as number) <= maxYear)) {
+    return res.status(400).json({ error: `year must be a whole year between ${ORIGINAL_YEAR_MIN} and ${maxYear}` });
   }
   const key = albumKeyOf(res, d, body);
   if (!key) return;

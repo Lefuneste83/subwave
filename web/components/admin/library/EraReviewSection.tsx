@@ -9,9 +9,9 @@
 //     album leaves the list once every track has one (edit them inline).
 // "Decided" keeps every handled album, for undoing. The detector's reason
 // (why the album looked suspect) is a small hint only: several kinds share it.
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import type { QueryClient } from '@tanstack/react-query';
-import { CalendarClock, ChevronDown, ChevronRight, Download } from 'lucide-react';
+import { CalendarClock, ChevronDown, ChevronRight, Download, Search } from 'lucide-react';
 import { adminJson, adminResponse } from '../../../lib/admin-query';
 import { notify } from '../../../lib/notify';
 import { ALBUM_KINDS, ALBUM_KIND_LABELS, type AlbumKind } from '../../../lib/schemas.generated';
@@ -19,6 +19,8 @@ import { Btn, Pill } from '../ui';
 import { Input } from '../../ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../ui/select';
 import { formatTrackLength, shortFolder, yearTargets } from './era-display';
+import { eraYearError, eraYearInputProps, eraYearInvalid, parseEraYear } from './era-year';
+import { SEARCH_ENGINES, buildSearchUrl, isSearchEngine, loadSearchEngine, saveSearchEngine, type SearchEngine } from './era-search';
 import { applyEraYearEvent, libraryKeys } from './queries';
 import { useLibrary } from './LibraryContext';
 import { useAdminMutation, useAdminQuery } from './useAdminQuery';
@@ -120,6 +122,9 @@ export default function EraReviewSection() {
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [yearDraft, setYearDraft] = useState<Record<string, string>>({});
+  // Read after mount: localStorage does not exist on the server render.
+  const [engine, setEngine] = useState<SearchEngine>('google');
+  useEffect(() => { setEngine(loadSearchEngine()); }, []);
 
   const data = useAdminQuery<EraResponse>({ key: libraryKeys.era(), path: '/library/era', toastOnError: true });
 
@@ -168,9 +173,8 @@ export default function EraReviewSection() {
   const postKind = (a: EraAlbum, kind: AlbumKind | null) =>
     run(a, () => setKind.mutate({ album: a.album ?? '', albumArtist: a.albumArtist, kind }, settle));
   const postYear = (a: EraAlbum) => {
-    const raw = (yearDraft[a.albumKey] ?? String(a.forcedYear ?? a.year ?? '')).trim();
-    const y = Number(raw);
-    if (!Number.isInteger(y) || y < 1000) { notify.err('Type a four-digit year first'); return; }
+    const y = parseEraYear(yearDraft[a.albumKey] ?? String(a.forcedYear ?? a.year ?? ''));
+    if (y == null) { notify.err(eraYearError()); return; }
     post(a, 'year', y);
   };
 
@@ -231,7 +235,17 @@ export default function EraReviewSection() {
           title="Albums you decided on, or whose every track has a year: normal entries, kept here so you can undo">
           decided: {counts.decided}
         </Pill>
-        <span className="ml-auto">
+        <span className="ml-auto flex items-center gap-2">
+          <Select value={engine} onValueChange={v => { if (isSearchEngine(v)) { setEngine(v); saveSearchEngine(v); } }}>
+            <SelectTrigger className="h-7 w-[150px] text-xs" title="Where a track's Search button looks (remembered in this browser)">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {(Object.keys(SEARCH_ENGINES) as SearchEngine[]).map(k => (
+                <SelectItem key={k} value={k}>Search: {SEARCH_ENGINES[k].label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <Btn sm onClick={downloadCsv} disabled={downloading} title="Every track on an era-suspect album, as CSV">
             <Download size={13} /> {downloading ? 'Preparing…' : 'Download CSV'}
           </Btn>
@@ -336,14 +350,14 @@ export default function EraReviewSection() {
                               {DECISION_LABEL.trusted}
                             </Btn>
                             <span className="inline-flex items-center gap-1">
-                              <Input type="number" inputMode="numeric" className="h-7 w-[68px] px-1.5 text-xs"
+                              <Input className={`h-7 w-[68px] px-1.5 text-xs${eraYearInvalid(yearDraft[a.albumKey] ?? '') ? ' border-[var(--danger)]' : ''}`}
                                 aria-label={`One year for every track of ${a.album}`}
                                 value={yearDraft[a.albumKey] ?? String(a.forcedYear ?? a.year ?? '')}
-                                onChange={e => {
-                                  // Read now: React clears currentTarget before a functional update runs.
-                                  const v = e.currentTarget.value;
-                                  setYearDraft(d => ({ ...d, [a.albumKey]: v }));
-                                }} />
+                                {...eraYearInputProps(
+                                  yearDraft[a.albumKey] ?? String(a.forcedYear ?? a.year ?? ''),
+                                  a.forcedYear ?? a.year,
+                                  v => setYearDraft(d => ({ ...d, [a.albumKey]: v })),
+                                )} />
                               <Btn sm tone={a.verdict === 'year' ? 'accent' : undefined} disabled={pending}
                                 onClick={() => postYear(a)} title={DECISION_HINT.year}>
                                 {DECISION_LABEL.year}
@@ -368,7 +382,7 @@ export default function EraReviewSection() {
                     {open && !blocked && (
                       <tr className="align-top">
                         <td colSpan={4} className="pb-3 pl-5">
-                          <AlbumTracks album={a} />
+                          <AlbumTracks album={a} engine={engine} />
                         </td>
                       </tr>
                     )}
@@ -389,7 +403,7 @@ const SOURCE_LABEL: Record<string, string> = {
 
 // One album's tracks with their recording years; a missing or wrong one is
 // typed in place (the Library's own hand-set year, POST /library/original-year).
-function AlbumTracks({ album }: { album: EraAlbum }) {
+function AlbumTracks({ album, engine }: { album: EraAlbum; engine: SearchEngine }) {
   const [draft, setDraft] = useState<Record<string, string>>({});
   const q = new URLSearchParams({ album: album.album ?? '', albumArtist: album.albumArtist ?? '' });
   const tracks = useAdminQuery<{ tracks: EraTrack[] }>({
@@ -398,35 +412,61 @@ function AlbumTracks({ album }: { album: EraAlbum }) {
     toastOnError: true,
   });
   // A year goes to the entry and to every copy folded under it, one call each
-  // (the route sets one track), in order so a failure stops the rest.
-  const save = useAdminMutation<{ ok: boolean }, { ids: string[]; originalYear: number | null }>({
+  // (the route sets one track), in order so a failure stops the rest. One Set
+  // saves every line with a year typed in, so several can be filled in first.
+  const save = useAdminMutation<{ ok: boolean }, { groups: Array<{ entryId: string; ids: string[]; originalYear: number | null }> }>({
     request: async (vars, fetcher) => {
-      for (const id of vars.ids) {
-        await adminJson<{ ok: boolean }>(fetcher, '/library/original-year', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id, originalYear: vars.originalYear, applyToAlbum: false }),
-        });
+      for (const g of vars.groups) {
+        for (const id of g.ids) {
+          await adminJson<{ ok: boolean }>(fetcher, '/library/original-year', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, originalYear: g.originalYear, applyToAlbum: false }),
+          });
+        }
       }
       return { ok: true };
     },
     onDone: async (_out, vars, qc) => {
-      const scope = vars.ids.length > 1 ? ` (${vars.ids.length} copies)` : '';
-      notify.ok(vars.originalYear == null ? `Year cleared${scope}` : `Year ${vars.originalYear} saved${scope}`);
-      applyEraYearEvent(qc, { originalYear: vars.originalYear, trackIds: vars.ids });
+      const ids = vars.groups.flatMap(g => g.ids);
+      const lines = vars.groups.length;
+      const cleared = vars.groups.every(g => g.originalYear == null);
+      notify.ok(cleared
+        ? `Year cleared${ids.length > 1 ? ` (${ids.length} copies)` : ''}`
+        : lines > 1
+          ? `${lines} years saved${ids.length > lines ? ` (${ids.length} files with copies)` : ''}`
+          : `Year ${vars.groups[0]?.originalYear} saved${ids.length > 1 ? ` (${ids.length} copies)` : ''}`);
+      for (const g of vars.groups) applyEraYearEvent(qc, { originalYear: g.originalYear, trackIds: g.ids });
+      setDraft(d => {
+        const next = { ...d };
+        for (const g of vars.groups) delete next[g.entryId];
+        return next;
+      });
       await qc.invalidateQueries({ queryKey: libraryKeys.era() });
     },
   });
-  const commit = (t: EraTrack) => {
-    if (save.isPending) return;
-    const raw = (draft[t.id] ?? '').trim();
-    if (raw === '') return;
-    const y = Number(raw);
-    if (!Number.isInteger(y) || y < 1000) { notify.err('Type a four-digit year'); return; }
-    save.mutate({ ids: yearTargets(t), originalYear: y });
+  const rowsNow = tracks.data?.tracks ?? [];
+  // Lines with something typed in: what any Set saves.
+  const pending = rowsNow.filter(t => (draft[t.id] ?? '').trim() !== '');
+  const commitAll = () => {
+    if (save.isPending || pending.length === 0) return;
+    // All or nothing: a typo stops the save, so no line is half committed.
+    const bad = pending.filter(t => parseEraYear(draft[t.id]) == null);
+    if (bad.length) {
+      notify.err(`${eraYearError()}${bad.length > 1 ? ` (${bad.length} lines)` : ''}: ${bad.map(t => t.title ?? '?').slice(0, 3).join(', ')}`);
+      return;
+    }
+    save.mutate({
+      groups: pending.map(t => ({ entryId: t.id, ids: yearTargets(t), originalYear: parseEraYear(draft[t.id]) as number })),
+    });
   };
+  const setLabel = pending.length > 1 ? `Set ${pending.length}` : 'Set';
+  // An empty field's spinner starts from the album's year, else the file's.
+  const yearProps = (t: EraTrack) =>
+    eraYearInputProps(draft[t.id] ?? '', album.year ?? t.year, v => setDraft(d => ({ ...d, [t.id]: v })));
+  const searchUrl = (t: EraTrack) => buildSearchUrl(engine, [t.artist, t.title].filter(Boolean).join(' ') + ' release date');
 
   if (tracks.isPending) return <span className="caption">loading tracks…</span>;
-  const rows = tracks.data?.tracks ?? [];
+  const rows = rowsNow;
   return (
     <table className="w-full border-collapse text-[11px]">
       <tbody>
@@ -451,15 +491,21 @@ function AlbumTracks({ album }: { album: EraAlbum }) {
             </td>
             <td className="py-1">
               <span className="inline-flex items-center gap-1">
-                <Input type="number" inputMode="numeric" className="h-6 w-[64px] px-1.5 text-[11px]"
-                  aria-label={`Recording year of ${t.title}`} placeholder="year"
-                  value={draft[t.id] ?? ''} onChange={e => { const v = e.currentTarget.value; setDraft(d => ({ ...d, [t.id]: v })); }}
-                  onKeyDown={e => { if (e.key === 'Enter') commit(t); }} />
-                <Btn sm disabled={save.isPending || !(draft[t.id] ?? '').trim()} onClick={() => commit(t)}>Set</Btn>
+                <Input className={`h-6 w-[64px] px-1.5 text-[11px]${eraYearInvalid(draft[t.id]) ? ' border-[var(--danger)]' : ''}`}
+                  aria-label={`Recording year of ${t.title}`}
+                  value={draft[t.id] ?? ''}
+                  {...yearProps(t)}
+                  onKeyDown={e => { if (e.key === 'Enter') commitAll(); else yearProps(t).onKeyDown(e); }} />
+                <Btn sm disabled={save.isPending || pending.length === 0} onClick={commitAll}
+                  title={pending.length > 1 ? `Save the ${pending.length} years typed in this album` : 'Save the year typed in'}>{setLabel}</Btn>
                 {t.originalYearSource === 'manual' && (
-                  <Btn sm disabled={save.isPending} onClick={() => save.mutate({ ids: yearTargets(t), originalYear: null })}
-                    title="Clear the hand-set year; the lookups take the track back">Clear</Btn>
+                  <Btn sm disabled={save.isPending} onClick={() => save.mutate({ groups: [{ entryId: t.id, ids: yearTargets(t), originalYear: null }] })}
+                    title="Clear the hand-set year on this line only; the lookups take the track back">Clear</Btn>
                 )}
+                <Btn sm onClick={() => window.open(searchUrl(t), '_blank', 'noopener,noreferrer')}
+                  title={`Search ${SEARCH_ENGINES[engine].label} for “${[t.artist, t.title].filter(Boolean).join(' ')} release date” in a new tab`}>
+                  <Search size={11} aria-hidden /> Search
+                </Btn>
               </span>
             </td>
           </tr>

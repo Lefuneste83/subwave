@@ -46,12 +46,82 @@ export interface KindInput {
   album?: string | null;
   /** era-suspect.ts's marker for this album, when it flagged it. */
   reason?: string | null;
+  /** labelOwner()'s answer for the album: the label it was filed under. */
+  label?: string | null;
 }
 
+// Album-artist and folder names that say "several artists", never who.
+const GENERIC_OWNER = /^(?:various(?: artists)?|va|v\.a\.?|divers|artistes? divers|compilations?|soundtracks?|unknown(?: artist)?|\[?unknown\]?|misc(?:ellaneous)?|\d{4})$/i;
+
+const fold = (s: string) => s.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+export interface OwnerInput {
+  /** The album's album artist (Navidrome's album `artist`). */
+  albumArtist?: string | null;
+  /** The real file path of one of its tracks (Navidrome's `path`, or the
+   *  stored file_path): the folder above the album's folder names who filed it. */
+  path?: string | null;
+  /** Every track's artist credit. */
+  trackArtists: ReadonlyArray<string | null | undefined>;
+}
+
+/** The folder above the album's own folder ("…/All Day I Dream/A Winter Sampler (2019)/01.flac"). */
+export function ownerFolderOf(path: string | null | undefined): string | null {
+  const parts = String(path ?? '').split('/').filter(Boolean);
+  return parts.length >= 3 ? parts[parts.length - 3] : null;
+}
+
+/**
+ * The label a several-artist album is filed under, or null. A library kept as
+ * <owner>/<album>/ files a label's compilations under the label, and tags
+ * them with the label as album artist; an artist's own compilation (a DJ's
+ * selection, a remix collection) is filed under that artist. So the owner is
+ * the folder above the album (with a real path) or the album artist, whichever
+ * is a name, is no "Various Artists", is credited on none of the album's
+ * tracks, and, when the caller can say (`isArtist`, the library's own artist
+ * credits), is no artist anywhere in the library: Andrew Weatherall and Bob
+ * Sinclar have records of their own, Kamai Music and All Day I Dream do not.
+ * A folder that sorts many owners' albums is skipped as a candidate.
+ */
+export interface OwnerContext {
+  /** The library's own artist credits (era-review.libraryOwnerContext). */
+  isArtist?: (name: string) => boolean;
+  /** A folder that holds many owners' albums (the library's own sorting
+   *  folders: "Discothèque", "NEW", "Compilations"), never an owner itself. */
+  isContainerFolder?: (name: string) => boolean;
+}
+
+export function labelOwner(
+  { albumArtist, path, trackArtists }: OwnerInput,
+  ctx: OwnerContext = {},
+): string | null {
+  const credits = trackArtists.map(a => fold(String(a ?? ''))).filter(Boolean);
+  if (new Set(credits).size < 2) return null;
+  const folder = ownerFolderOf(path);
+  const candidates = [folder && !ctx.isContainerFolder?.(folder) ? folder : null, albumArtist];
+  for (const raw of candidates) {
+    const name = String(raw ?? '').trim();
+    if (!name || GENERIC_OWNER.test(name)) continue;
+    const key = fold(name);
+    if (!key || credits.some(c => c.includes(key))) continue;
+    if (ctx.isArtist?.(name)) continue;
+    return name;
+  }
+  return null;
+}
+
+// A title rule this weak gives way to the album being filed under a label:
+// "A Winter Sampler" in an All Day I Dream folder is the label's compilation.
+const YIELDS_TO_LABEL = new Set<AlbumKind>(['sampler']);
+
 /** The kind to pre-fill for a flagged album, or null for "unclassified". */
-export function suggestAlbumKind({ album, reason }: KindInput): AlbumKind | null {
+export function suggestAlbumKind({ album, reason, label }: KindInput): AlbumKind | null {
   const title = String(album ?? '');
-  for (const [kind, re] of RULES) if (re.test(title)) return kind;
+  for (const [kind, re] of RULES) {
+    if (!re.test(title)) continue;
+    return label && YIELDS_TO_LABEL.has(kind) ? 'label' : kind;
+  }
+  if (label) return 'label';
   const multi = reason === 'various-artists' || reason === 'many-artists';
   // A dated various-artists record ("Techno 2019"): one known year by design.
   if (multi && SINGLE_YEAR.test(title) && !YEAR_RANGE.test(title)) return 'chart';

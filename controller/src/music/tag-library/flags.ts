@@ -6,7 +6,7 @@ import * as subsonic from '../subsonic.js';
 import * as db from '../library-db.js';
 import * as embeddings from '../embeddings.js';
 import { adoptAndPrune } from '../id-rotation.js';
-import { applyWalkForcedYear, eraWalkFields, loadEraOverrides, type EraOverride } from '../era-review.js';
+import { applyWalkForcedYear, eraWalkFields, libraryOwnerContext, loadEraOverrides, type EraOverride } from '../era-review.js';
 import { loadSecretsIntoEnv } from '../../setup/secrets.js';
 import { loadNavidromeConfig } from '../../setup/config.js';
 import { reportProgress, reportCatalogueReady } from '../tagger-progress.js';
@@ -132,8 +132,12 @@ export async function walkNavidrome(): Promise<{ walked: number; liveIds: Set<st
   // suggestion, and a one-year decision reaches tracks added since.
   const rawDb = db.getDb();
   const eraOverrides: Map<string, EraOverride> = rawDb ? loadEraOverrides(rawDb) : new Map();
+  // The library as it stood before this walk (its artist credits, its sorting
+  // folders), so a DJ's own compilation is never taken for a label's
+  // (album-kind.labelOwner).
+  const ownerCtx = rawDb ? libraryOwnerContext(rawDb, { fresh: true }) : undefined;
   for await (const song of subsonic.iterateAllSongs({ requireComplete: true })) {
-    const eraFields = eraWalkFields(song, eraOverrides);
+    const eraFields = eraWalkFields(song, eraOverrides, ownerCtx);
     db.upsertTrackMeta(song.id, {
       title: song.title,
       artist: song.artist,

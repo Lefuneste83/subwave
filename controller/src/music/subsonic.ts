@@ -807,6 +807,16 @@ export async function* iterateAllSongs({ requireComplete = false, includeBlocked
           // station-archive entry inflating the album into a false anthology.
           trackArtists: songs.map((s) => s.artist),
         });
+        // What decides whether the album is filed under a label (album-kind
+        // labelOwner, applied by the walk with the library's artist index):
+        // one object, shared by every song of the album.
+        const albumOwner = suspicion.suspect
+          ? {
+              albumArtist: r.album?.artist ?? album.artist ?? null,
+              path: songs.find((s) => s.path)?.path ?? null,
+              trackArtists: songs.map((s) => s.artist),
+            }
+          : null;
         for (const s of songs) {
           yield {
             ...s,
@@ -820,6 +830,7 @@ export async function* iterateAllSongs({ requireComplete = false, includeBlocked
             albumOriginalYear: originalYear,
             albumEraUntrusted: suspicion.suspect,
             albumEraReason: suspicion.reason,
+            albumOwner,
           };
         }
       } catch (err) {

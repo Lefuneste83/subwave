@@ -217,3 +217,41 @@ test('routes: a year decision needs a whole year, kinds are checked, and an albu
     { kind: 'dj-mix', kindSet: true, verdict: 'year', forcedYear: 2004, done: true });
   assert.equal(listed.suggestedVerdict, 'trusted');
 });
+
+test('a sampler filed under a label folder is a label compilation; an artist\'s own is not', () => {
+  const tracks = ['Hoomidaas', 'Ben Böhmer', 'Lila Drew'];
+  const adid = '/music/DISCOTHEQUE/OK/All Day I Dream/A Winter Sampler (2019)/01.flac';
+  assert.equal(kinds.ownerFolderOf(adid), 'All Day I Dream');
+  // The folder names the label even when the album artist says "Various Artists".
+  assert.equal(kinds.labelOwner({ albumArtist: 'Various Artists', path: adid, trackArtists: tracks }), 'All Day I Dream');
+  // No real path (Navidrome builds it from the tags): the album artist answers.
+  assert.equal(kinds.labelOwner({ albumArtist: 'All Day I Dream', path: 'All Day I Dream/A Winter Sampler/01.flac', trackArtists: tracks }), 'All Day I Dream');
+  // An artist credited on the record filed it: not a label.
+  assert.equal(kinds.labelOwner({ albumArtist: 'Oliver Koletzki', path: '/m/D/Oliver Koletzki/Schneeweiß 9 (2018)/01.flac', trackArtists: ['Oliver Koletzki & Fran', 'Niko Schwind'] }), null);
+  // An owner who is an artist elsewhere in the library made a selection, not a label release.
+  const artistsElsewhere = (n: string) => ['andrew weatherall', 'bob sinclar'].some(a => n.toLowerCase().includes(a));
+  assert.equal(kinds.labelOwner({ albumArtist: 'Andrew Weatherall', path: '/m/D/Andrew Weatherall/London Xpress (2004)/01.flac', trackArtists: ['Two Lone Swordsmen', 'Battant'] }, { isArtist: artistsElsewhere }), null);
+  assert.equal(kinds.labelOwner({ albumArtist: 'Kamai Music', path: '/m/D/Kamai Music/Inside The Mirror (2020)/01.flac', trackArtists: ['Mira', 'Reiche'] }, { isArtist: artistsElsewhere }), 'Kamai Music');
+  // A sorting folder of the library is no owner: the album artist decides, here "Various Artists".
+  assert.equal(kinds.labelOwner({ albumArtist: 'Various Artists', path: '/m/DISCOTHEQUE/Discothèque/Bossa Nova (2008)/01.flac', trackArtists: tracks }, { isContainerFolder: f => f === 'Discothèque' }), null);
+  // Generic owners and single-artist records never name a label.
+  assert.equal(kinds.labelOwner({ albumArtist: 'Various Artists', path: '/m/VA/Cowpilation #6/01.mp3', trackArtists: tracks }), null);
+  assert.equal(kinds.labelOwner({ albumArtist: 'Traum', path: null, trackArtists: ['Kai Mono', 'Kai Mono'] }), null);
+
+  assert.equal(kinds.suggestAlbumKind({ album: 'A Winter Sampler', reason: 'many-artists', label: 'All Day I Dream' }), 'label');
+  assert.equal(kinds.suggestAlbumKind({ album: 'A Winter Sampler', reason: 'many-artists' }), 'sampler', 'no label folder: the title still says sampler');
+  assert.equal(kinds.suggestAlbumKind({ album: 'Khonsu', reason: 'many-artists', label: 'Sounds Of Khemit' }), 'label', 'over the themed fallback');
+  assert.equal(kinds.suggestAlbumKind({ album: 'Fabric 09 - Slam', reason: 'many-artists', label: 'Fabric' }), 'dj-mix', 'a specific title rule still wins');
+});
+
+test('Reset to the suggestion reads the label from the stored rows', () => {
+  const ins = d().prepare(`INSERT INTO tracks (id, title, artist, album, album_artist, era_untrusted, era_reason, file_path)
+    VALUES (?, ?, ?, 'Spring Sampler 2', 'Amulanga', 1, 'many-artists', ?)`);
+  ins.run('ls1', 'One', 'Vegim', '/music/D/NEW/Amulanga/Spring Sampler 2 (2023)/01.flac');
+  ins.run('ls2', 'Two', 'Rodriguez Jr.', '/music/D/NEW/Amulanga/Spring Sampler 2 (2023)/02.flac');
+  const key = era.albumEraKey('Amulanga', 'Spring Sampler 2');
+  era.setEraKind(d(), key, 'themed');
+  era.setEraKind(d(), key, null);
+  const k = d().prepare(`SELECT DISTINCT album_kind FROM tracks WHERE id IN ('ls1','ls2')`).all() as Array<{ album_kind: string }>;
+  assert.deepEqual(k.map(r => r.album_kind), ['label']);
+});
