@@ -268,6 +268,8 @@ export {
   resolveOnAirLocation,
   resolvePersonaById,
   resolveShowById,
+  spokenContext,
+  spokenOnAirLocation,
   spokenProperNounDirective,
 } from './settings/persona.js';
 export { writeLiquidsoapSettings } from './settings/liquidsoap.js';
