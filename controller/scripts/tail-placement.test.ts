@@ -79,6 +79,8 @@ function handler(req: IncomingMessage, res: ServerResponse) {
         return;
       }
       const facets: Record<string, unknown> = {};
+      // The head window (a regular run's planned new track).
+      if (r.facets.includes('head')) facets.head = { status: 'ok', data: { bpm: 120, key: 'Am', intro_ms: 0, confidence: 0.9 } };
       // The whole-file lane (a regular run's backfill): edges place the tail.
       if (r.facets.includes('edges')) facets.edges = { status: 'ok', data: { edge_lead_ms: 0, edge_tail_ms: 20_000, decoded_duration_ms: 214_000 } };
       if (r.facets.includes('loudness')) facets.loudness = { status: 'ok', data: { loudness_lufs: -12, peak_db: -1, sample_peak_db: -1.2, lra_lu: 6, loudness_version: 2 } };
@@ -529,16 +531,19 @@ test('the planner explains where the tail window comes from', () => {
   assert.ok(note && /edges/.test(note) && !/byte-capped/.test(note), p.warnings.join('\n'));
 });
 
-test('a regular run measures the edges first, so a NEW track\'s tail is placed on its one read', async () => {
-  // A track the walk just added: no analysis, no edges. With the whole-file
-  // backfill on, the run must measure its edges BEFORE the regular pass reads
-  // its tail; the other way round the tail is read off the end of the file,
-  // stored one version below, and nothing in the run goes back to it.
+test('a regular run plans from the facet table and converges: edges first, tails placed, nothing left due', async () => {
+  // B24. With the whole-file lane on and a facet-capable analyzer, a regular
+  // run (the GUI's tagger / Analyze audio) is a facet plan, like the CLI:
+  //  - fresh1: a track the walk just added (no analysis, no edges);
+  //  - old1: analysed, its tail read before any edges existed (stored one
+  //    version below, never retried by the legacy pass);
+  //  - old2: fully analysed, a placed v3 tail, only its whole-file loudness
+  //    missing: the rest of lane 1, which must not hold the others back.
   db.upsertTrackMeta('fresh1', { title: 'fresh1', artist: 'A', album: 'B', duration: 214 });
-  assert.equal(db.getTrack('fresh1')?.decodedDurationMs ?? null, null);
-  // An already-analysed track that only lacks the whole-file facets: the rest
-  // of the backfill, which must not hold the new track's analysis back.
   track('old1');
+  track('old2');
+  writeTail('old2', 3);
+  assert.equal(tailRow('old1')?.version, db.FACET_VERSIONS.tail - 1, 'fixture: old1\'s tail is due');
   (config.analyzer as { wholeFile: boolean }).wholeFile = true;
   try {
     requests.length = 0;
@@ -546,15 +551,40 @@ test('a regular run measures the edges first, so a NEW track\'s tail is placed o
   } finally {
     (config.analyzer as { wholeFile: boolean }).wholeFile = false;
   }
-  const mine = (q: Record<string, unknown>) => JSON.stringify(q).includes('fresh1');
-  const edgesAt = requests.findIndex((q) => mine(q) && Array.isArray(q.facets) && (q.facets as string[]).includes('edges'));
-  const flatAt = requests.findIndex((q) => mine(q) && !q.facets);
-  assert.ok(edgesAt >= 0 && flatAt >= 0, JSON.stringify(requests));
-  assert.ok(edgesAt < flatAt, `edges asked at ${edgesAt}, the tail read at ${flatAt}`);
-  const oldEdgesAt = requests.findIndex((q) => JSON.stringify(q).includes('old1') && Array.isArray(q.facets) && (q.facets as string[]).includes('edges'));
-  assert.ok(oldEdgesAt > flatAt, `the library backfill (old1 at ${oldEdgesAt}) runs after the regular pass (${flatAt})`);
-  assert.deepEqual(requests[flatAt].tail_window, { end_ms: 194_000, duration_ms: 214_000 });
-  assert.equal(tailVersionCol('fresh1'), 3);
-  assert.deepEqual([tailRow('fresh1')?.status, tailRow('fresh1')?.version], ['ok', 3]);
+  const of = (id: string) => (q: Record<string, unknown>) => JSON.stringify(q).includes(`"${id}"`) || JSON.stringify(q).includes(`id=${id}`);
+  const asks = (q: Record<string, unknown>, f: string) => Array.isArray(q.facets) && (q.facets as string[]).includes(f);
+  const at = (id: string, f: string) => requests.findIndex((q) => of(id)(q) && asks(q, f));
+  for (const id of ['fresh1', 'old1']) {
+    assert.ok(at(id, 'edges') >= 0 && at(id, 'tail') >= 0, `${id}: ${JSON.stringify(requests.filter(of(id)))}`);
+    assert.ok(at(id, 'edges') < at(id, 'tail'), `${id}: edges asked at ${at(id, 'edges')}, the tail read at ${at(id, 'tail')}`);
+    assert.deepEqual(requests[at(id, 'tail')].tail_window, { end_ms: 194_000, duration_ms: 214_000 }, `${id}'s tail is placed`);
+    assert.deepEqual([tailRow(id)?.status, tailRow(id)?.version], ['ok', 3], id);
+  }
+  assert.ok(asks(requests[at('fresh1', 'tail')], 'head'), 'a new track gets its head in the same read');
+  assert.ok(!asks(requests[at('old1', 'tail')], 'head'), 'an analysed track is not re-analysed: only what is due');
+  // The model lane never carries the whole-file facets (lane 1's, wide, no models).
+  assert.ok(!requests.some((q) => asks(q, 'head') && (asks(q, 'loudness') || asks(q, 'edges'))), JSON.stringify(requests));
+  const lastModelRead = Math.max(at('fresh1', 'tail'), at('old1', 'tail'));
+  assert.ok(at('old2', 'loudness') > lastModelRead, `the rest of lane 1 (old2 at ${at('old2', 'loudness')}) runs after the model lane (${lastModelRead})`);
+  assert.equal(at('old2', 'tail'), -1, 'a placed v3 tail is not read again');
+
+  // Converged: the CLI planner finds nothing left for these tracks.
+  const mineIds = ['fresh1', 'old1', 'old2'];
+  const facets = P.parseFacets('head,loudness,edges,tail');
+  const left = P.planAcoustics({
+    ids: mineIds, facets, where: { kind: 'needs' }, state: db.loadFacetState(facets),
+    capabilities: { clap: false, demucs: false, tailVocal: false, wholeFile: true },
+  });
+  assert.deepEqual(left.items, [], P.formatPlan(left).join('\n'));
+
+  // And a second run with nothing new asks the analyzer for nothing of theirs.
+  (config.analyzer as { wholeFile: boolean }).wholeFile = true;
+  try {
+    requests.length = 0;
+    await runAnalysisPass({ vocalBackfill: false, audioBackfill: false });
+  } finally {
+    (config.analyzer as { wholeFile: boolean }).wholeFile = false;
+  }
+  assert.ok(!requests.some((q) => mineIds.some((id) => of(id)(q))), JSON.stringify(requests));
   consistent();
 });

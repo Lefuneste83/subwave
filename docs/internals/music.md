@@ -540,7 +540,21 @@ A request for both pays one decode; constant memory. Seven rules:
    after, so a library-wide backfill (the lane switched on, a loudness version
    bump) never holds a new track's analysis back for hours. A whole-file slice
    that throws is logged and skipped, never fatal to the regular pass; it widens only on an analyzer that
-   positively reports the capability. Off by default, so an upgrade is
+   positively reports the capability. On such an analyzer, which also speaks
+   the facet protocol, the regular pass between the two slices is itself a
+   facet plan (`regular-run-plan.ts`, B24: one scope engine, so a GUI run
+   converges to the CLI's `--where needs` end state): head, tail and the
+   opt-in CLAP / vocal / stems where needs, never loudness or edges (in the
+   facet protocol `loudness` IS the whole-file measurement, lane 1's). The
+   first slice is then the tracks that plan reads with head or tail due
+   (`leadIds`), so an outdated or end-of-file tail is re-planned and placed
+   from fresh edges; a stored tail whose edges are still missing is not
+   (`placeTail`, skip `no-edges`), or every run would re-read the same window.
+   Stems-only work keeps the legacy priority order and budget. A forced redo
+   (`--re-analyze`), a lane that is off and an analyzer without the facet
+   protocol keep the legacy widenings (`needsAnalysisIds` & co.), unchanged.
+   Pinned by `scripts/regular-run-plan.test.ts` and the convergence test in
+   `scripts/tail-placement.test.ts`. Off by default, so an upgrade is
    byte-identical: a first library pass reads every file once. Requests carrying
    them get `ANALYZE_WHOLE_FILE_TIMEOUT_MS` (960 s), above the worker's own
    `ANALYZE_WHOLE_FILE_TIMEOUT_S` (900 s) so the worker reports the timeout.

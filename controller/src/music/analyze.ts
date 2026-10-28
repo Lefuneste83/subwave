@@ -24,6 +24,7 @@ import {
 } from './analyze-capability.js';
 import { probeListenerCount } from '../broadcast/listeners.js';
 import { planAcoustics, type AcousticsPlan, type WorkRequest } from './acoustics-plan.js';
+import { leadIds, regularRunFacets, regularRunPlan } from './regular-run-plan.js';
 
 // Status events for the panel, mirrored to the `[analyze] …` console line.
 const logEvent = makeEventLogger('analyze');
@@ -236,6 +237,11 @@ function hasMeasuredTail(t: { outro?: unknown; tailSilenceMs?: number | null } |
 
 export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<AnalyzeStats> {
   if (opts.plan) return runAnalysisPassOnce(opts);
+  // One scope engine (B24): where the whole-file lane is on and the analyzer
+  // speaks the facet protocol, a regular run plans from the facet table like
+  // the CLI (regular-run-plan.ts), so a GUI run converges to the same state.
+  // A forced redo (--re-analyze) and every other station keep the legacy pass.
+  if (!opts.reAnalyze && (await plannedRegularRunAvailable())) return runPlannedRegularPass(opts);
   // The whole-file facets ride a regular run only when the operator opted in,
   // as a facet plan run BEFORE the regular pass (same quiet gate, same failure
   // rules). Order matters: the regular pass places each track's tail window
@@ -250,6 +256,86 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   // the regular pass.
   const lead = await runWholeFileBackfill(opts.limit, db.needsAnalysisIds(), 'for the tracks about to be analysed');
   const stats = await runAnalysisPassOnce(opts);
+  const rest = stats.available ? await runWholeFileBackfill(opts.limit) : null;
+  const wholeFile = lead || rest
+    ? {
+        analyzed: (lead?.analyzed ?? 0) + (rest?.analyzed ?? 0),
+        failed: (lead?.failed ?? 0) + (rest?.failed ?? 0),
+        scope: (lead?.scope ?? 0) + (rest?.scope ?? 0),
+      }
+    : null;
+  return wholeFile ? { ...stats, wholeFile } : stats;
+}
+
+async function plannedRegularRunAvailable(): Promise<boolean> {
+  if (!config.analyzer.wholeFile) return false;
+  if (!(await analyzer.isAvailable().catch(() => false))) return false;
+  return (await analyzer.facetsAvailable().catch(() => null)) === true && analyzer.wholeFileAvailable() === true;
+}
+
+// The regular run as a facet plan (regular-run-plan.ts has the order and why):
+// the whole-file lane first for the tracks about to be read with head or tail
+// due, then the model lane's plan, then the rest of the whole-file lane. The
+// widening decisions (and their notices) are the legacy pass's own.
+async function runPlannedRegularPass(opts: AnalyzeOptions): Promise<AnalyzeStats> {
+  const backend = analyzer.backendLabel();
+  const audio = backfillDecision({
+    dimension: 'audio', wanted: opts.audioBackfill ?? audioBackfillDefault(),
+    capable: analyzer.audioEmbeddingAvailable(), error: analyzer.audioEmbeddingError(), backend,
+  });
+  const vocal = backfillDecision({
+    dimension: 'vocal', wanted: opts.vocalBackfill ?? vocalBackfillDefault(),
+    capable: analyzer.vocalActivityAvailable(), error: analyzer.vocalActivityError(), backend,
+  });
+  const stem = backfillDecision({
+    dimension: 'stem', wanted: settings.get()?.audio?.stemCache === true,
+    capable: analyzer.vocalActivityAvailable(), error: analyzer.vocalActivityError(), backend,
+  });
+  if (!audio.widen && audio.notice) logEvent(analyzer.audioEmbeddingError() ? 'warning' : 'info', audio.notice);
+  if (!vocal.widen && vocal.notice) logEvent(analyzer.vocalActivityError() ? 'warning' : 'info', vocal.notice);
+  if (!stem.widen && stem.notice) logEvent(analyzer.vocalActivityError() ? 'warning' : 'info', stem.notice);
+  let stems = stem.widen;
+  if (stems) {
+    // An unmounted stems share must not read as an empty cache (stem-cache.ts).
+    const root = await stemCacheStore.stemsRootStatus({ readOnly: true });
+    if (!root.online) {
+      stems = false;
+      logEvent('warning', root.message ?? 'Stem cache offline: stems skipped this pass');
+    }
+  }
+  const wants = { clap: audio.widen, vocal: vocal.widen, stems };
+
+  const ids = db.allTrackIdsOrdered();
+  const lead = await runWholeFileBackfill(
+    opts.limit, leadIds(ids, db.loadFacetState(['head', 'tail'])), 'for the tracks about to be analysed');
+
+  // Read after lane 1: the tails it just made placeable are planned now.
+  const state = db.loadFacetState([...regularRunFacets(wants), 'edges']);
+  const capabilities = {
+    clap: analyzer.audioEmbeddingAvailable(),
+    demucs: analyzer.vocalActivityAvailable(),
+    tailVocal: analyzer.tailVocalAvailable(),
+    wholeFile: true,
+  };
+  let plan = regularRunPlan({ ids, state, wants, capabilities, limit: opts.limit });
+  // Stems-only work is ordered and budgeted (stem-priority.ts); sizing the
+  // budget walks the cache, so only when there is such work.
+  if (plan.items.some(i => i.facets.length === 1 && i.facets[0] === 'stems')) {
+    plan = regularRunPlan({
+      ids, state, wants, capabilities, limit: opts.limit,
+      stems: {
+        priority: db.needsStemsIds(undefined, stemCacheStore.likeSignals()),
+        headroom: await stemCacheStore.headroomTracks(),
+        existing: await stemCacheStore.cachedTrackIdSet(),
+      },
+    });
+  }
+  for (const c of plan.byFacet) {
+    if (c.matched === 0) continue;
+    const skipped = Object.entries(c.skipped).map(([k, v]) => `${k} ${v}`).join(', ');
+    console.log(`[analyze] regular run: ${c.facet} ${c.planned} planned of ${c.matched} due${skipped ? ` (skipped: ${skipped})` : ''}`);
+  }
+  const stats = await runAnalysisPassOnce({ ...opts, plan });
   const rest = stats.available ? await runWholeFileBackfill(opts.limit) : null;
   const wholeFile = lead || rest
     ? {
