@@ -66,6 +66,14 @@ export interface PlanInput {
   limit?: number;
   // The clock the year facet's retry delays are judged against (tests pin it).
   now?: number;
+  // A regular run (regular-run-plan.ts), not an explicit --facets: a tail
+  // already stored is planned again only when the track's edges can place it
+  // (the newer version this run can produce). Without edges a re-read gives
+  // the same end-of-file window, stored one version below, due again: every
+  // run would re-read it. `state` must then carry the edges cells. A track with
+  // no tail yet is planned regardless (its first read). Off for --facets,
+  // whose operator asked for exactly that facet.
+  placeTail?: boolean;
 }
 
 // The worker flags one track's facets translate to.
@@ -84,7 +92,9 @@ export interface WorkItem {
 
 // 'year-known': the year needs no lookup (trusted, resolved or manual).
 // 'year-off': MusicBrainz lookups are switched off in the settings.
-export type SkipReason = 'no-clap' | 'no-demucs' | 'no-tail-vocal' | 'no-whole-file' | 'year-known' | 'year-off' | 'limit';
+// 'no-edges': a regular run's stored tail whose edges are not measured yet
+// (placeTail): re-reading it could not place it.
+export type SkipReason = 'no-clap' | 'no-demucs' | 'no-tail-vocal' | 'no-whole-file' | 'no-edges' | 'year-known' | 'year-off' | 'limit';
 
 export interface FacetPlanCount {
   facet: Facet;
@@ -181,7 +191,7 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
     const c = counts.get(f)!;
     c.skipped[why] = (c.skipped[why] ?? 0) + 1;
   };
-  const unavailable = (f: Facet, cell: FacetCell | undefined): SkipReason | null => {
+  const unavailable = (f: Facet, cell: FacetCell | undefined, id: string): SkipReason | null => {
     if (f === 'clap' && input.capabilities.clap === false) return 'no-clap';
     if ((f === 'vocal' || f === 'stems') && input.capabilities.demucs === false) return 'no-demucs';
     if (f === 'vocal' && cell?.reason === 'head-only' &&
@@ -191,6 +201,7 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
     if (WHOLE_FILE_FACETS.includes(f) && input.capabilities.wholeFile === false) return 'no-whole-file';
     if (f === 'year' && input.capabilities.yearLookups === false) return 'year-off';
     if (f === 'year' && cell?.status === 'ok') return 'year-known';
+    if (f === 'tail' && input.placeTail && cell && input.state.get(id)?.get('edges')?.status !== 'ok') return 'no-edges';
     return null;
   };
   const now = input.now ?? Date.now();
@@ -204,7 +215,7 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
     for (const f of facets) {
       if (!matchesWhere(state.get(f), f, input.where, now)) continue;
       counts.get(f)!.matched += 1;
-      const why = unavailable(f, state.get(f));
+      const why = unavailable(f, state.get(f), id);
       if (why) {
         skip(f, why);
         continue;
