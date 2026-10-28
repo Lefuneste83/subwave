@@ -14,13 +14,14 @@ import type { QueryClient } from '@tanstack/react-query';
 import { CalendarClock, ChevronDown, ChevronRight, Download, Search } from 'lucide-react';
 import { adminJson, adminResponse } from '../../../lib/admin-query';
 import { notify } from '../../../lib/notify';
+import { cn } from '../../../lib/cn';
 import { ALBUM_KINDS, ALBUM_KIND_LABELS, type AlbumKind } from '../../../lib/schemas.generated';
 import { Btn, Pill } from '../ui';
 import { Input } from '../../ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../ui/select';
 import { formatTrackLength, shortFolder, yearTargets } from './era-display';
 import { eraYearError, eraYearInputProps, eraYearInvalid, parseEraYear } from './era-year';
-import { SEARCH_ENGINES, buildSearchUrl, isSearchEngine, loadSearchEngine, saveSearchEngine, type SearchEngine } from './era-search';
+import { SEARCH_ENGINES, buildSearchUrl, searchTermsOf, isSearchEngine, loadSearchEngine, saveSearchEngine, type SearchEngine } from './era-search';
 import { applyEraYearEvent, libraryKeys } from './queries';
 import { useLibrary } from './LibraryContext';
 import { useAdminMutation, useAdminQuery } from './useAdminQuery';
@@ -460,10 +461,11 @@ function AlbumTracks({ album, engine }: { album: EraAlbum; engine: SearchEngine 
     });
   };
   const setLabel = pending.length > 1 ? `Set ${pending.length}` : 'Set';
-  // An empty field's spinner starts from the album's year, else the file's.
+  // An empty field's spinner starts from the track's own recording year when
+  // it has one, else the album's year, else the file's.
   const yearProps = (t: EraTrack) =>
-    eraYearInputProps(draft[t.id] ?? '', album.year ?? t.year, v => setDraft(d => ({ ...d, [t.id]: v })));
-  const searchUrl = (t: EraTrack) => buildSearchUrl(engine, [t.artist, t.title].filter(Boolean).join(' ') + ' release date');
+    eraYearInputProps(draft[t.id] ?? '', t.originalYear ?? album.year ?? t.year, v => setDraft(d => ({ ...d, [t.id]: v })));
+  const searchUrl = (t: EraTrack) => buildSearchUrl(engine, { artist: t.artist, title: t.title });
 
   if (tracks.isPending) return <span className="caption">loading tracks…</span>;
   const rows = rowsNow;
@@ -491,7 +493,10 @@ function AlbumTracks({ album, engine }: { album: EraAlbum; engine: SearchEngine 
             </td>
             <td className="py-1">
               <span className="inline-flex items-center gap-1">
-                <Input className={`h-6 w-[64px] px-1.5 text-[11px]${eraYearInvalid(draft[t.id]) ? ' border-[var(--danger)]' : ''}`}
+                <Input className={cn('h-6 w-[64px] px-1.5 text-[11px]',
+                  // Red for a typo; the accent outline marks the lines still waiting for a year.
+                  eraYearInvalid(draft[t.id]) ? 'border-[var(--danger)]'
+                    : t.originalYear == null ? 'border-[var(--accent)] ring-1 ring-[var(--accent)]' : null)}
                   aria-label={`Recording year of ${t.title}`}
                   value={draft[t.id] ?? ''}
                   {...yearProps(t)}
@@ -503,7 +508,7 @@ function AlbumTracks({ album, engine }: { album: EraAlbum; engine: SearchEngine 
                     title="Clear the hand-set year on this line only; the lookups take the track back">Clear</Btn>
                 )}
                 <Btn sm onClick={() => window.open(searchUrl(t), '_blank', 'noopener,noreferrer')}
-                  title={`Search ${SEARCH_ENGINES[engine].label} for “${[t.artist, t.title].filter(Boolean).join(' ')} release date” in a new tab`}>
+                  title={`Search ${SEARCH_ENGINES[engine].label} for ${searchTermsOf(engine, { artist: t.artist, title: t.title })} in a new tab`}>
                   <Search size={11} aria-hidden /> Search
                 </Btn>
               </span>

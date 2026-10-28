@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ERA_YEAR_MIN, eraYearInputProps, eraYearInvalid, eraYearMax, parseEraYear } from './era-year';
-import { buildSearchUrl, isSearchEngine } from './era-search';
+import { buildSearchUrl, isSearchEngine, searchTermsOf } from './era-search';
 
 test('a year is four digits between 1900 and this year, and nothing else', () => {
   const now = new Date().getFullYear();
@@ -43,12 +43,15 @@ test('the field carries the range, and an empty field nudged by the arrows start
   q.onKeyDown({ key: 'ArrowUp', preventDefault: () => assert.fail('must not prevent') } as never);
 });
 
-test('the search link carries artist, title and "release date"; directory sites get the names only', () => {
+test('the search quotes artist and title as separate phrases; directory sites get the names only', () => {
+  const t = { artist: 'Ben Böhmer', title: 'Begin Again' };
+  assert.equal(searchTermsOf('google', t), '"Ben Böhmer" "Begin Again" release date');
   assert.equal(
-    buildSearchUrl('google', 'Ben Böhmer Begin Again release date'),
-    'https://www.google.com/search?q=Ben%20B%C3%B6hmer%20Begin%20Again%20release%20date',
+    buildSearchUrl('google', t),
+    'https://www.google.com/search?q=%22Ben%20B%C3%B6hmer%22%20%22Begin%20Again%22%20release%20date',
   );
-  assert.equal(buildSearchUrl('discogs', 'Ben Böhmer Begin Again release date'), 'https://www.discogs.com/search/?type=all&q=Ben%20B%C3%B6hmer%20Begin%20Again');
+  assert.equal(searchTermsOf('discogs', t), '"Ben Böhmer" "Begin Again"');
+  assert.equal(searchTermsOf('duckduckgo', { artist: 'The "Real" Tuesday Weld', title: null }), '"The Real Tuesday Weld" release date', 'a quote inside a name cannot close the phrase');
   assert.equal(isSearchEngine('qwant'), true);
   assert.equal(isSearchEngine('altavista'), false);
 });

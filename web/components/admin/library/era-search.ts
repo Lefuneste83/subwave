@@ -33,9 +33,25 @@ export function saveSearchEngine(v: SearchEngine): void {
   try { window.localStorage.setItem(KEY, v); } catch { /* private mode: this session only */ }
 }
 
-/** The engine's results page for `terms`. Directory sites (Discogs, MusicBrainz) drop the "release date" words, which only help a web search. */
-export function buildSearchUrl(engine: SearchEngine, terms: string): string {
-  const e = SEARCH_ENGINES[engine];
-  const q = engine === 'discogs' || engine === 'musicbrainz' ? terms.replace(/\s*release date$/, '') : terms;
-  return e.url + encodeURIComponent(q.trim());
+export interface SearchTrack {
+  artist?: string | null;
+  title?: string | null;
+}
+
+// Each term quoted, so "Air" "Playground Love" is two phrases rather than three
+// loose words a search engine can recombine. Quotes inside a name are dropped
+// (they would close the phrase). Directory sites (Discogs, MusicBrainz) get
+// the names only: "release date" helps a web search, not a catalogue.
+const quote = (s: string) => `"${s.replace(/"/g, '').trim()}"`;
+
+/** The query a track's Search sends to `engine`. */
+export function searchTermsOf(engine: SearchEngine, { artist, title }: SearchTrack): string {
+  const terms = [artist, title].map(s => String(s ?? '').trim()).filter(Boolean).map(quote);
+  if (engine !== 'discogs' && engine !== 'musicbrainz') terms.push('release date');
+  return terms.join(' ');
+}
+
+/** The engine's results page for a track. */
+export function buildSearchUrl(engine: SearchEngine, track: SearchTrack): string {
+  return SEARCH_ENGINES[engine].url + encodeURIComponent(searchTermsOf(engine, track));
 }
