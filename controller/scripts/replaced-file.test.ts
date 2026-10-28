@@ -20,6 +20,7 @@ const db = await import('../src/music/library-db.js');
 await db.open({ embeddingDim: 8, adoptStoredDim: true });
 const { checkFacets } = await import('../src/music/facet-check.js');
 const stems = await import('../src/music/stem-cache.js');
+const policy = await import('../src/music/replaced-file-policy.js');
 
 after(async () => { db.close(); await removeTempDir(dir); });
 
@@ -50,11 +51,40 @@ function measured(id: string) {
 }
 
 test('the replacement signal: a different size against a known one', () => {
-  assert.equal(db.fileReplaced(1_000, 2_000), true);
-  assert.equal(db.fileReplaced(1_000, 1_000), false);
-  assert.equal(db.fileReplaced(null, 2_000), false, 'a row walked before file facts existed is not a change');
-  assert.equal(db.fileReplaced(1_000, null), false, 'a writer without file facts says nothing about the file');
-  assert.equal(db.fileReplaced(0, 2_000), false);
+  assert.equal(policy.fileReplaced(1_000, 2_000), true);
+  assert.equal(policy.fileReplaced(1_000, 1_000), false);
+  assert.equal(policy.fileReplaced(null, 2_000), false, 'a row walked before file facts existed is not a change');
+  assert.equal(policy.fileReplaced(1_000, null), false, 'a writer without file facts says nothing about the file');
+  assert.equal(policy.fileReplaced(0, 2_000), false);
+});
+
+test('the Navidrome signal: re-imported after the track was last measured', () => {
+  // Production, 28 Oct: repaired at the exact same size, re-imported at 15:01,
+  // last measured at 13:36. The size check alone missed it.
+  assert.equal(policy.changedAfterMeasure('2026-10-28T15:01:20.771Z', '2026-10-28T13:36:32.777Z'), true);
+  assert.equal(policy.changedAfterMeasure('2026-10-28T12:00:00Z', '2026-10-28T13:36:32.777Z'), false, 'measured after the import');
+  assert.equal(policy.changedAfterMeasure('2026-10-28T15:01:20Z', null), false, 'never measured: nothing stale');
+  assert.equal(policy.changedAfterMeasure(null, '2026-10-28T13:36:32Z'), false);
+  assert.equal(policy.changedAfterMeasure('garbage', '2026-10-28T13:36:32Z'), false);
+  assert.equal(policy.changesFloor(null), null, 'no mark: every song');
+  assert.equal(policy.changesFloor('2026-10-28T15:00:00Z'), Date.parse('2026-10-28T15:00:00Z') - policy.CHANGE_MARK_MARGIN_MS);
+});
+
+test('lastMeasuredAt reads the analysis rows only, never the year', () => {
+  measured('when');
+  sql(`UPDATE track_facet_status SET at = '2026-10-01T00:00:00Z' WHERE track_id = 'when'`).run();
+  sql(`UPDATE track_facet_status SET at = '2026-10-20T00:00:00Z' WHERE track_id = 'when' AND facet = 'edges'`).run();
+  sql(`UPDATE track_facet_status SET at = '2026-10-28T00:00:00Z' WHERE track_id = 'when' AND facet = 'year'`).run();
+  assert.equal(db.lastMeasuredAt('when'), '2026-10-20T00:00:00Z');
+  db.upsertTrackMeta('never', meta(10));
+  assert.equal(db.lastMeasuredAt('never'), null);
+  // The walk's Navidrome branch: same size, re-imported after the measure.
+  assert.equal(db.upsertTrackMeta('when', meta(1_000)), false, 'the size alone says nothing');
+  assert.ok(policy.changedAfterMeasure('2026-10-28T15:01:20Z', db.lastMeasuredAt('when')));
+  db.clearTrackAudio('when');
+  assert.equal(db.lastMeasuredAt('when'), null);
+  assert.ok(db.needsAnalysisIds().includes('when'));
+  consistent();
 });
 
 test('a walk reporting the same size keeps every measurement', () => {

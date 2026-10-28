@@ -11,6 +11,7 @@ import { touchGenreInputs } from './genre-inputs.js';
 import { resolveEraYear } from '../era-year.js';
 import { eraSuspectSql, storedYearUntrusted } from '../era-suspect.js';
 import { MAX_ANALYSIS_FAILURES, analysisFailureExclusion } from '../analyze-capability.js';
+import { fileReplaced } from '../replaced-file-policy.js';
 
 export { MAX_ANALYSIS_FAILURES, analysisFailureExclusion } from '../analyze-capability.js';
 
@@ -180,17 +181,6 @@ function positiveInt(v: unknown): number | null {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
 }
 
-// A file replaced at the same path keeps its track id (Navidrome derives the id
-// from the path), so nothing else would ever measure the new audio: every
-// figure the analyzer took from the old file stays, a settled "silent" answer
-// included. The walk is the only writer with the file's size, and a size it
-// reports that differs from the stored one is the replacement's signal. A
-// stored size of NULL (a row walked before file facts existed) is not a change.
-// Pure: scripts/replaced-file.test.ts.
-export function fileReplaced(storedSize: number | null | undefined, walkedSize: number | null | undefined): boolean {
-  return storedSize != null && storedSize > 0 && walkedSize != null && walkedSize > 0 && storedSize !== walkedSize;
-}
-
 // Everything the analyzer measured from a track's audio, for one track: the
 // head analysis, the whole-file loudness and edges, the tail (placed or not),
 // vocal ranges, the stems stamp, CLAP and the audio moods derived from it, the
@@ -199,6 +189,24 @@ export function fileReplaced(storedSize: number | null | undefined, walkedSize: 
 // measured on a file that is gone. Metadata, tags, years, lyrics and plays are
 // not audio measurements and stay. The stem files themselves are the caller's
 // (stem-cache.forgetStems), since this runs inside the walk's sync write.
+// When the track's audio was last measured: the newest analysis facet row (the
+// year row is not a measurement). NULL = never measured.
+export function lastMeasuredAt(id: string): string | null {
+  const r = requireDb()
+    .prepare(`SELECT MAX(at) AS at FROM track_facet_status WHERE track_id = ? AND facet <> 'year'`)
+    .get(id) as { at: string | null } | undefined;
+  return r?.at ?? null;
+}
+
+// The oldest measurement in the library: a file Navidrome last changed before
+// it cannot be stale for any track (file-changes.changedFiles' first floor).
+export function earliestMeasuredAt(): string | null {
+  const r = requireDb()
+    .prepare(`SELECT MIN(at) AS at FROM track_facet_status WHERE facet <> 'year'`)
+    .get() as { at: string | null } | undefined;
+  return r?.at ?? null;
+}
+
 export function clearTrackAudio(id: string): void {
   const d = requireDb();
   d.transaction(() => {
@@ -222,7 +230,8 @@ export function clearTrackAudio(id: string): void {
   })();
 }
 
-// Returns true when the walk found the file replaced (fileReplaced) and the
+// Returns true when the walk found the file replaced (replaced-file-policy
+// fileReplaced: its size changed) and the
 // track's audio analysis was cleared, so the caller can drop its stem files.
 export function upsertTrackMeta(id: string, meta: TrackMeta): boolean {
   const eraBefore = storedEra(id);
