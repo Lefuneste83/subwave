@@ -180,8 +180,55 @@ function positiveInt(v: unknown): number | null {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
 }
 
-export function upsertTrackMeta(id: string, meta: TrackMeta): void {
+// A file replaced at the same path keeps its track id (Navidrome derives the id
+// from the path), so nothing else would ever measure the new audio: every
+// figure the analyzer took from the old file stays, a settled "silent" answer
+// included. The walk is the only writer with the file's size, and a size it
+// reports that differs from the stored one is the replacement's signal. A
+// stored size of NULL (a row walked before file facts existed) is not a change.
+// Pure: scripts/replaced-file.test.ts.
+export function fileReplaced(storedSize: number | null | undefined, walkedSize: number | null | undefined): boolean {
+  return storedSize != null && storedSize > 0 && walkedSize != null && walkedSize > 0 && storedSize !== walkedSize;
+}
+
+// Everything the analyzer measured from a track's audio, for one track: the
+// head analysis, the whole-file loudness and edges, the tail (placed or not),
+// vocal ranges, the stems stamp, CLAP and the audio moods derived from it, the
+// map position derived from CLAP, and the failure history that described the
+// old file. Unlike clearAnalysis() nothing is kept: the whole-file figures were
+// measured on a file that is gone. Metadata, tags, years, lyrics and plays are
+// not audio measurements and stay. The stem files themselves are the caller's
+// (stem-cache.forgetStems), since this runs inside the walk's sync write.
+export function clearTrackAudio(id: string): void {
+  const d = requireDb();
+  d.transaction(() => {
+    d.prepare(
+      `UPDATE tracks SET bpm = NULL, musical_key = NULL, intro_ms = NULL, analysis_confidence = NULL,
+         analysis_version = NULL, loudness_lufs = NULL, peak_db = NULL, loudness_version = NULL,
+         loudness_range_lu = NULL, sample_peak_db = NULL,
+         structure_json = NULL, vocal_ranges_json = NULL, pace_json = NULL, beats_json = NULL,
+         bars_json = NULL, key_ranges_json = NULL, audio_moods = NULL, audio_mood_scores_json = NULL,
+         outro_json = NULL, tail_silence_ms = NULL, tail_start_ms = NULL, tail_version = NULL,
+         lead_silence_ms = NULL, edge_lead_ms = NULL, edge_tail_ms = NULL, decoded_duration_ms = NULL,
+         stems_at = NULL, map_x = NULL, map_y = NULL,
+         analyze_error = NULL, analyze_failed_at = NULL, analyze_fail_count = NULL
+       WHERE id = ?`,
+    ).run(id);
+    d.prepare('DELETE FROM track_audio_vectors WHERE id = ?').run(id);
+    // The analysis rows (and the unmeasurable answers they carry) described the
+    // old file; the year row is not an audio measurement.
+    d.prepare(`DELETE FROM track_facet_status WHERE track_id = ? AND facet <> 'year'`).run(id);
+    syncTrackFacets(id);
+  })();
+}
+
+// Returns true when the walk found the file replaced (fileReplaced) and the
+// track's audio analysis was cleared, so the caller can drop its stem files.
+export function upsertTrackMeta(id: string, meta: TrackMeta): boolean {
   const eraBefore = storedEra(id);
+  const walkedSize = positiveInt(meta.fileSize);
+  const storedSize = walkedSize == null ? null
+    : (requireDb().prepare('SELECT file_size AS s FROM tracks WHERE id = ?').get(id) as { s: number | null } | undefined)?.s ?? null;
   requireDb()
     .prepare(
       `
@@ -266,6 +313,9 @@ export function upsertTrackMeta(id: string, meta: TrackMeta): void {
     );
   markTextVectorDirtyIfEraChanged(id, eraBefore);
   syncYearIfEraChanged(id, eraBefore);
+  if (!fileReplaced(storedSize, walkedSize)) return false;
+  clearTrackAudio(id);
+  return true;
 }
 
 // Era-suspect tracks with no year (#842): never checked, or also already-checked

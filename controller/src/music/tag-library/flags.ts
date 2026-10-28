@@ -136,9 +136,12 @@ export async function walkNavidrome(): Promise<{ walked: number; liveIds: Set<st
   // folders), so a DJ's own compilation is never taken for a label's
   // (album-kind.labelOwner).
   const ownerCtx = rawDb ? libraryOwnerContext(rawDb, { fresh: true }) : undefined;
+  // Files replaced at the same path (same id, a different size): their audio
+  // analysis is cleared by the upsert, their stems dropped after the walk.
+  const replaced: string[] = [];
   for await (const song of subsonic.iterateAllSongs({ requireComplete: true })) {
     const eraFields = eraWalkFields(song, eraOverrides, ownerCtx);
-    db.upsertTrackMeta(song.id, {
+    const fileReplaced = db.upsertTrackMeta(song.id, {
       title: song.title,
       artist: song.artist,
       album: song.album,
@@ -167,6 +170,7 @@ export async function walkNavidrome(): Promise<{ walked: number; liveIds: Set<st
       duration: song.duration,
       ...walkFileInfo(song),
     });
+    if (fileReplaced) replaced.push(song.id);
     // A one-year decision (Library → Era) on this album: a track that arrived
     // after it, or lost its year, gets it as its manual year. A track that
     // already holds a manual year keeps it (the operator set that one).
@@ -182,6 +186,19 @@ export async function walkNavidrome(): Promise<{ walked: number; liveIds: Set<st
     }
   }
   logEvent('info', `Scanned ${walked.toLocaleString('en-GB')} tracks`);
+  if (replaced.length > 0) {
+    const stems = await import('../stem-cache.js')
+      .then(m => m.forgetStems(replaced))
+      .catch((err: unknown) => ({ removed: 0, failed: replaced.length, offline: String((err as Error)?.message ?? err) }));
+    logEvent(
+      'info',
+      `${replaced.length.toLocaleString('en-GB')} file(s) replaced at the same path (size changed): ` +
+        'their audio analysis is due again' +
+        (stems.removed ? `, ${stems.removed} stem set(s) dropped` : '') +
+        (stems.failed ? `, ${stems.failed} stem dir(s) could not be removed` : '') +
+        (stems.offline ? ` (stem cache offline: ${stems.offline})` : ''),
+    );
+  }
   const suspect = [...eraReasons.values()].reduce((a, b) => a + b, 0);
   if (suspect) {
     const breakdown = [...eraReasons.entries()]
