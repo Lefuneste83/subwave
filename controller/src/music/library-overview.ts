@@ -38,7 +38,7 @@ export interface LibraryOverview {
   /** Distinct canAir tracks in the play history. */
   aired: { windowDays: number; recent: number; ever: number; never: number; since: string | null };
   /** What only the operator can settle. */
-  attention: { eraAlbums: number; unmeasurable: number; yearFailed: number; analysisFailed: number; total: number };
+  attention: { eraAlbums: number; unmeasurable: number; remeasure: number; yearFailed: number; analysisFailed: number; total: number };
   computedAt: string;
 }
 
@@ -179,7 +179,17 @@ function readEraToReview(): number {
 // The track parts of "Needs you": one selection each, shared by the count and
 // the CSV below, so the download always lists what the tile counts.
 // `p` is the track_facet_status alias prefix ('s.' in a join).
-const unreadableSql = (p = '') => `${p}status = 'unmeasurable' AND ${p}facet <> 'year'`;
+// An unmeasurable answer at its facet's current version is settled: the file
+// itself is the problem (silent, damaged) and only the operator can act on it.
+// One BELOW the current version is a measurement still due (a tail read off the
+// end of the file before its edges existed, or from a capped download): the
+// planner takes it again, so it is not a file to open, and is counted apart.
+const currentVersionSql = (p = '') =>
+  `CASE ${p}facet ${Object.entries(db.FACET_VERSIONS).map(([f, v]) => `WHEN '${f}' THEN ${Number(v)}`).join(' ')} END`;
+const unreadableSql = (p = '') =>
+  `${p}status = 'unmeasurable' AND ${p}facet <> 'year' AND ${p}version >= ${currentVersionSql(p)}`;
+const remeasureSql = (p = '') =>
+  `${p}status = 'unmeasurable' AND ${p}facet <> 'year' AND ${p}version < ${currentVersionSql(p)}`;
 const yearFailedSql = (p = '') => `${p}status = 'failed' AND ${p}facet = 'year'`;
 
 /**
@@ -188,6 +198,9 @@ const yearFailedSql = (p = '') => `${p}status = 'failed' AND ${p}facet = 'year'`
  * and where the file lives, so the operator can open the files themselves.
  *   unreadable          the analyzer measured nothing for these facets (a
  *                       silent, corrupt or unusual file); detail = facet: reason
+ *   re-measure          a measurement still due, not a bad file (a tail read
+ *                       before its edges existed, a capped download): the
+ *                       next facet run for it takes it again
  *   year-lookup-failed  the original-year lookup errored (not "not found")
  *   analysis-gave-up    analysis failed MAX_ANALYSIS_FAILURES times in a row
  */
@@ -201,6 +214,13 @@ export function exportAttentionCsv(d = db.requireDb()): string {
               group_concat(s.facet || ': ' || COALESCE(s.unmeasurable_reason, s.reason, 'not measured'), '; ') AS detail, ${cols}
          FROM track_facet_status s JOIN tracks t ON t.id = s.track_id
         WHERE ${unreadableSql('s.')}
+        GROUP BY t.id`,
+    ).all() as Row[]),
+    ...(d.prepare(
+      `SELECT 're-measure' AS issue,
+              group_concat(s.facet || ': ' || COALESCE(s.unmeasurable_reason, s.reason, 'not measured'), '; ') AS detail, ${cols}
+         FROM track_facet_status s JOIN tracks t ON t.id = s.track_id
+        WHERE ${remeasureSql('s.')}
         GROUP BY t.id`,
     ).all() as Row[]),
     ...(d.prepare(
@@ -236,11 +256,14 @@ function readAttention(eraAlbums: number): LibraryOverview['attention'] {
   const unmeasurable = safeCount(() => (d.prepare(
     `SELECT COUNT(DISTINCT track_id) AS n FROM track_facet_status WHERE ${unreadableSql()}`,
   ).get() as { n: number }).n);
+  const remeasure = safeCount(() => (d.prepare(
+    `SELECT COUNT(DISTINCT track_id) AS n FROM track_facet_status WHERE ${remeasureSql()}`,
+  ).get() as { n: number }).n);
   const yearFailed = safeCount(() => (d.prepare(
     `SELECT COUNT(*) AS n FROM track_facet_status WHERE ${yearFailedSql()}`,
   ).get() as { n: number }).n);
   const analysisFailed = safeCount(() => db.analysisFailedCount());
-  return { eraAlbums, unmeasurable, yearFailed, analysisFailed, total: eraAlbums + unmeasurable + yearFailed + analysisFailed };
+  return { eraAlbums, unmeasurable, remeasure, yearFailed, analysisFailed, total: eraAlbums + unmeasurable + remeasure + yearFailed + analysisFailed };
 }
 
 function activeLimits(): { show: string | null; minSec: number | null; maxSec: number | null } {

@@ -26,7 +26,8 @@ export interface LibraryOverview {
   blocked: { total: number; track: number; album: number; artist: number; rule: number };
   lengthLimits: { show: string | null; minSec: number | null; maxSec: number | null; within: number } | null;
   aired: { windowDays: number; recent: number; ever: number; never: number; since: string | null };
-  attention: { eraAlbums: number; unmeasurable: number; yearFailed: number; analysisFailed: number; total: number };
+  // `remeasure` is absent from a controller older than the split: read it as 0.
+  attention: { eraAlbums: number; unmeasurable: number; remeasure?: number; yearFailed: number; analysisFailed: number; total: number };
   computedAt: string;
 }
 
@@ -134,6 +135,7 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
     ? [
         a.eraAlbums ? `${plural(a.eraAlbums, 'album')} to review (Era)` : null,
         a.unmeasurable ? `${plural(a.unmeasurable, 'track')} unreadable` : null,
+        a.remeasure ? `${plural(a.remeasure, 'track')} to re-measure` : null,
         a.yearFailed ? `${plural(a.yearFailed, 'track')}: year lookup failed` : null,
         a.analysisFailed ? `${plural(a.analysisFailed, 'track')}: analysis gave up` : null,
       ].filter(Boolean).join(' · ') || 'all clear'
@@ -217,7 +219,8 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
           tip={<>
             What only you can settle, as one sum of albums and tracks:
             <br />· <b>albums</b> to review in the Era tab (the same count as its &ldquo;To review&rdquo;)
-            <br />· <b>tracks</b> the analyzer could not read for some measure (a corrupt or unusual file), each counted once
+            <br />· <b>tracks</b> the analyzer could not read for some measure (a silent, corrupt or unusual file), each counted once
+            <br />· <b>tracks</b> with a measurement still due, not a bad file (a tail read before its edges were known): an analysis run of that measure takes them again
             <br />· <b>tracks</b> whose original-year lookup failed
             <br />· <b>tracks</b> the analysis gave up on after repeated failures
             <br />All clear at 0.
@@ -271,6 +274,7 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
             Needs you: <b className="mono-num">{plural(a.total - a.eraAlbums, 'track')}</b> to look at by hand
             {' '}({[
               a.unmeasurable ? `${num(a.unmeasurable)} unreadable` : null,
+              a.remeasure ? `${num(a.remeasure)} to re-measure` : null,
               a.yearFailed ? `${num(a.yearFailed)} year lookup failed` : null,
               a.analysisFailed ? `${num(a.analysisFailed)} analysis gave up` : null,
             ].filter(Boolean).join(', ')}).

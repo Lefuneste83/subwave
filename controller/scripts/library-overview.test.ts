@@ -107,34 +107,40 @@ test('no length limit in force reads null; the pure summary counts what passes f
   assert.equal(s.within, 2, '300 s and the unknown length pass; 100 s and 700 s do not');
 });
 
-test('the needs-you sum adds analysis failures, unmeasurable facets (not year) and failed year lookups', () => {
+test('the needs-you sum adds analysis failures, settled unmeasurable facets (not year), measurements still due and failed year lookups', () => {
   track('x');
   track('y');
+  track('z');
   d().prepare('UPDATE tracks SET analyze_fail_count = 99 WHERE id = ?').run('x');
   d().exec('DELETE FROM track_facet_status');
-  const ins = d().prepare(`INSERT INTO track_facet_status (track_id, facet, status, version, attempts, at) VALUES (?, ?, ?, 1, 1, '2026-10-27')`);
-  ins.run('x', 'loudness', 'unmeasurable');
-  ins.run('x', 'tail', 'unmeasurable'); // the same damaged file, a second facet
-  ins.run('y', 'year', 'unmeasurable');
-  ins.run('x', 'year', 'failed');
+  const ins = d().prepare(`INSERT INTO track_facet_status (track_id, facet, status, version, attempts, at) VALUES (?, ?, ?, ?, 1, '2026-10-27')`);
+  ins.run('x', 'loudness', 'unmeasurable', db.FACET_VERSIONS.loudness);
+  ins.run('x', 'tail', 'unmeasurable', db.FACET_VERSIONS.tail); // the same damaged file, a second facet
+  ins.run('y', 'year', 'unmeasurable', db.FACET_VERSIONS.year);
+  ins.run('x', 'year', 'failed', db.FACET_VERSIONS.year);
+  // A tail read before its edges existed: stored one version below, due again.
+  ins.run('z', 'tail', 'unmeasurable', db.FACET_VERSIONS.tail - 1);
   const a = ov.computeOverview(NOW).attention;
   assert.equal(a.analysisFailed, 1);
   assert.equal(a.unmeasurable, 1, 'one track, however many facets; year has its own surface, the Era tab');
+  assert.equal(a.remeasure, 1, 'a measurement still due is counted apart, never as an unreadable file');
   assert.equal(a.yearFailed, 1);
-  assert.equal(a.total, a.eraAlbums + a.unmeasurable + a.yearFailed + a.analysisFailed);
+  assert.equal(a.total, a.eraAlbums + a.unmeasurable + a.remeasure + a.yearFailed + a.analysisFailed);
 
   // The CSV lists exactly the tracks the tile counts, one row per track and issue.
   d().prepare(`UPDATE track_facet_status SET unmeasurable_reason = 'silent' WHERE track_id = 'x' AND facet = 'loudness'`).run();
+  d().prepare(`UPDATE track_facet_status SET unmeasurable_reason = 'capped-download' WHERE track_id = 'z' AND facet = 'tail'`).run();
   d().prepare(`UPDATE tracks SET file_path = '/music/A/x, "live".flac', analyze_error = 'decode error' WHERE id = 'x'`).run();
   const lines = ov.exportAttentionCsv(d()).trimEnd().split('\r\n');
   assert.equal(lines[0].split(',')[0], 'issue');
   const body = lines.slice(1);
-  assert.equal(body.length, a.unmeasurable + a.yearFailed + a.analysisFailed);
-  assert.deepEqual(body.map(l => l.split(',')[0]), ['analysis-gave-up', 'unreadable', 'year-lookup-failed']);
+  assert.equal(body.length, a.unmeasurable + a.remeasure + a.yearFailed + a.analysisFailed);
+  assert.deepEqual(body.map(l => l.split(',')[0]), ['analysis-gave-up', 're-measure', 'unreadable', 'year-lookup-failed']);
   const unreadable = body.find(l => l.startsWith('unreadable'))!;
   assert.match(unreadable, /loudness: silent/);
   assert.match(unreadable, /tail: not measured/);
   assert.match(unreadable, /"\/music\/A\/x, ""live"".flac"/, 'a path with a comma and quotes stays one RFC4180 field');
+  assert.match(body.find(l => l.startsWith('re-measure'))!, /tail: capped-download/);
   assert.match(body[0], /decode error \(99 failures\)/);
   assert.ok(!body.some(l => l.includes(',y,')), 'a year nobody knows is the Era tab\'s, not this list\'s');
 });
