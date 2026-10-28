@@ -13,7 +13,7 @@
 
 import * as db from './library-db.js';
 import * as blocklist from './blocklist.js';
-import { countEraToReview } from './era-review.js';
+import { countEraToReview, csvField } from './era-review.js';
 import { effectiveMinTrackSec, effectiveTrackLengthLimits, resolveActiveShow } from '../settings.js';
 
 const MIN_RECOUNT_MS = 60_000;
@@ -176,6 +176,57 @@ function readEraToReview(): number {
   return safeCount(() => countEraToReview(db.requireDb()));
 }
 
+// The track parts of "Needs you": one selection each, shared by the count and
+// the CSV below, so the download always lists what the tile counts.
+// `p` is the track_facet_status alias prefix ('s.' in a join).
+const unreadableSql = (p = '') => `${p}status = 'unmeasurable' AND ${p}facet <> 'year'`;
+const yearFailedSql = (p = '') => `${p}status = 'failed' AND ${p}facet = 'year'`;
+
+/**
+ * RFC4180 export of the tracks behind "Needs you" (the Era albums have their
+ * own CSV on the Era tab): one row per track and issue, with what went wrong
+ * and where the file lives, so the operator can open the files themselves.
+ *   unreadable          the analyzer measured nothing for these facets (a
+ *                       silent, corrupt or unusual file); detail = facet: reason
+ *   year-lookup-failed  the original-year lookup errored (not "not found")
+ *   analysis-gave-up    analysis failed MAX_ANALYSIS_FAILURES times in a row
+ */
+export function exportAttentionCsv(d = db.requireDb()): string {
+  const header = 'issue,detail,id,artist,title,album,album_artist,year,file_path,file_suffix,bit_rate,file_size,duration_sec';
+  const cols = `t.id, t.artist, t.title, t.album, t.album_artist, t.year, t.file_path, t.file_suffix, t.bit_rate, t.file_size, t.duration_sec`;
+  type Row = Record<string, unknown> & { issue: string; detail: string | null };
+  const rows: Row[] = [
+    ...(d.prepare(
+      `SELECT 'unreadable' AS issue,
+              group_concat(s.facet || ': ' || COALESCE(s.unmeasurable_reason, s.reason, 'not measured'), '; ') AS detail, ${cols}
+         FROM track_facet_status s JOIN tracks t ON t.id = s.track_id
+        WHERE ${unreadableSql('s.')}
+        GROUP BY t.id`,
+    ).all() as Row[]),
+    ...(d.prepare(
+      `SELECT 'year-lookup-failed' AS issue, COALESCE(s.reason, 'lookup failed') AS detail, ${cols}
+         FROM track_facet_status s JOIN tracks t ON t.id = s.track_id
+        WHERE ${yearFailedSql('s.')}`,
+    ).all() as Row[]),
+    ...(d.prepare(
+      `SELECT 'analysis-gave-up' AS issue,
+              COALESCE(t.analyze_error, 'failed') || ' (' || t.analyze_fail_count || ' failures)' AS detail, ${cols}
+         FROM tracks t WHERE t.analyze_fail_count >= ${db.MAX_ANALYSIS_FAILURES}`,
+    ).all() as Row[]),
+  ];
+  const fold = (v: unknown) => String(v ?? '').toLowerCase();
+  rows.sort((a, b) => a.issue.localeCompare(b.issue) || fold(a.artist).localeCompare(fold(b.artist))
+    || fold(a.album).localeCompare(fold(b.album)) || String(a.id).localeCompare(String(b.id)));
+  const lines = [header];
+  for (const r of rows) {
+    lines.push([
+      r.issue, r.detail, r.id, r.artist, r.title, r.album, r.album_artist, r.year,
+      r.file_path, r.file_suffix, r.bit_rate, r.file_size, r.duration_sec,
+    ].map(csvField).join(','));
+  }
+  return lines.join('\r\n') + '\r\n';
+}
+
 function readAttention(eraAlbums: number): LibraryOverview['attention'] {
   const d = db.requireDb();
   // `year` unmeasurable means no source knows the year: the Era tab already
@@ -183,10 +234,10 @@ function readAttention(eraAlbums: number): LibraryOverview['attention'] {
   // Tracks, not facet rows: one damaged file is often unmeasurable for
   // several facets, and the operator acts on files.
   const unmeasurable = safeCount(() => (d.prepare(
-    `SELECT COUNT(DISTINCT track_id) AS n FROM track_facet_status WHERE status = 'unmeasurable' AND facet <> 'year'`,
+    `SELECT COUNT(DISTINCT track_id) AS n FROM track_facet_status WHERE ${unreadableSql()}`,
   ).get() as { n: number }).n);
   const yearFailed = safeCount(() => (d.prepare(
-    `SELECT COUNT(*) AS n FROM track_facet_status WHERE status = 'failed' AND facet = 'year'`,
+    `SELECT COUNT(*) AS n FROM track_facet_status WHERE ${yearFailedSql()}`,
   ).get() as { n: number }).n);
   const analysisFailed = safeCount(() => db.analysisFailedCount());
   return { eraAlbums, unmeasurable, yearFailed, analysisFailed, total: eraAlbums + unmeasurable + yearFailed + analysisFailed };

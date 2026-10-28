@@ -562,7 +562,7 @@ export function countEraSummary(d: Database): EraSummary {
   };
 }
 
-function csvField(v: unknown): string {
+export function csvField(v: unknown): string {
   if (v == null) return '';
   const s = String(v);
   // Quote only where RFC4180 demands it; keep plain fields bare for the eye.

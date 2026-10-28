@@ -122,6 +122,21 @@ test('the needs-you sum adds analysis failures, unmeasurable facets (not year) a
   assert.equal(a.unmeasurable, 1, 'one track, however many facets; year has its own surface, the Era tab');
   assert.equal(a.yearFailed, 1);
   assert.equal(a.total, a.eraAlbums + a.unmeasurable + a.yearFailed + a.analysisFailed);
+
+  // The CSV lists exactly the tracks the tile counts, one row per track and issue.
+  d().prepare(`UPDATE track_facet_status SET unmeasurable_reason = 'silent' WHERE track_id = 'x' AND facet = 'loudness'`).run();
+  d().prepare(`UPDATE tracks SET file_path = '/music/A/x, "live".flac', analyze_error = 'decode error' WHERE id = 'x'`).run();
+  const lines = ov.exportAttentionCsv(d()).trimEnd().split('\r\n');
+  assert.equal(lines[0].split(',')[0], 'issue');
+  const body = lines.slice(1);
+  assert.equal(body.length, a.unmeasurable + a.yearFailed + a.analysisFailed);
+  assert.deepEqual(body.map(l => l.split(',')[0]), ['analysis-gave-up', 'unreadable', 'year-lookup-failed']);
+  const unreadable = body.find(l => l.startsWith('unreadable'))!;
+  assert.match(unreadable, /loudness: silent/);
+  assert.match(unreadable, /tail: not measured/);
+  assert.match(unreadable, /"\/music\/A\/x, ""live"".flac"/, 'a path with a comma and quotes stays one RFC4180 field');
+  assert.match(body[0], /decode error \(99 failures\)/);
+  assert.ok(!body.some(l => l.includes(',y,')), 'a year nobody knows is the Era tab\'s, not this list\'s');
 });
 
 test('the page never waits: the first read is null and starts a refresh, later reads serve the snapshot', async () => {

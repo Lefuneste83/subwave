@@ -1,12 +1,16 @@
 'use client';
 
-import { useRef, type ReactNode } from 'react';
-import { Ban, History, Library, Radio, Server, TriangleAlert } from 'lucide-react';
+import { useRef, useState, type ReactNode } from 'react';
+import { Ban, Download, History, Library, Radio, Server, TriangleAlert } from 'lucide-react';
 import { useDynamicStyle } from '../../../hooks/useDynamicStyle';
 import { relTime } from '../../../lib/format';
 import { cn } from '../../../lib/cn';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../../ui/tooltip';
 import type { Tab } from './types';
+import { adminResponse } from '../../../lib/admin-query';
+import { notify } from '../../../lib/notify';
+import { Btn } from '../ui';
+import { useLibrary } from './LibraryContext';
 
 // The Library page's counts line: six equal tiles, each its own theme colour,
 // each explained on hover (or keyboard focus). The figures come from the
@@ -84,6 +88,29 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
   scanning: boolean;
   onOpenTab?: (tab: Tab) => void;
 }) {
+  const { adminFetch } = useLibrary();
+  const [downloading, setDownloading] = useState(false);
+  // The tracks behind Needs you (unreadable, year lookup failed, analysis gave
+  // up) as a CSV with their file paths; the Era albums have the Era tab's CSV.
+  const downloadAttention = async () => {
+    setDownloading(true);
+    try {
+      // admin-query-imperative: needs-you-csv-export
+      const r = await adminResponse(adminFetch, '/library/attention/csv');
+      const url = URL.createObjectURL(await r.blob());
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'needs-you-tracks.csv';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      notify.err(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDownloading(false);
+    }
+  };
   const airedRef = useRef<HTMLSpanElement>(null);
   const restRef = useRef<HTMLSpanElement>(null);
   const neverRef = useRef<HTMLSpanElement>(null);
@@ -235,6 +262,23 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
               : gap > 0
                 ? <>The music server has <b className="mono-num">{num(gap)}</b> more: new tracks not in the library yet; the next tagging run walks them in.</>
                 : <>The music server has <b className="mono-num">{num(-gap)}</b> fewer: tracks gone from it since they were mirrored, which Reconcile removes{countedAt ? `, or tracks mirrored after its last count (${relTime(countedAt)} ago)` : ''}.</>}
+        </div>
+      )}
+
+      {a && a.total - a.eraAlbums > 0 && (
+        <div className="lib-counts-check flex flex-wrap items-center gap-2">
+          <span>
+            Needs you: <b className="mono-num">{plural(a.total - a.eraAlbums, 'track')}</b> to look at by hand
+            {' '}({[
+              a.unmeasurable ? `${num(a.unmeasurable)} unreadable` : null,
+              a.yearFailed ? `${num(a.yearFailed)} year lookup failed` : null,
+              a.analysisFailed ? `${num(a.analysisFailed)} analysis gave up` : null,
+            ].filter(Boolean).join(', ')}).
+          </span>
+          <Btn sm onClick={downloadAttention} disabled={downloading}
+            title="Every one of these tracks, what went wrong and where its file lives, as CSV (the Era albums are in the Era tab's own CSV)">
+            <Download size={11} aria-hidden /> {downloading ? 'Preparing…' : 'Download CSV'}
+          </Btn>
         </div>
       )}
     </TooltipProvider>
