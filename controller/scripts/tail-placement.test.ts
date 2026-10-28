@@ -79,6 +79,9 @@ function handler(req: IncomingMessage, res: ServerResponse) {
         return;
       }
       const facets: Record<string, unknown> = {};
+      // The whole-file lane (a regular run's backfill): edges place the tail.
+      if (r.facets.includes('edges')) facets.edges = { status: 'ok', data: { edge_lead_ms: 0, edge_tail_ms: 20_000, decoded_duration_ms: 214_000 } };
+      if (r.facets.includes('loudness')) facets.loudness = { status: 'ok', data: { loudness_lufs: -12, peak_db: -1, sample_peak_db: -1.2, lra_lu: 6, loudness_version: 2 } };
       if (r.facets.includes('tail') && tw && placedMiss) {
         facets.tail = { status: 'unmeasurable', reason: 'tail-not-reached' };
       } else if (r.facets.includes('tail')) {
@@ -119,6 +122,7 @@ const P = await import('../src/music/acoustics-plan.js');
 const { runAnalysisPass } = await import('../src/music/analyze.js');
 const analyzer = await import('../src/music/analyzer.js');
 const { checkFacets } = await import('../src/music/facet-check.js');
+const { config } = await import('../src/config.js');
 const { MAX_ANALYSIS_FAILURES } = await import('../src/music/analyze-capability.js');
 await db.open({ embeddingDim: 8, adoptStoredDim: true });
 await analyzer.isAvailable();
@@ -523,4 +527,29 @@ test('the planner explains where the tail window comes from', () => {
   const p = plan(['w1']);
   const note = p.warnings.find((w) => w.startsWith('tail:'));
   assert.ok(note && /edges/.test(note) && !/byte-capped/.test(note), p.warnings.join('\n'));
+});
+
+test('a regular run measures the edges first, so a NEW track\'s tail is placed on its one read', async () => {
+  // A track the walk just added: no analysis, no edges. With the whole-file
+  // backfill on, the run must measure its edges BEFORE the regular pass reads
+  // its tail; the other way round the tail is read off the end of the file,
+  // stored one version below, and nothing in the run goes back to it.
+  db.upsertTrackMeta('fresh1', { title: 'fresh1', artist: 'A', album: 'B', duration: 214 });
+  assert.equal(db.getTrack('fresh1')?.decodedDurationMs ?? null, null);
+  (config.analyzer as { wholeFile: boolean }).wholeFile = true;
+  try {
+    requests.length = 0;
+    await runAnalysisPass({ vocalBackfill: false, audioBackfill: false });
+  } finally {
+    (config.analyzer as { wholeFile: boolean }).wholeFile = false;
+  }
+  const mine = (q: Record<string, unknown>) => JSON.stringify(q).includes('fresh1');
+  const edgesAt = requests.findIndex((q) => mine(q) && Array.isArray(q.facets) && (q.facets as string[]).includes('edges'));
+  const flatAt = requests.findIndex((q) => mine(q) && !q.facets);
+  assert.ok(edgesAt >= 0 && flatAt >= 0, JSON.stringify(requests));
+  assert.ok(edgesAt < flatAt, `edges asked at ${edgesAt}, the tail read at ${flatAt}`);
+  assert.deepEqual(requests[flatAt].tail_window, { end_ms: 194_000, duration_ms: 214_000 });
+  assert.equal(tailVersionCol('fresh1'), 3);
+  assert.deepEqual([tailRow('fresh1')?.status, tailRow('fresh1')?.version], ['ok', 3]);
+  consistent();
 });

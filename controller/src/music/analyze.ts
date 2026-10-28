@@ -235,21 +235,35 @@ function hasMeasuredTail(t: { outro?: unknown; tailSilenceMs?: number | null } |
 }
 
 export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<AnalyzeStats> {
-  const stats = await runAnalysisPassOnce(opts);
+  if (opts.plan) return runAnalysisPassOnce(opts);
   // The whole-file facets ride a regular run only when the operator opted in,
-  // as one more facet plan after it (same quiet gate, same failure rules).
-  if (opts.plan || !stats.available) return stats;
-  const plan = await wholeFileBackfillPlan(opts.limit);
-  if (!plan) return stats;
+  // as a facet plan run BEFORE the regular pass (same quiet gate, same failure
+  // rules). Order matters: the regular pass places each track's tail window
+  // from its stored edges (analyzer.tailWindowFor). Measured after it, a new
+  // track's edges arrive too late: its tail is read off the end of the file,
+  // stored one version below, and nothing in the run goes back to it. First,
+  // the edges are there when the tail is read, so it is placed on the one read.
+  // It is also the cheap lane (ffmpeg only, its own wider concurrency) ahead of
+  // the model work.
+  const wholeFile = await runWholeFileBackfill(opts.limit);
+  const stats = await runAnalysisPassOnce(opts);
+  return wholeFile ? { ...stats, wholeFile } : stats;
+}
+
+async function runWholeFileBackfill(limit?: number): Promise<AnalyzeStats['wholeFile'] | null> {
+  if (!config.analyzer.wholeFile) return null;
+  if (!(await analyzer.isAvailable().catch(() => false))) return null;
+  const plan = await wholeFileBackfillPlan(limit);
+  if (!plan) return null;
   const skipped = plan.byFacet.reduce((n, c) => n + (c.skipped['no-whole-file'] ?? 0), 0);
   if (skipped > 0 && plan.items.length === 0) {
     logEvent('warning', 'Whole-file analysis is on, but the analyzer does not offer it (no ffmpeg, or an image that predates it) — rebuild the analyzer');
-    return stats;
+    return null;
   }
-  if (plan.items.length === 0) return stats;
+  if (plan.items.length === 0) return null;
   logEvent('info', `Whole-file loudness + edges: ${plan.items.length.toLocaleString('en-GB')} tracks to measure`);
   const whole = await runAnalysisPassOnce({ plan });
-  return { ...stats, wholeFile: { analyzed: whole.analyzed, failed: whole.failed, scope: whole.scope } };
+  return { analyzed: whole.analyzed, failed: whole.failed, scope: whole.scope };
 }
 
 async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeStats> {
