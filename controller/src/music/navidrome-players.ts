@@ -38,7 +38,7 @@ function baseUrl(): string {
   return String(config.navidrome.url || '').replace(/\/+$/, '');
 }
 
-async function nativeFetch(path: string, init: RequestInit & { token?: string } = {}): Promise<Response> {
+export async function nativeFetch(path: string, init: RequestInit & { token?: string } = {}): Promise<Response> {
   const { token, headers, ...rest } = init;
   let res: Response;
   try {
@@ -60,7 +60,7 @@ async function nativeFetch(path: string, init: RequestInit & { token?: string } 
   return res;
 }
 
-async function login(): Promise<string> {
+export async function login(): Promise<string> {
   const res = await nativeFetch('/auth/login', {
     method: 'POST',
     body: JSON.stringify({ username: config.navidrome.user, password: config.navidrome.password }),

@@ -11,6 +11,7 @@ import { loadSecretsIntoEnv } from '../../setup/secrets.js';
 import { loadNavidromeConfig } from '../../setup/config.js';
 import { reportProgress, reportCatalogueReady } from '../tagger-progress.js';
 import { logEvent } from './log.js';
+import { changedAfterMeasure } from '../replaced-file-policy.js';
 import { backfillOriginalYears, pendingOriginalYearIds } from './enrich.js';
 
 function parseIntFlag(args: string[], name: string): number | null {
@@ -186,19 +187,37 @@ export async function walkNavidrome(): Promise<{ walked: number; liveIds: Set<st
     }
   }
   logEvent('info', `Scanned ${walked.toLocaleString('en-GB')} tracks`);
+  // A repaired file can keep its exact size: Navidrome's own change time
+  // catches it (replaced-file-policy.changedAfterMeasure). Navidrome-only and
+  // best-effort: null = the size check alone.
+  // An empty walk (an outage that listed nothing) asks nothing more of the server.
+  const fileChanges = walked === 0 ? null
+    : await import('../file-changes.js').then(m => m.changedFiles(db.earliestMeasuredAt())).catch(() => null);
+  if (fileChanges) {
+    const seen = new Set(replaced);
+    for (const c of fileChanges.changes) {
+      if (seen.has(c.id) || !liveIds.has(c.id)) continue;
+      if (!changedAfterMeasure(c.updatedAt, db.lastMeasuredAt(c.id))) continue;
+      db.clearTrackAudio(c.id);
+      replaced.push(c.id);
+      seen.add(c.id);
+    }
+  }
   if (replaced.length > 0) {
     const stems = await import('../stem-cache.js')
       .then(m => m.forgetStems(replaced))
       .catch((err: unknown) => ({ removed: 0, failed: replaced.length, offline: String((err as Error)?.message ?? err) }));
     logEvent(
       'info',
-      `${replaced.length.toLocaleString('en-GB')} file(s) replaced at the same path (size changed): ` +
+      `${replaced.length.toLocaleString('en-GB')} file(s) replaced at the same path since they were measured: ` +
         'their audio analysis is due again' +
         (stems.removed ? `, ${stems.removed} stem set(s) dropped` : '') +
         (stems.failed ? `, ${stems.failed} stem dir(s) could not be removed` : '') +
         (stems.offline ? ` (stem cache offline: ${stems.offline})` : ''),
     );
   }
+  // Only once acted on: a walk that dies before here asks again from the old mark.
+  if (fileChanges?.complete) await import('../file-changes.js').then(m => m.saveMark(fileChanges.newest)).catch(() => {});
   const suspect = [...eraReasons.values()].reduce((a, b) => a + b, 0);
   if (suspect) {
     const breakdown = [...eraReasons.entries()]
