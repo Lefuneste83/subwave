@@ -536,6 +536,9 @@ test('a regular run measures the edges first, so a NEW track\'s tail is placed o
   // stored one version below, and nothing in the run goes back to it.
   db.upsertTrackMeta('fresh1', { title: 'fresh1', artist: 'A', album: 'B', duration: 214 });
   assert.equal(db.getTrack('fresh1')?.decodedDurationMs ?? null, null);
+  // An already-analysed track that only lacks the whole-file facets: the rest
+  // of the backfill, which must not hold the new track's analysis back.
+  track('old1');
   (config.analyzer as { wholeFile: boolean }).wholeFile = true;
   try {
     requests.length = 0;
@@ -548,6 +551,8 @@ test('a regular run measures the edges first, so a NEW track\'s tail is placed o
   const flatAt = requests.findIndex((q) => mine(q) && !q.facets);
   assert.ok(edgesAt >= 0 && flatAt >= 0, JSON.stringify(requests));
   assert.ok(edgesAt < flatAt, `edges asked at ${edgesAt}, the tail read at ${flatAt}`);
+  const oldEdgesAt = requests.findIndex((q) => JSON.stringify(q).includes('old1') && Array.isArray(q.facets) && (q.facets as string[]).includes('edges'));
+  assert.ok(oldEdgesAt > flatAt, `the library backfill (old1 at ${oldEdgesAt}) runs after the regular pass (${flatAt})`);
   assert.deepEqual(requests[flatAt].tail_window, { end_ms: 194_000, duration_ms: 214_000 });
   assert.equal(tailVersionCol('fresh1'), 3);
   assert.deepEqual([tailRow('fresh1')?.status, tailRow('fresh1')?.version], ['ok', 3]);

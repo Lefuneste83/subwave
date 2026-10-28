@@ -528,13 +528,17 @@ A request for both pays one decode; constant memory. Seven rules:
    planned into a pass that can only write a window figure.
 7. **They run when asked**, through the planner (`npm run analyze -- --facets
    loudness,edges`, `--where`, `--ids`), plus an opt-in backfill:
-   `ANALYZE_WHOLE_FILE=1` makes every regular analysis run START with the same
-   plan over the tracks that need either facet (`wholeFileBackfillPlan`), under
-   the same quiet gate and failure rules. It runs first because the regular
-   pass places each track's tail window from its stored edges: run after it, a
-   new track's tail was read off the end of the file before its edges existed,
-   stored one version below, and left there (a GUI import of 196 tracks left 179
-   such tails); it also puts the cheap ffmpeg lane ahead of the model work; it widens only on an analyzer that
+   `ANALYZE_WHOLE_FILE=1` makes every regular analysis run measure the same
+   plan (`wholeFileBackfillPlan`, same quiet gate and failure rules) in two
+   slices: FIRST for the tracks the regular pass is about to analyse, then,
+   after it, for the rest of the library that still needs either facet. The
+   first slice exists because the regular pass places each track's tail window
+   from its stored edges: measured after it, a new track's tail was read off
+   the end of the file before its edges existed, stored one version below, and
+   left there (a GUI import of 196 tracks left 179 such tails). The rest stays
+   after, so a library-wide backfill (the lane switched on, a loudness version
+   bump) never holds a new track's analysis back for hours. A whole-file slice
+   that throws is logged and skipped, never fatal to the regular pass; it widens only on an analyzer that
    positively reports the capability. Off by default, so an upgrade is
    byte-identical: a first library pass reads every file once. Requests carrying
    them get `ANALYZE_WHOLE_FILE_TIMEOUT_MS` (960 s), above the worker's own
