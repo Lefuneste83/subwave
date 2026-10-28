@@ -570,6 +570,30 @@ function withPriorities(
 // Evict by ascending stem priority, then mtime, until the byte budget fits. Report failedDirs
 // and overBudgetBytes so callers can expose deletion failures; retry failed deletions next
 // sweep. #1257.
+// Drop the stem dirs of tracks whose file was replaced at the same path
+// (library-db.clearTrackAudio cleared their stamps): the render is cache-hit-
+// only (hasWindow), so stems cut from the old audio would otherwise keep
+// playing under the new file. Never touches an offline root (an unmounted
+// share). Best-effort, like the sweep: a dir that refuses is counted, and its
+// cleared stamp has the backfill separate the track again either way.
+export async function forgetStems(trackIds: readonly string[]): Promise<{ removed: number; failed: number; offline?: string }> {
+  if (trackIds.length === 0) return { removed: 0, failed: 0 };
+  const root = await stemsRootStatus({ readOnly: true });
+  if (!root.online) return { removed: 0, failed: 0, offline: root.message };
+  let removed = 0;
+  let failed = 0;
+  for (const id of trackIds) {
+    const dir = dirFor(id);
+    const there = await stat(dir).then(() => true, () => false);
+    if (!there) continue;
+    try {
+      await rm(dir, { recursive: true, force: true });
+      removed += 1;
+    } catch { failed += 1; }
+  }
+  return { removed, failed };
+}
+
 export async function sweep(budget = budgetBytes(), { force = false }: { force?: boolean } = {}): Promise<{
   removed: number;
   freedBytes: number;
