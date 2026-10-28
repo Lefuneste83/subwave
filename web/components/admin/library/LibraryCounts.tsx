@@ -263,7 +263,9 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
             : gap === 0
               ? 'The music server agrees.'
               : gap > 0
-                ? <>The music server has <b className="mono-num">{num(gap)}</b> more: new tracks not in the library yet; the next tagging run walks them in.</>
+                // Good news, so it reads in the same green as a finished run
+                // (LibraryTaggingPanel's success line).
+                ? <span className="text-emerald-500">The music server has <b className="mono-num">{num(gap)}</b> new {gap === 1 ? 'track' : 'tracks'} ready to import: the next tagging run walks {gap === 1 ? 'it' : 'them'} in.</span>
                 : <>The music server has <b className="mono-num">{num(-gap)}</b> fewer: tracks gone from it since they were mirrored, which Reconcile removes{countedAt ? `, or tracks mirrored after its last count (${relTime(countedAt)} ago)` : ''}.</>}
         </div>
       )}
