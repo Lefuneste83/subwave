@@ -2575,26 +2575,31 @@ MEASURE_MAX_RATE = 48000
 _PROBE_TIMEOUT_S = 30
 
 
-def probe_sample_rate(src, limit=None):
-    """The first audio stream's sample rate (ffprobe, the header only), or None
-    on any failure: the caller then measures at the file's own rate, as it did
-    before the cap. Never logs ffprobe's output (a URL carries credentials)."""
+def probe_audio_format(src, limit=None):
+    """(sample_rate, channels) of the first audio stream (ffprobe, the header
+    only); either is None on any failure, and the caller then measures the
+    file as it is, as it did before. Never logs ffprobe's output (a URL
+    carries credentials)."""
     if not shutil.which("ffprobe"):
-        return None
+        return None, None
     try:
         r = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate",
-             "-of", "csv=p=0", src],
+            ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate,channels",
+             "-of", "default=noprint_wrappers=1", src],
             stdin=subprocess.DEVNULL, capture_output=True, text=True,
             timeout=min(_PROBE_TIMEOUT_S, limit or _PROBE_TIMEOUT_S))
     except (OSError, subprocess.SubprocessError):
-        return None
+        return None, None
     if r.returncode != 0:
-        return None
-    try:
-        return int(r.stdout.strip().splitlines()[0])
-    except (ValueError, IndexError):
-        return None
+        return None, None
+    fields = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
+
+    def num(k):
+        try:
+            return int(fields.get(k, ""))
+        except ValueError:
+            return None
+    return num("sample_rate"), num("channels")
 
 
 WHOLE_CURVE_STEP_MS = 1000
@@ -2744,7 +2749,7 @@ class EdgeScanner:
 
 def measure_whole_file(src, loudness=True, edges_wanted=True, timeout_s=None):
     """One ffmpeg pass over the whole of `src` (a URL or a local path) at its
-    native rate, capped at MEASURE_MAX_RATE (48 kHz). Returns {"loudness": {loudness_lufs, lra_lu, sample_peak_db,
+    native rate, as it airs: stereo, capped at MEASURE_MAX_RATE (48 kHz). Returns {"loudness": {loudness_lufs, lra_lu, sample_peak_db,
     true_peak_db} | None, "edges": (lead_ms, tail_ms, duration_ms) | None,
     "seconds"}. Loudness and true peak are both set or both None (digital
     silence), never one without the other. Raises on any ffmpeg failure, so the
@@ -2756,17 +2761,28 @@ def measure_whole_file(src, loudness=True, edges_wanted=True, timeout_s=None):
     limit = timeout_s or WHOLE_FILE_TIMEOUT_S
     cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-threads", "1",
            "-i", src, "-map", "0:a:0", "-vn"]
-    # Capped at 48 kHz: ffmpeg's ebur128 takes any rate, so a DSD source
-    # decoded at 352.8 kHz has its ultrasonic noise (the DSD noise shaping)
-    # K-weighted into the reading: a fade levels off near -27 LUFS instead of
-    # falling to silence, and the edges scan never finds silence at either
-    # end. Only a source above the cap is resampled, so a 44.1/48 kHz file
-    # runs exactly the command it always did. The rate comes from a probe
-    # first: ffmpeg 5.1 cannot negotiate a LIST of rates (aformat with several
-    # sample_rates fails with "Error reinitializing filters" on a 96 kHz
-    # input), and an unknown rate is measured as before.
+    # Measured as it airs: stereo, at 48 kHz at most. Both come from a probe
+    # of the header first, and a file already stereo (or mono) at 48 kHz or
+    # below runs exactly the command it always did; a failed probe measures
+    # the file as it is, as before.
+    # - More than two channels (a 5.1 FLAC): ebur128 weights all six, while
+    #   the station airs Liquidsoap's stereo downmix, so the figure read about
+    #   4 dB louder than the air. The downmix runs in float (sample_fmts=dbl):
+    #   ffmpeg normalises a downmix only into integer samples, which read 7.6
+    #   dB under Liquidsoap's (fronts 1, centre and surrounds 0.707, no LFE,
+    #   unnormalised). Mono needs nothing: ebur128 reads it as Liquidsoap's
+    #   upmix airs it (within 0.1 dB).
+    # - Above 48 kHz: ebur128 takes any rate, so a DSD source decoded at
+    #   352.8 kHz had its ultrasonic noise (the DSD noise shaping) K-weighted
+    #   into the reading: a fade levelled off near -27 LUFS instead of falling
+    #   to silence, and the edges scan found no silence at either end. ffmpeg
+    #   5.1 cannot negotiate a LIST of rates (aformat with several
+    #   sample_rates fails with "Error reinitializing filters" on a 96 kHz
+    #   input), hence the probe and one fixed target.
     filters = []
-    rate = probe_sample_rate(src, limit)
+    rate, channels = probe_audio_format(src, limit)
+    if channels is not None and channels > 2:
+        filters.append("aformat=sample_fmts=dbl:channel_layouts=stereo")
     if rate is not None and rate > MEASURE_MAX_RATE:
         filters.append(f"aresample={MEASURE_MAX_RATE}")
     if loudness:
