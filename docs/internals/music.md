@@ -492,7 +492,7 @@ at its native rate in ONE ffmpeg run per track (`analyze_worker.py`
 loudness, true peak, sample peak and LRA, and the same decoded audio leaves on
 stdout as float PCM, which `EdgeScanner` reads for the first and last sample
 frame at or above the absolute `SILENCE_DBFS` floor and for the decoded length.
-A request for both pays one decode; constant memory. Seven rules:
+A request for both pays one decode; constant memory. Nine rules:
 
 1. **The loudness version is the measurement's own.** Every head analysis still
    writes the analysis window's figure (first `ANALYZE_SECONDS` at
@@ -566,13 +566,33 @@ A request for both pays one decode; constant memory. Seven rules:
    whole-file facets sends that many at once instead of `ANALYZE_CONCURRENCY`.
    A request mixing them with a window facet stays in the pool: one decode of
    the capped copy for the window, one whole-file decode.
+9. **The loudness answer carries its short-term curve, stored raw.** The same
+   `ebur128` filter prints a short-term loudness S (EBU R128: K-weighted, 3 s
+   window, stamped at the window's end) every 100 ms at the verbose log level,
+   so the run logs at it and `loudness_curve_from_frames` keeps three series,
+   in tenths of a dB with silence at -100 LUFS: `whole` (one point a second over
+   the whole track), `head` (from 3 s to 30 s after the music starts) and
+   `tail` (from 30 s before the music stops to 5 s after it), both every 0.5 s.
+   "Starts"/"stops" are the first and last points above the BS.1770 absolute
+   gate (-70 LUFS), so a long silent tail never leaves the fine window on
+   silence. Stored as `loudness_curve_json` with every v2 figure
+   (`music/whole-loudness-curve.ts` is the one parser); nothing reads it yet:
+   level features (fade or cold ending, outro start, an energy envelope) become
+   computations on it, with no re-decode. A v2 figure stored WITHOUT a curve (an
+   analyzer that predates it) is derived one version below with reason
+   `no-curve`, and re-planned only on an analyzer that reports
+   `loudness_curve_capable` / `analyze_loudness_curve_capable` (skip `no-curve`):
+   an older one would answer without it again, every run. A file shorter than
+   one window stores an empty `whole` series and settles; an answer with no
+   per-frame line at all stores none and stays due.
 
 Pinned by `scripts/analyzer_whole_file_test.py` (parsers, chunk-independent edge
 scan, the absolute floor, one decode for both, the source rule, a real ffmpeg
 run when one is on PATH), `scripts/whole-file-facets.test.ts` (versions, no
 overwrite, clear, step 29 on a database that already has `loudness_version`),
 `scripts/whole-file-pass.test.ts` (capability skip, no staging, `stream_url`,
-the opt-in backfill) and `scripts/silence-trim-library.test.ts` (edges outrank
+the opt-in backfill), the curve cases in both (parsing the per-frame lines,
+the three series, the `no-curve` rule and its capability skip) and `scripts/silence-trim-library.test.ts` (edges outrank
 the window figures).
 
 **The tail facet is placed from the edges (tail v2).** The end-of-file tail

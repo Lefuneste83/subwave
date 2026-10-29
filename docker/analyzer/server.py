@@ -723,6 +723,9 @@ async def health():
         # the decoded length): needs ffmpeg in the worker image. None on older
         # workers, which never emit the key.
         "analyze_whole_file_capable": analyzer_pool.capability("whole_file_capable", "whole_file"),
+        # Whole-file loudness answers carry the short-term loudness curve
+        # (`loudness_curve`). None on older workers, which never emit the key.
+        "analyze_loudness_curve_capable": analyzer_pool.capability("loudness_curve_capable", "whole_file"),
         # How many whole-file requests this host runs at once (its own lane).
         "analyze_whole_file_concurrency": WHOLE_FILE_CONCURRENCY,
         # Best-effort residency (#1204): whether CLAP/Demucs are believed

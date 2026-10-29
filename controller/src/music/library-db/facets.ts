@@ -130,6 +130,7 @@ export interface FacetSourceRow {
   has_vocal: number;         // vocal_ranges_json IS NOT NULL ('[]' is measured, counts)
   has_stems: number;         // stems_at IS NOT NULL
   loudness_version: number;  // COALESCE(loudness_version, 1): which measurement loudness_lufs is
+  has_loudness_curve?: number; // loudness_curve_json IS NOT NULL (the whole-file pass's curve)
   has_edges: number;         // decoded_duration_ms IS NOT NULL
   edge_tail_ms: number | null;
   tail_version: number | null; // 2 = a tail window the analyzer placed from the edges, 3 = with the loudness curve
@@ -150,6 +151,7 @@ export const FACET_SOURCE_SELECT =
    vocal_ranges_json IS NOT NULL                      AS has_vocal,
    stems_at IS NOT NULL                               AS has_stems,
    COALESCE(loudness_version, 1)                      AS loudness_version,
+   loudness_curve_json IS NOT NULL                    AS has_loudness_curve,
    decoded_duration_ms IS NOT NULL                    AS has_edges,
    edge_tail_ms, tail_version,
    analyze_fail_count, analyze_error,
@@ -217,7 +219,12 @@ export function deriveFacetRows(
   // A window figure stays at v1 (due for the whole-file pass); the whole-file
   // one carries its own version.
   if (row.has_loudness) {
-    ok('loudness', null, row.loudness_version || 1);
+    // A whole-file figure stored without its curve (an analyzer that predates
+    // it) stays one version below: re-planned for the curve, but only on an
+    // analyzer that reports one (acoustics-plan, `no-curve`).
+    const v = row.loudness_version || 1;
+    if (v >= 2 && !row.has_loudness_curve) ok('loudness', 'no-curve', v - 1);
+    else ok('loudness', null, v);
     out[out.length - 1]!.measuredVersion = true;
   }
   else if (analysed) unmeasurable('loudness', 'not-measured');
@@ -399,7 +406,9 @@ function syncTrackFacetsOn(d: Database.Database, id: string, opts: SyncOpts): vo
     // re-measure the facet keeps it. Vocal reasons describe the current
     // columns instead, so a previously lost tail cannot retain a stale null
     // reason. A failure's reason is the latest error.
-    if (!isFresh && prev && prev.status === r.status && r.status !== 'failed' && r.facet !== 'vocal' && r.facet !== 'year') r.reason = prev.reason;
+    // An ok loudness row's reason (`no-curve`) describes the columns too.
+    if (!isFresh && prev && prev.status === r.status && r.status !== 'failed' && r.facet !== 'vocal' && r.facet !== 'year' &&
+      !(r.facet === 'loudness' && r.status === 'ok')) r.reason = prev.reason;
     // Measuring edges re-decides which window a stored tail sits on (the
     // tolerance in tailVersionOf), so that is taken as is too: otherwise every
     // track whose edges arrive after this table was derived stays planned for
@@ -455,8 +464,10 @@ export function facetDerivationStamp(): string {
   // reads the tail's version off its columns (tailVersionOf). Revision 4
   // re-opens a 'capped-download' tail an earlier derivation had settled.
   // Revision 5 settles the tail of a file the edges scan found silent.
+  // Revision 6 reopens a whole-file loudness figure stored before the curve
+  // (`no-curve`, one version below): the stations that ran the pass early.
   // Adding a facet (year) changes FACET_VERSIONS, which re-derives on its own.
-  return JSON.stringify({ revision: 5, analysis: ANALYSIS_VERSION, facets: FACET_VERSIONS });
+  return JSON.stringify({ revision: 6, analysis: ANALYSIS_VERSION, facets: FACET_VERSIONS });
 }
 
 function readFacetStamp(d: Database.Database): string | null {

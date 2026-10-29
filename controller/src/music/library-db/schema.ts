@@ -498,6 +498,7 @@ export async function migrate(embeddingDim: number, reseed = false, adoptStoredD
     d.pragma('user_version = 30');
   }
   ensureFileInfoColumns(d);
+  ensureLoudnessCurveColumn(d);
 
   if (userVersion < 31) {
     // `tail_version` says which window outro_json/tail_silence_ms/tail_start_ms
@@ -734,6 +735,14 @@ function vecCount(d: Database.Database): number {
 // size in bytes and bitrate in kbps. Added by name when missing rather than as
 // a numbered migration, so it can't collide with a user_version a parallel
 // change claims; idempotent, and a few MB on a 76k-track library.
+// The whole-file pass's loudness curve (upstream #2041 adds it to its step
+// 32). This fork ran its whole-file step long before the curve existed, so the
+// column is added by name here, idempotent, like the file facts below.
+function ensureLoudnessCurveColumn(d: Database.Database): void {
+  const have = new Set((d.pragma('table_info(tracks)') as Array<{ name: string }>).map((c) => c.name));
+  if (!have.has('loudness_curve_json')) d.exec('ALTER TABLE tracks ADD COLUMN loudness_curve_json TEXT');
+}
+
 function ensureFileInfoColumns(d: Database.Database): void {
   const have = new Set((d.pragma('table_info(tracks)') as Array<{ name: string }>).map((c) => c.name));
   const wanted: Array<[string, string]> = [

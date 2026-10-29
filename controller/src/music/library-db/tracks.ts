@@ -12,6 +12,7 @@ import { resolveEraYear } from '../era-year.js';
 import { eraSuspectSql, storedYearUntrusted } from '../era-suspect.js';
 import { MAX_ANALYSIS_FAILURES, analysisFailureExclusion } from '../analyze-capability.js';
 import { fileReplaced } from '../replaced-file-policy.js';
+import type { WholeLoudnessCurve } from '../whole-loudness-curve.js';
 
 export { MAX_ANALYSIS_FAILURES, analysisFailureExclusion } from '../analyze-capability.js';
 
@@ -672,6 +673,9 @@ export interface FacetWrite {
     samplePeakDb?: number | null;
     loudnessRangeLu?: number | null;
     version?: number | null;
+    // The same pass's short-term curve (whole-loudness-curve.ts); a v2 figure
+    // stored without one stays one version below (facets.ts, `no-curve`).
+    curve?: WholeLoudnessCurve | null;
   } | { unmeasurable: string };
   // `version` 2 = the analyzer placed the window from the stored edges (3 with
   // the loudness curve, facets.placedTailVersion); absent = the end-of-file
@@ -732,12 +736,12 @@ export function writeFacetResults(id: string, w: FacetWrite): void {
           // Loudness and true peak are one measurement: written together.
           d.prepare(
             `UPDATE tracks SET loudness_lufs = ?, peak_db = ?, sample_peak_db = ?, loudness_range_lu = ?,
-               loudness_version = ? WHERE id = ?`,
+               loudness_version = ?, loudness_curve_json = ? WHERE id = ?`,
           ).run(finite(l.loudnessLufs), finite(l.peakDb), finite(l.samplePeakDb), finite(l.loudnessRangeLu),
-            Math.round(version), id);
+            Math.round(version), l.curve ? JSON.stringify(l.curve) : null, id);
           fresh.push('loudness');
         } else if (!hasWholeFileLoudness(id)) {
-          d.prepare('UPDATE tracks SET loudness_lufs = ?, peak_db = ?, loudness_version = NULL WHERE id = ?')
+          d.prepare('UPDATE tracks SET loudness_lufs = ?, peak_db = ?, loudness_version = NULL, loudness_curve_json = NULL WHERE id = ?')
             .run(finite(l.loudnessLufs), finite(l.peakDb), id);
           fresh.push('loudness');
         }
