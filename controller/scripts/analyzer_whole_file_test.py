@@ -410,6 +410,38 @@ def t_real_ffmpeg_prints_the_curve():
     assert got["edges"][2] == 9500, "edges still read off the same decode"
 
 
+def t_real_ffmpeg_caps_the_rate_so_ultrasonic_noise_reads_as_silence():
+    # A DSD source decodes at 352.8 kHz with loud noise above the audio band;
+    # here a 96 kHz file whose tone stops at 4.5 s and a 30 kHz sine at
+    # -20 dBFS runs on to 8 s. Measured at the file's rate the sine kept the
+    # curve near -30 LUFS and the edges scan found no trailing silence.
+    if not shutil.which("ffmpeg"):
+        print("      (skipped: no ffmpeg on PATH)")
+        return
+    sr = 96000
+    n = 8 * sr
+    t = np.arange(n, dtype=np.float64) / sr
+    tone = np.where((t >= 0.5) & (t < 4.5), amp_db(-6.0) * np.sin(2 * np.pi * 1000.0 * t), 0.0)
+    # The noise ends with a 0.2 s fade as a real file does: a 30 kHz sine cut
+    # dead at the last sample rings through the resampler's final 10 ms.
+    fade_out = np.clip((8.0 - t) / 0.2, 0.0, 1.0)
+    ultra = np.where(t >= 0.5, amp_db(-20.0) * np.sin(2 * np.pi * 30000.0 * t), 0.0) * fade_out
+    mono = (tone + ultra).astype(np.float32)
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "hires.wav")
+        write_wav(path, np.stack([mono, mono], axis=1).reshape(-1), sr)
+        got = aw.measure_whole_file(path, loudness=True, edges_wanted=True, timeout_s=60)
+    lead, tail, duration = got["edges"]
+    assert abs(duration - 8000) <= 25, got["edges"]
+    assert abs(tail - 3500) <= 150, f"trailing silence after the tone: {got['edges']}"
+    curve = got["loudness"]["loudness_curve"]["whole"]["lufs"]
+    assert curve[-1] < -600, f"the curve falls to silence once the tone stops: {curve}"
+
+
+def t_probe_failure_measures_at_the_files_own_rate():
+    assert aw.probe_sample_rate("/nonexistent/file.flac") is None
+
+
 def t_real_ffmpeg_failure_raises_with_the_reason():
     if not shutil.which("ffmpeg"):
         print("      (skipped: no ffmpeg on PATH)")
