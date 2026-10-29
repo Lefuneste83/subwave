@@ -145,7 +145,11 @@ def facet_parity(flat, facets):
             # A complete file's loudness is the whole-file measurement (v2),
             # which the flat response never makes: check its shape, not parity.
             whole = {"loudness_lufs", "peak_db", "sample_peak_db", "lra_lu", "loudness_version"}
-            if set(data) != whole or not all(isinstance(data[k], (int, float)) for k in whole):
+            # The same pass's short-term curve rides along (whole + both ends).
+            curve = data.get("loudness_curve")
+            curve_ok = isinstance(curve, dict) and isinstance((curve.get("whole") or {}).get("lufs"), list)
+            if set(data) != whole | {"loudness_curve"} or not curve_ok or \
+                    not all(isinstance(data[k], (int, float)) for k in whole):
                 problems.append(f"whole-file loudness malformed: {data}")
             continue
         if cell.get("status") == "ok":

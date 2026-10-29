@@ -2229,6 +2229,83 @@ def parse_ebur128_summary(text):
     return {"loudness_lufs": lufs, "lra_lu": lra, "sample_peak_db": sample_peak, "true_peak_db": true_peak}
 
 
+# The loudness curve (loudness v2, `loudness_curve`): the ebur128 filter of the
+# same decode prints a short-term loudness S every 100 ms (EBU R128: K-weighted,
+# 3 s window, stamped at the END of the window) at the verbose log level; the
+# summary above is all the facet kept until now. Stored raw, so every level
+# feature (fade or cold ending, outro start, an energy envelope) becomes a
+# controller computation on the stored curve, with no re-decode:
+#   whole  the whole track, one point a second (coarse shape);
+#   head   from 3 s (the first full window) to 30 s after the music starts;
+#   tail   from 30 s before the music stops to 5 s after it, both every 0.5 s.
+# "Starts"/"stops" = the first/last point above the BS.1770 absolute gate
+# (-70 LUFS), so a long silent tail (a hidden track) does not leave the fine
+# window on silence. Points are tenths of a dB as ints, silence (S below the
+# floor, -inf, nan, or the filter's -120.7 before its window fills) at the floor.
+WHOLE_CURVE_STEP_MS = 1000
+END_CURVE_STEP_MS = 500
+END_CURVE_SPAN_MS = 30_000
+END_CURVE_PAST_END_MS = 5_000
+CURVE_WINDOW_MS = 3000
+CURVE_FLOOR_TENTHS = -1000
+_CURVE_GATE_TENTHS = -700
+_EBUR128_FRAME_RE = re.compile(r"\bt:\s*([0-9.]+)\s+TARGET:.*?\bS:\s*(-?inf|nan|-?[0-9.]+)")
+
+
+def parse_ebur128_frames(text):
+    """{index: tenths} of the per-frame short-term loudness, index = t in
+    100 ms steps (ffmpeg stamps t just under each tenth). Pure."""
+    frames = {}
+    for m in _EBUR128_FRAME_RE.finditer(text or ""):
+        try:
+            idx = int(round(float(m.group(1)) * 10.0))
+            raw = m.group(2)
+            v = None if raw in ("-inf", "inf", "nan") else float(raw)
+        except ValueError:
+            continue
+        tenths = CURVE_FLOOR_TENTHS if v is None else max(CURVE_FLOOR_TENTHS, int(round(v * 10.0)))
+        frames[idx] = tenths
+    return frames
+
+
+def loudness_curve_from_frames(frames):
+    """{whole, head, tail}: each {startMs, stepMs, lufs: [int tenths]} (head
+    and tail absent when nothing rises above the gate), or None without a full
+    window. Pure: the whole-file answer's `loudness_curve`."""
+    first_idx = CURVE_WINDOW_MS // 100
+    if not frames:
+        # No per-frame line at all: the log level or the build did not print
+        # them. None keeps the facet due rather than settling on nothing.
+        return None
+    last = max(frames)
+    if last < first_idx:
+        # Shorter than one full window: measured, and nothing to plot.
+        return {"whole": {"startMs": CURVE_WINDOW_MS, "stepMs": WHOLE_CURVE_STEP_MS, "lufs": []}}
+
+    def at(i):
+        if i in frames:
+            return frames[i]
+        for j in (i - 1, i + 1):  # a frame stamped a hair off its tenth
+            if j in frames:
+                return frames[j]
+        return CURVE_FLOOR_TENTHS
+
+    def series(start_idx, end_idx, step_ms):
+        step = step_ms // 100
+        start_idx = -(-start_idx // step) * step  # onto the step grid
+        start_idx = max(start_idx, -(-first_idx // step) * step)
+        pts = [at(i) for i in range(start_idx, end_idx + 1, step)]
+        return {"startMs": start_idx * 100, "stepMs": step_ms, "lufs": pts}
+
+    curve = {"whole": series(first_idx, last, WHOLE_CURVE_STEP_MS)}
+    loud = [i for i in range(first_idx, last + 1) if at(i) > _CURVE_GATE_TENTHS]
+    if loud:
+        span, past = END_CURVE_SPAN_MS // 100, END_CURVE_PAST_END_MS // 100
+        curve["head"] = series(first_idx, min(last, loud[0] + span), END_CURVE_STEP_MS)
+        curve["tail"] = series(max(first_idx, loud[-1] - span), min(last, loud[-1] + past), END_CURVE_STEP_MS)
+    return curve
+
+
 def parse_output_rate(text):
     """Sample rate of the PCM ffmpeg writes (the OUTPUT stream's, which is the
     file's own rate since nothing resamples). None when not printed."""
@@ -2327,8 +2404,10 @@ def measure_whole_file(src, loudness=True, edges_wanted=True, timeout_s=None):
     if loudness:
         # framelog=verbose, NOT quiet: `quiet` only exists from ffmpeg 6, and
         # 5.1 (Debian bookworm, the analyzer image) rejects the whole filter.
-        # verbose sits above the default info level, so the per-frame lines
-        # stay out of stderr and only the summary is printed.
+        # The per-frame lines sit at the verbose level, so the run logs at it:
+        # they are the loudness curve (loudness_curve_from_frames). ~150 bytes
+        # every 100 ms, read off the stderr thread (a 2 h mix: ~11 MB).
+        cmd[1:1] = ["-loglevel", "verbose"]
         cmd += ["-af", "ebur128=peak=sample+true:framelog=verbose"]
     if edges_wanted:
         # Stereo float at the file's own rate: a mono file is duplicated (same
@@ -2389,6 +2468,7 @@ def measure_whole_file(src, loudness=True, edges_wanted=True, timeout_s=None):
             # through with no ceiling, so both go together or neither does.
             fig["loudness_lufs"] = None
             fig["true_peak_db"] = None
+        fig["loudness_curve"] = loudness_curve_from_frames(parse_ebur128_frames(err))
         out["loudness"] = fig
     if scanner is not None:
         sr = parse_output_rate(err)
@@ -2425,7 +2505,7 @@ def whole_file_facets(src, wanted):
             out["loudness"] = _unmeasurable("silent")
         else:
             data = {"loudness_lufs": fig["loudness_lufs"], "peak_db": fig["true_peak_db"]}
-            for k in ("sample_peak_db", "lra_lu"):
+            for k in ("sample_peak_db", "lra_lu", "loudness_curve"):
                 if fig.get(k) is not None:
                     data[k] = fig[k]
             data["loudness_version"] = WHOLE_FILE_LOUDNESS_VERSION
@@ -3019,6 +3099,10 @@ def main():
         # The whole-file facets (loudness v2, edges) need an ffmpeg binary;
         # older workers never emit the key.
         "whole_file_capable": shutil.which("ffmpeg") is not None,
+        # Version signal: whole-file loudness answers carry `loudness_curve`.
+        # Older workers never emit the key; the controller re-plans a v2
+        # figure stored without a curve only on `=== true`.
+        "loudness_curve_capable": shutil.which("ffmpeg") is not None,
     })
 
     for line in sys.stdin:

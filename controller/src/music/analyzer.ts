@@ -12,6 +12,7 @@ import * as subsonic from './subsonic.js';
 import { recordHttpAttempt } from './subsonic-log.js';
 import { fetchWithTimeout } from '../util/fetch-timeout.js';
 import { envInt } from '../util/env.js';
+import { parseWholeLoudnessCurve, type WholeLoudnessCurve } from './whole-loudness-curve.js';
 
 // A structural span over the track, in ms. Contiguous over the analysed
 // window; the first is the intro/leading section.
@@ -85,6 +86,8 @@ export interface AnalysisResult {
   loudnessVersion?: number | null;
   samplePeakDb?: number | null;
   loudnessRangeLu?: number | null;
+  // The same pass's short-term loudness curve (whole-loudness-curve.ts).
+  wholeLoudnessCurve?: WholeLoudnessCurve | null;
   edgeLeadMs?: number | null;
   edgeTailMs?: number | null;
   decodedDurationMs?: number | null;
@@ -245,6 +248,10 @@ interface WorkerMessage {
   // Whole-file facets (loudness v2, edges): the worker has ffmpeg. Absent on
   // workers that predate them.
   whole_file_capable?: boolean;
+  // Whole-file loudness answers carry `loudness_curve`. Absent on workers
+  // that predate it.
+  loudness_curve_capable?: boolean;
+  loudness_curve?: unknown;
   loudness_version?: unknown;
   sample_peak_db?: unknown;
   lra_lu?: unknown;
@@ -301,6 +308,7 @@ let _localVocalCapable: boolean | null = null;
 let _localTailVocalCapable: boolean | null = null;
 let _localFacetsCapable: boolean | null = null;
 let _localWholeFileCapable: boolean | null = null;
+let _localLoudnessCurveCapable: boolean | null = null;
 let _localTextCapable: boolean | null = null;
 // Local twins of _sidecarAudioError / _sidecarVocalError — see there.
 let _localAudioError: string | null = null;
@@ -362,6 +370,7 @@ function startWorker(): Promise<void> {
           if (typeof msg.text_embedding_capable === 'boolean' && _localAudioError === null) _localTextCapable = msg.text_embedding_capable;
           _localFacetsCapable = msg.facets_capable === true;
           _localWholeFileCapable = typeof msg.whole_file_capable === 'boolean' ? msg.whole_file_capable : null;
+          _localLoudnessCurveCapable = typeof msg.loudness_curve_capable === 'boolean' ? msg.loudness_curve_capable : null;
         }
         // After the ready assignments, so a reported loss always wins.
         noteLocalCapabilityLoss(msg);
@@ -441,6 +450,7 @@ function toAnalysisResult(msg: WorkerMessage): AnalysisResult {
           loudnessVersion: parseFinite(msg.loudness_version),
           samplePeakDb: parseFinite(msg.sample_peak_db),
           loudnessRangeLu: parseFinite(msg.lra_lu),
+          wholeLoudnessCurve: msg.loudness_curve == null ? null : parseWholeLoudnessCurve(msg.loudness_curve),
           edgeLeadMs: parseSilenceMs(msg.edge_lead_ms),
           edgeTailMs: parseSilenceMs(msg.edge_tail_ms),
           decodedDurationMs: parseSilenceMs(msg.decoded_duration_ms),
@@ -525,6 +535,7 @@ let _sidecarTailVocalCapable: boolean | null = null;
 // Facet protocol (version signal; null on old sidecars).
 let _sidecarFacetsCapable: boolean | null = null;
 let _sidecarWholeFileCapable: boolean | null = null;
+let _sidecarLoudnessCurveCapable: boolean | null = null;
 let _sidecarWholeFileConcurrency: number | null = null;
 // The CLAP TEXT tower (embed-text).
 let _sidecarTextCapable: boolean | null = null;
@@ -550,6 +561,7 @@ async function probeSidecar(url: string): Promise<boolean> {
       analyze_text_capable?: boolean | null;
       analyze_facets_capable?: boolean | null;
       analyze_whole_file_capable?: boolean | null;
+      analyze_loudness_curve_capable?: boolean | null;
       analyze_whole_file_concurrency?: number | null;
       analyze_audio_error?: string | null;
       analyze_vocal_error?: string | null;
@@ -562,6 +574,7 @@ async function probeSidecar(url: string): Promise<boolean> {
       _sidecarTailVocalCapable = typeof body.analyze_tail_vocal_capable === 'boolean' ? body.analyze_tail_vocal_capable : null;
       _sidecarFacetsCapable = typeof body.analyze_facets_capable === 'boolean' ? body.analyze_facets_capable : null;
       _sidecarWholeFileCapable = typeof body.analyze_whole_file_capable === 'boolean' ? body.analyze_whole_file_capable : null;
+      _sidecarLoudnessCurveCapable = typeof body.analyze_loudness_curve_capable === 'boolean' ? body.analyze_loudness_curve_capable : null;
       _sidecarWholeFileConcurrency = Number.isInteger(body.analyze_whole_file_concurrency) && (body.analyze_whole_file_concurrency as number) > 0
         ? (body.analyze_whole_file_concurrency as number) : null;
       _sidecarTextCapable = typeof body.analyze_text_capable === 'boolean' ? body.analyze_text_capable : null;
@@ -723,6 +736,15 @@ export function vocalActivityError(): string | null {
 export function wholeFileAvailable(): boolean | null {
   if (_backend === 'sidecar') return _sidecarWholeFileCapable;
   if (_backend === 'local') return _localWholeFileCapable;
+  return null;
+}
+
+// Whole-file loudness answers carry the short-term curve. A v2 figure stored
+// without one is re-planned only on `=== true`: an analyzer that predates the
+// curve would answer without it again, every run.
+export function loudnessCurveAvailable(): boolean | null {
+  if (_backend === 'sidecar') return _sidecarLoudnessCurveCapable;
+  if (_backend === 'local') return _localLoudnessCurveCapable;
   return null;
 }
 

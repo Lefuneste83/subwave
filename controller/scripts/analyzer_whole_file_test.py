@@ -336,6 +336,80 @@ def t_real_ffmpeg_decodes_once_and_measures_both():
     assert loud["sample_peak_db"] <= loud["true_peak_db"] + 0.05, loud
 
 
+# ── the loudness curve (ebur128 per-frame short-term) ──────────────────────
+
+def frame_line(t, s):
+    return (f"[Parsed_ebur128_0 @ 0x55d] t: {t:<10g} TARGET:-23 LUFS    M: {s:6.1f} S:{s:6.1f}     "
+            f"I: -21.8 LUFS       LRA:   0.0 LU  SPK: -18.1 dBFS  FTPK: -18.1 dBFS  TPK: -18.1 dBFS")
+
+
+def frames_text(series):
+    """ffmpeg-like lines for [(t_s, S)], t stamped a hair under each tenth."""
+    return "\n".join(frame_line(t - 0.0000227, s) for t, s in series)
+
+
+def t_curve_frames_parse_t_and_short_term_and_floor_silence():
+    text = frames_text([(0.1, -120.7), (2.9, -120.7), (3.0, -21.8), (3.1, -21.84)])
+    text += "\n[Parsed_ebur128_0 @ 0x1] t: 3.2  TARGET:-23 LUFS    M:   nan S:  -inf     I: -21.9 LUFS"
+    text += "\n" + SUMMARY  # the summary block is never read as a frame
+    got = aw.parse_ebur128_frames(text)
+    assert got == {1: -1000, 29: -1000, 30: -218, 31: -218, 32: -1000}, got
+
+
+def t_curve_whole_head_and_tail_series():
+    # 2 s of silence, music to 120 s, then 60 s of silence (a long silent tail).
+    series = [(i / 10.0, -120.7 if i < 50 or i > 1200 else -14.0 - (i % 7) / 10.0) for i in range(1, 1801)]
+    curve = aw.loudness_curve_from_frames(aw.parse_ebur128_frames(frames_text(series)))
+    whole, head, tail = curve["whole"], curve["head"], curve["tail"]
+    assert (whole["startMs"], whole["stepMs"], len(whole["lufs"])) == (3000, 1000, 178), whole
+    assert whole["lufs"][0] == -1000 and whole["lufs"][3] in range(-146, -139), whole["lufs"][:5]
+    # head: from the first full window (3 s) to 30 s after the music starts (5 s).
+    assert (head["startMs"], head["stepMs"], len(head["lufs"])) == (3000, 500, 65), head
+    # tail: anchored on where the MUSIC stops (120 s), not on the file's end (180 s).
+    assert (tail["startMs"], tail["stepMs"]) == (90000, 500), tail
+    assert tail["startMs"] + (len(tail["lufs"]) - 1) * 500 == 125000, tail
+    assert tail["lufs"][-1] == -1000 and tail["lufs"][0] > -150, tail["lufs"][-3:]
+
+
+def t_curve_edge_cases():
+    assert aw.loudness_curve_from_frames({}) is None, "no frame line at all: stays due"
+    short = aw.loudness_curve_from_frames({1: -200, 20: -200})
+    assert short == {"whole": {"startMs": 3000, "stepMs": 1000, "lufs": []}}, short
+    silent = aw.loudness_curve_from_frames({i: -1000 for i in range(1, 100)})
+    assert set(silent) == {"whole"} and set(silent["whole"]["lufs"]) == {-1000}, silent
+
+
+def t_curve_rides_the_loudness_answer():
+    def fake(src, loudness=True, edges_wanted=True, timeout_s=None):
+        fig = aw.parse_ebur128_summary(SUMMARY)
+        fig["loudness_curve"] = {"whole": {"startMs": 3000, "stepMs": 1000, "lufs": [-120]}}
+        return {"loudness": fig, "edges": None, "seconds": 0.1}
+    with Patched(measure_whole_file=fake):
+        got = aw.whole_file_facets("http://navi/stream", ["loudness"])
+    assert got["loudness"]["data"]["loudness_curve"]["whole"]["lufs"] == [-120], got
+
+
+def t_real_ffmpeg_prints_the_curve():
+    if not shutil.which("ffmpeg"):
+        print("      (skipped: no ffmpeg on PATH)")
+        return
+    sr = 44100
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "x.wav")
+        write_wav(path, stereo(0.5, 8.0, 1.0, sr, amp=amp_db(-6.0)), sr)
+        got = aw.measure_whole_file(path, loudness=True, edges_wanted=True, timeout_s=60)
+    curve = got["loudness"]["loudness_curve"]
+    whole = curve["whole"]["lufs"]
+    integrated = got["loudness"]["loudness_lufs"]
+    # A steady tone: the short-term figure sits on the integrated one.
+    assert len(whole) == 7 and abs(whole[2] / 10.0 - integrated) < 1.0, (whole, integrated)
+    # The tail ends 5 s past the music or at the file's end, here 1 s after
+    # the tone: that point's 3 s window still holds 2 s of it (about -1.8 dB).
+    tail = curve["tail"]["lufs"]
+    assert tail[-1] < tail[-4] - 10, f"the curve falls once the tone stops: {tail[-5:]}"
+    assert got["edges"][2] == 9500, "edges still read off the same decode"
+
+
 def t_real_ffmpeg_failure_raises_with_the_reason():
     if not shutil.which("ffmpeg"):
         print("      (skipped: no ffmpeg on PATH)")
@@ -384,6 +458,7 @@ def t_one_shot_answers_in_the_facet_shape():
     assert got["ok"] is True, got
     assert list(got["facets"]) == ["loudness", "edges"], got
     assert got["facets"]["edges"]["data"]["decoded_duration_ms"] == 3500, got
+    assert "whole" in got["facets"]["loudness"]["data"]["loudness_curve"], got
     assert got["source"]["kind"] == "whole-file", got
 
 

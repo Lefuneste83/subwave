@@ -224,7 +224,7 @@ export async function wholeFileBackfillPlan(limit?: number): Promise<AcousticsPl
     facets,
     where: { kind: 'needs' },
     state: db.loadFacetState(facets),
-    capabilities: { clap: null, demucs: null, tailVocal: null, wholeFile: capable },
+    capabilities: { clap: null, demucs: null, tailVocal: null, wholeFile: capable, loudnessCurve: analyzer.loudnessCurveAvailable() },
     limit,
   });
 }
@@ -633,7 +633,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
         w.loudness = {
           loudnessLufs: r.loudnessLufs, peakDb: r.peakDb,
           samplePeakDb: r.samplePeakDb ?? null, loudnessRangeLu: r.loudnessRangeLu ?? null,
-          version: r.loudnessVersion ?? null,
+          version: r.loudnessVersion ?? null, curve: r.wholeLoudnessCurve ?? null,
         };
       } else if (f === 'edges') {
         if (r.edgeLeadMs == null || r.edgeTailMs == null || r.decodedDurationMs == null) {

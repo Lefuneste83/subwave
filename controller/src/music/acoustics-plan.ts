@@ -50,6 +50,10 @@ export interface PlanCapabilities {
   // The whole-file facets (loudness v2, edges): an analyzer with ffmpeg that
   // knows them. Absent/null = unknown (planned, flagged).
   wholeFile?: boolean | null;
+  // Whole-file loudness answers carry the short-term curve. A v2 figure stored
+  // without one (`no-curve`) is re-planned only on `=== true`: an analyzer that
+  // predates the curve would answer without it again, every run.
+  loudnessCurve?: boolean | null;
 }
 
 export interface PlanInput {
@@ -75,7 +79,7 @@ export interface WorkItem {
   request: WorkRequest;
 }
 
-export type SkipReason = 'no-clap' | 'no-demucs' | 'no-tail-vocal' | 'no-whole-file' | 'limit';
+export type SkipReason = 'no-clap' | 'no-demucs' | 'no-tail-vocal' | 'no-whole-file' | 'no-curve' | 'limit';
 
 export interface FacetPlanCount {
   facet: Facet;
@@ -155,6 +159,7 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
     // An analyzer without them would answer `loudness` with a window figure
     // (still due) and `edges` not at all: a guaranteed no-op.
     if (WHOLE_FILE_FACETS.includes(f) && input.capabilities.wholeFile === false) return 'no-whole-file';
+    if (f === 'loudness' && cell?.reason === 'no-curve' && input.capabilities.loudnessCurve !== true) return 'no-curve';
     return null;
   };
 

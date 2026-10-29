@@ -40,7 +40,7 @@ const GROUPS: Array<{ anchor: string; cols: string[] }> = [
       'lead_silence_ms', 'analyze_error', 'analyze_failed_at', 'analyze_fail_count',
       // loudness_lufs/peak_db mean whatever loudness_version says, so the
       // stamp and the whole-file figures measured with it travel together.
-      'loudness_version', 'sample_peak_db', 'loudness_range_lu'],
+      'loudness_version', 'sample_peak_db', 'loudness_range_lu', 'loudness_curve_json'],
   },
   // The whole-file edges facet: one measurement, carried as a set.
   { anchor: 'decoded_duration_ms', cols: ['edge_lead_ms', 'edge_tail_ms', 'decoded_duration_ms'] },

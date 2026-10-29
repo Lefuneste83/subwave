@@ -118,6 +118,7 @@ async function buildFacetPlan(args: string[], limit: number | undefined): Promis
       demucs: available ? analyzer.vocalActivityAvailable() : null,
       tailVocal: available ? analyzer.tailVocalAvailable() : null,
       wholeFile: available ? analyzer.wholeFileAvailable() : null,
+      loudnessCurve: available ? analyzer.loudnessCurveAvailable() : null,
     },
     limit,
   });

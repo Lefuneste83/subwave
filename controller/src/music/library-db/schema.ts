@@ -509,12 +509,14 @@ export async function migrate(embeddingDim: number, reseed = false, adoptStoredD
     // TRUE peak over the whole file at its native rate, written with the
     // whole-file LRA and sample peak. `edge_*` are the silence edges against
     // the absolute floor and `decoded_duration_ms` the decoded length, all
-    // three from the same whole-file decode (facet `edges`). Only the missing
+    // three from the same whole-file decode (facet `edges`).
+    // `loudness_curve_json` is that pass's short-term loudness curve
+    // (whole-loudness-curve.ts), stored with every v2 figure. Only the missing
     // columns are added: a database whose user_version was wound back below
     // this step still has them, and ADD COLUMN on an existing column throws.
     const have = new Set((d.prepare('PRAGMA table_info(tracks)').all() as Array<{ name: string }>).map(c => c.name));
     const add = [
-      ['loudness_version', 'INTEGER'], ['loudness_range_lu', 'REAL'], ['sample_peak_db', 'REAL'],
+      ['loudness_version', 'INTEGER'], ['loudness_range_lu', 'REAL'], ['sample_peak_db', 'REAL'], ['loudness_curve_json', 'TEXT'],
       ['edge_lead_ms', 'INTEGER'], ['edge_tail_ms', 'INTEGER'], ['decoded_duration_ms', 'INTEGER'],
     ].filter(([c]) => !have.has(c));
     if (add.length) runDdl(d, add.map(([c, t]) => `ALTER TABLE tracks ADD COLUMN ${c} ${t};`).join('\n'));
