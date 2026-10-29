@@ -492,7 +492,7 @@ at its native rate in ONE ffmpeg run per track (`analyze_worker.py`
 loudness, true peak, sample peak and LRA, and the same decoded audio leaves on
 stdout as float PCM, which `EdgeScanner` reads for the first and last sample
 frame at or above the absolute `SILENCE_DBFS` floor and for the decoded length.
-A request for both pays one decode; constant memory. Nine rules:
+A request for both pays one decode; constant memory. Ten rules:
 
 1. **The loudness version is the measurement's own.** Every head analysis still
    writes the analysis window's figure (first `ANALYZE_SECONDS` at
@@ -585,6 +585,15 @@ A request for both pays one decode; constant memory. Nine rules:
    an older one would answer without it again, every run. A file shorter than
    one window stores an empty `whole` series and settles; an answer with no
    per-frame line at all stores none and stays due.
+10. **Measured at 48 kHz at most.** `ebur128` takes any rate, so a DSD file
+   decoded at 352.8 kHz had its ultrasonic noise (the DSD noise shaping)
+   K-weighted into the reading: a fade levelled off near -27 LUFS, and the
+   edges scan found no silence at either end of any `.dsf`. A source above
+   `MEASURE_MAX_RATE` gets `aresample=48000` ahead of both; its rate comes from
+   an `ffprobe` of the header first, because ffmpeg 5.1 cannot negotiate a
+   LIST of rates (`aformat` with several `sample_rates` fails on a 96 kHz
+   input). A 44.1/48 kHz file runs the command it always did, and a failed
+   probe measures at the file's own rate, as before.
 
 Pinned by `scripts/analyzer_whole_file_test.py` (parsers, chunk-independent edge
 scan, the absolute floor, one decode for both, the source rule, a real ffmpeg

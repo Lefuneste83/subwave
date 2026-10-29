@@ -2570,6 +2570,33 @@ def parse_ebur128_summary(text):
 # (-70 LUFS), so a long silent tail (a hidden track) does not leave the fine
 # window on silence. Points are tenths of a dB as ints, silence (S below the
 # floor, -inf, nan, or the filter's -120.7 before its window fills) at the floor.
+# The whole-file pass measures at most at this rate (measure_whole_file).
+MEASURE_MAX_RATE = 48000
+_PROBE_TIMEOUT_S = 30
+
+
+def probe_sample_rate(src, limit=None):
+    """The first audio stream's sample rate (ffprobe, the header only), or None
+    on any failure: the caller then measures at the file's own rate, as it did
+    before the cap. Never logs ffprobe's output (a URL carries credentials)."""
+    if not shutil.which("ffprobe"):
+        return None
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate",
+             "-of", "csv=p=0", src],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=min(_PROBE_TIMEOUT_S, limit or _PROBE_TIMEOUT_S))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return int(r.stdout.strip().splitlines()[0])
+    except (ValueError, IndexError):
+        return None
+
+
 WHOLE_CURVE_STEP_MS = 1000
 END_CURVE_STEP_MS = 500
 END_CURVE_SPAN_MS = 30_000
@@ -2635,8 +2662,8 @@ def loudness_curve_from_frames(frames):
 
 
 def parse_output_rate(text):
-    """Sample rate of the PCM ffmpeg writes (the OUTPUT stream's, which is the
-    file's own rate since nothing resamples). None when not printed."""
+    """Sample rate of the PCM ffmpeg writes (the OUTPUT stream's: the file's
+    own rate, or MEASURE_MAX_RATE above it). None when not printed."""
     out = text[text.find("Output #0"):] if "Output #0" in text else ""
     m = re.search(r"Audio: pcm_f32le[^\n]*?,\s*(\d+) Hz", out)
     return int(m.group(1)) if m else None
@@ -2717,7 +2744,7 @@ class EdgeScanner:
 
 def measure_whole_file(src, loudness=True, edges_wanted=True, timeout_s=None):
     """One ffmpeg pass over the whole of `src` (a URL or a local path) at its
-    native rate. Returns {"loudness": {loudness_lufs, lra_lu, sample_peak_db,
+    native rate, capped at MEASURE_MAX_RATE (48 kHz). Returns {"loudness": {loudness_lufs, lra_lu, sample_peak_db,
     true_peak_db} | None, "edges": (lead_ms, tail_ms, duration_ms) | None,
     "seconds"}. Loudness and true peak are both set or both None (digital
     silence), never one without the other. Raises on any ffmpeg failure, so the
@@ -2729,6 +2756,19 @@ def measure_whole_file(src, loudness=True, edges_wanted=True, timeout_s=None):
     limit = timeout_s or WHOLE_FILE_TIMEOUT_S
     cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-threads", "1",
            "-i", src, "-map", "0:a:0", "-vn"]
+    # Capped at 48 kHz: ffmpeg's ebur128 takes any rate, so a DSD source
+    # decoded at 352.8 kHz has its ultrasonic noise (the DSD noise shaping)
+    # K-weighted into the reading: a fade levels off near -27 LUFS instead of
+    # falling to silence, and the edges scan never finds silence at either
+    # end. Only a source above the cap is resampled, so a 44.1/48 kHz file
+    # runs exactly the command it always did. The rate comes from a probe
+    # first: ffmpeg 5.1 cannot negotiate a LIST of rates (aformat with several
+    # sample_rates fails with "Error reinitializing filters" on a 96 kHz
+    # input), and an unknown rate is measured as before.
+    filters = []
+    rate = probe_sample_rate(src, limit)
+    if rate is not None and rate > MEASURE_MAX_RATE:
+        filters.append(f"aresample={MEASURE_MAX_RATE}")
     if loudness:
         # framelog=verbose, NOT quiet: `quiet` only exists from ffmpeg 6, and
         # 5.1 (Debian bookworm, the analyzer image) rejects the whole filter.
@@ -2736,10 +2776,12 @@ def measure_whole_file(src, loudness=True, edges_wanted=True, timeout_s=None):
         # they are the loudness curve (loudness_curve_from_frames). ~150 bytes
         # every 100 ms, read off the stderr thread (a 2 h mix: ~11 MB).
         cmd[1:1] = ["-loglevel", "verbose"]
-        cmd += ["-af", "ebur128=peak=sample+true:framelog=verbose"]
+        filters.append("ebur128=peak=sample+true:framelog=verbose")
+    if filters:
+        cmd += ["-af", ",".join(filters)]
     if edges_wanted:
-        # Stereo float at the file's own rate: a mono file is duplicated (same
-        # peaks), and no resampler runs.
+        # Stereo float at the file's own rate (at most 48 kHz, above): a mono
+        # file is duplicated (same peaks).
         cmd += ["-ac", "2", "-f", "f32le", "pipe:1"]
     else:
         cmd += ["-f", "null", "-"]
