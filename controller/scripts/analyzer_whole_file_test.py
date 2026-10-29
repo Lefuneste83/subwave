@@ -471,6 +471,41 @@ def t_real_ffmpeg_measures_a_surround_file_as_its_stereo_downmix():
     assert abs(got["edges"][2] - 4000) <= 25, got["edges"]
 
 
+def t_window_loudness_measures_a_surround_decode_as_its_stereo_downmix():
+    # The default (window) path: librosa decodes a 5.1 file as six rows and
+    # pyloudnorm refused it ("five channels or less"), so the track had no
+    # loudness at all. Now: the stereo downmix, matching ffmpeg's float -ac 2
+    # (= Liquidsoap's) for 5.1 and 7.1.
+    if not shutil.which("ffmpeg"):
+        print("      (skipped: no ffmpeg on PATH)")
+        return
+    try:
+        import pyloudnorm  # noqa: F401 — optional; the lean venvs lack it
+        import soundfile as sf
+    except ImportError:
+        print("      (skipped: no pyloudnorm/soundfile)")
+        return
+    sr = 48000
+    t = np.arange(4 * sr, dtype=np.float64) / sr
+    for count, layout in ((6, "5.1"), (8, "7.1")):
+        rows = np.stack([amp_db(-14.0) * np.sin(2 * np.pi * (200.0 + 130.0 * k) * t) for k in range(count)])
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "multi.wav")
+            sf.write(src, rows.T.astype(np.float32), sr, subtype="FLOAT")
+            import subprocess
+            out = subprocess.run(
+                ["ffmpeg", "-v", "error", "-i", src, "-af", "aformat=sample_fmts=flt:channel_layouts=stereo",
+                 "-f", "f32le", "-"], capture_output=True, check=True).stdout
+        ref = np.frombuffer(out, dtype="<f4").reshape(-1, 2).T
+        got, peak = aw.measure_loudness(rows, sr)
+        want, _ = aw.measure_loudness(ref, sr)
+        assert got is not None and peak is not None, f"{layout}: measured at all"
+        assert abs(got - want) < 0.15, (layout, got, want)
+    # Mono and stereo decodes are untouched.
+    stereo = np.stack([np.sin(2 * np.pi * 440.0 * t), np.sin(2 * np.pi * 550.0 * t)]) * 0.2
+    assert aw.stereo_downmix(stereo) is stereo
+
+
 def t_real_ffmpeg_failure_raises_with_the_reason():
     if not shutil.which("ffmpeg"):
         print("      (skipped: no ffmpeg on PATH)")
