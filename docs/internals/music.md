@@ -584,9 +584,16 @@ A request for both pays one decode; constant memory. Ten rules:
    input). A stereo or mono 44.1/48 kHz file runs the command it always did,
    and a failed probe measures the file as it is, as before.
 
+The window path (the default, without `ANALYZE_WHOLE_FILE`) follows the same
+rule: `measure_loudness` measures a decode of more than two channels as its
+stereo downmix (`stereo_downmix`, the same matrix over the WAV/FLAC default
+channel orders for 3 to 8 channels). Before it, pyloudnorm refused anything
+over five channels ("Audio must have five channels or less"), so every 5.1
+track had no loudness at all and aired without gain normalisation.
+
 Pinned by `scripts/analyzer_whole_file_test.py` (parsers, chunk-independent edge
 scan, the absolute floor, one decode for both, the source rule, a real ffmpeg
-run when one is on PATH), `scripts/whole-file-facets.test.ts` (versions, no
+run when one is on PATH, the window path's downmix against ffmpeg's for 5.1 and 7.1), `scripts/whole-file-facets.test.ts` (versions, no
 overwrite, clear, step 32 on a database that already has the columns),
 `scripts/whole-file-pass.test.ts` (capability skip, no staging, `stream_url`,
 the opt-in backfill), the curve cases in both (parsing the per-frame lines,

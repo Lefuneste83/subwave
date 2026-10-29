@@ -1943,6 +1943,34 @@ def ensure_fast_decode(path, complete=None):
     return path, None
 
 
+# Stereo downmix of a multichannel decode, as the station airs it: Liquidsoap
+# (its ffmpeg decoder's float rematrix) gives fronts 1, centre and surrounds
+# 0.707, LFE nothing, unnormalised (a 5.1 test file: -15.5 LUFS through
+# Liquidsoap 2.4.6 and through ffmpeg's float `-ac 2`). Rows follow the
+# WAV/FLAC default channel order per count (what soundfile/librosa return):
+#   3 FL FR FC | 4 FL FR BL BR | 5 FL FR FC BL BR | 6 FL FR FC LFE BL BR
+#   7 FL FR FC LFE BC SL SR | 8 FL FR FC LFE BL BR SL SR
+# A back centre goes to both sides at 0.5 (0.707 into each back, 0.707 down).
+_K = 0.7071067811865476
+_DOWNMIX = {
+    3: ((1, 0, _K), (0, 1, _K)),
+    4: ((1, 0, _K, 0), (0, 1, 0, _K)),
+    5: ((1, 0, _K, _K, 0), (0, 1, _K, 0, _K)),
+    6: ((1, 0, _K, 0, _K, 0), (0, 1, _K, 0, 0, _K)),
+    7: ((1, 0, _K, 0, 0.5, _K, 0), (0, 1, _K, 0, 0.5, 0, _K)),
+    8: ((1, 0, _K, 0, _K, 0, _K, 0), (0, 1, _K, 0, 0, _K, 0, _K)),
+}
+
+
+def stereo_downmix(y):
+    """(2, n) for a (channels, n) decode of 3 to 8 channels, else `y` as is."""
+    import numpy as np
+
+    if getattr(y, "ndim", 1) < 2 or y.shape[0] not in _DOWNMIX:
+        return y
+    return np.asarray(_DOWNMIX[y.shape[0]], dtype=np.float64) @ np.asarray(y, dtype=np.float64)
+
+
 def measure_loudness(y, sr):
     """Integrated loudness (LUFS, ITU-R BS.1770 / EBU R128) + true-ish peak in
     dBFS over the decoded window. Accepts mono (n,) or librosa's multichannel
@@ -1952,9 +1980,13 @@ def measure_loudness(y, sr):
     (issue #998). Best-effort: pyloudnorm is an optional dep, so a missing
     import or any failure returns (None, None) and the caller simply omits the
     fields — every consumer treats NULL as "no loudness, behave as today"
-    (same contract as the CLAP embedding)."""
+    (same contract as the CLAP embedding). A decode of more than two channels
+    is measured as its stereo downmix (stereo_downmix): what airs, and
+    pyloudnorm refuses more than five channels ("Audio must have five channels
+    or less"), which left every 5.1 track with no loudness at all."""
     import numpy as np
 
+    y = stereo_downmix(y)
     try:
         import pyloudnorm as pyln
     except Exception as e:  # noqa: BLE001 — optional dependency
