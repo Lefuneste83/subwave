@@ -37,7 +37,7 @@ function handler(req: IncomingMessage, res: ServerResponse) {
     res.end(JSON.stringify({
       ok: true, engines: ['analyze'], analyze_audio_capable: false, analyze_vocal_capable: false,
       analyze_facets_capable: true, analyze_whole_file_concurrency: 8,
-      ...(wholeFileCapable == null ? {} : { analyze_whole_file_capable: wholeFileCapable }),
+      ...(wholeFileCapable == null ? {} : { analyze_whole_file_capable: wholeFileCapable, analyze_loudness_curve_capable: wholeFileCapable }),
     }));
     return;
   }
@@ -51,7 +51,10 @@ function handler(req: IncomingMessage, res: ServerResponse) {
       maxInflight = Math.max(maxInflight, inflight);
       const ok: Record<string, unknown> = {
         head: { bpm: 99, key: 'Dm', intro_ms: 500, confidence: 0.8 },
-        loudness: { loudness_lufs: -13.5, peak_db: 0.2, sample_peak_db: -0.3, lra_lu: 8.1, loudness_version: 2 },
+        loudness: {
+          loudness_lufs: -13.5, peak_db: 0.2, sample_peak_db: -0.3, lra_lu: 8.1, loudness_version: 2,
+          loudness_curve: { whole: { startMs: 3000, stepMs: 1000, lufs: [-140, -141] } },
+        },
         edges: { edge_lead_ms: 800, edge_tail_ms: 3100, decoded_duration_ms: 213_407 },
       };
       const facets: Record<string, unknown> = {};

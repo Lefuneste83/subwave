@@ -55,6 +55,10 @@ export interface PlanCapabilities {
   // MusicBrainz year lookups (settings.embedding.enrichment.originalYear).
   // Absent = on, the setting's own default.
   yearLookups?: boolean;
+  // Whole-file loudness answers carry the short-term curve. A v2 figure stored
+  // without one (`no-curve`) is re-planned only on `=== true`: an analyzer that
+  // predates the curve would answer without it again, every run.
+  loudnessCurve?: boolean | null;
 }
 
 export interface PlanInput {
@@ -94,7 +98,7 @@ export interface WorkItem {
 // 'year-off': MusicBrainz lookups are switched off in the settings.
 // 'no-edges': a regular run's stored tail whose edges are not measured yet
 // (placeTail): re-reading it could not place it.
-export type SkipReason = 'no-clap' | 'no-demucs' | 'no-tail-vocal' | 'no-whole-file' | 'no-edges' | 'year-known' | 'year-off' | 'limit';
+export type SkipReason = 'no-clap' | 'no-demucs' | 'no-tail-vocal' | 'no-whole-file' | 'no-curve' | 'no-edges' | 'year-known' | 'year-off' | 'limit';
 
 export interface FacetPlanCount {
   facet: Facet;
@@ -202,6 +206,7 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
     if (f === 'year' && input.capabilities.yearLookups === false) return 'year-off';
     if (f === 'year' && cell?.status === 'ok') return 'year-known';
     if (f === 'tail' && input.placeTail && cell && input.state.get(id)?.get('edges')?.status !== 'ok') return 'no-edges';
+    if (f === 'loudness' && cell?.reason === 'no-curve' && input.capabilities.loudnessCurve !== true) return 'no-curve';
     return null;
   };
   const now = input.now ?? Date.now();
