@@ -79,6 +79,11 @@ function handler(req: IncomingMessage, res: ServerResponse) {
         return;
       }
       const facets: Record<string, unknown> = {};
+      // Vocal activity: the Demucs tail pass needs the tail window; the stub
+      // answers tail vocal ranges only when it was sent the placement.
+      if (r.facets.includes('vocal')) {
+        facets.vocal = { status: 'ok', data: { vocal_ranges: [], ...(tw ? { tail_vocal_ranges: [{ startMs: tw.end_ms - 8000, endMs: tw.end_ms - 6000 }] } : {}) } };
+      }
       // The head window (a regular run's planned new track).
       if (r.facets.includes('head')) facets.head = { status: 'ok', data: { bpm: 120, key: 'Am', intro_ms: 0, confidence: 0.9 } };
       // The whole-file lane (a regular run's backfill): edges place the tail.
@@ -586,5 +591,30 @@ test('a regular run plans from the facet table and converges: edges first, tails
     (config.analyzer as { wholeFile: boolean }).wholeFile = false;
   }
   assert.ok(!requests.some((q) => mineIds.some((id) => of(id)(q))), JSON.stringify(requests));
+  consistent();
+});
+
+test('a vocal-only request sends the tail window too, so the tail vocals come back and the row settles', async () => {
+  // Production, 29 Oct: an analysed track with a placed v3 tail whose vocal row
+  // was head-only. The regular run planned vocal alone; without the placement
+  // the worker looked for the end on its capped copy, found none, sent no tail
+  // vocals, and the row stayed head-only, planned again on every run.
+  track('voc1');
+  writeEdges('voc1', 20_000);
+  writeTail('voc1', 3);
+  db.writeFacetResults('voc1', { source: 'full', vocal: { vocalRanges: [], tailVocalRanges: null } });
+  const vocalRow = () => sql(`SELECT status, version, reason FROM track_facet_status WHERE track_id = 'voc1' AND facet = 'vocal'`).get() as Row;
+  assert.equal(vocalRow().reason, 'head-only', 'fixture: the stuck row');
+  const vocalPlan = P.planAcoustics({
+    ids: ['voc1'], facets: P.parseFacets('vocal'), where: { kind: 'needs' }, state: db.loadFacetState(P.parseFacets('vocal')),
+    capabilities: { clap: false, demucs: true, tailVocal: true, wholeFile: true },
+  });
+  assert.deepEqual(vocalPlan.items.map(i => i.facets), [['vocal']]);
+  requests.length = 0;
+  await runAnalysisPass({ plan: vocalPlan });
+  assert.equal(requests.length, 1);
+  assert.deepEqual(requests[0].tail_window, { end_ms: 194_000, duration_ms: 214_000 }, JSON.stringify(requests[0]));
+  assert.deepEqual(db.getTrack('voc1')!.outro?.vocalRanges, [{ startMs: 186_000, endMs: 188_000 }]);
+  assert.deepEqual([vocalRow().status, vocalRow().version, vocalRow().reason], ['ok', db.FACET_VERSIONS.vocal, null]);
   consistent();
 });
