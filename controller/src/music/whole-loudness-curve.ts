@@ -22,8 +22,10 @@ export interface WholeLoudnessCurve {
 }
 
 export const FLOOR_TENTHS = -1000;
-// Six hours at one point a second: far past any track, short of a runaway.
-const MAX_POINTS = 21_600;
+// A day at one point a second: a library holds DJ sets and live recordings of
+// 6-7 h (a 6 h cap rejected two, which then stayed due and were re-read in
+// full on every run), and a day still bounds a runaway answer (~500 KB).
+const MAX_POINTS = 86_400;
 
 function parseSeries(v: unknown): LoudnessSeries | null {
   if (!v || typeof v !== 'object') return null;

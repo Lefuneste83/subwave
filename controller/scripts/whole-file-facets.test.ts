@@ -219,6 +219,10 @@ test('the curve parser refuses malformed input', () => {
   assert.equal(parseWholeLoudnessCurve({ whole: { ...CURVE.whole, stepMs: 0 } }), null);
   assert.equal(parseWholeLoudnessCurve({ whole: { ...CURVE.whole, lufs: [1, 'x'] } }), null);
   assert.equal(parseWholeLoudnessCurve({ ...CURVE, tail: { startMs: -1, stepMs: 500, lufs: [] } }), null);
+  // A 6.8 h DJ set (24,347 s) is a curve, not a runaway; past a day is.
+  const long = { whole: { startMs: 3000, stepMs: 1000, lufs: Array(24_345).fill(-140) } };
+  assert.equal(parseWholeLoudnessCurve(long)?.whole.lufs.length, 24_345);
+  assert.equal(parseWholeLoudnessCurve({ whole: { ...long.whole, lufs: Array(86_401).fill(-140) } }), null);
   assert.deepEqual(parseWholeLoudnessCurve({ whole: { startMs: 3000, stepMs: 1000, lufs: [-2000, -141.4] } }),
     { whole: { startMs: 3000, stepMs: 1000, lufs: [-1000, -141] } }, 'floored and rounded to tenths');
 });
