@@ -567,15 +567,22 @@ A request for both pays one decode; constant memory. Ten rules:
    an older one would answer without it again, every run. A file shorter than
    one window stores an empty `whole` series and settles; an answer with no
    per-frame line at all stores none and stays due.
-10. **Measured at 48 kHz at most.** `ebur128` takes any rate, so a DSD file
+10. **Measured as it airs: stereo, at 48 kHz at most.** A file with more than
+   two channels (a 5.1 FLAC) is downmixed first, in float
+   (`aformat=sample_fmts=dbl:channel_layouts=stereo`): Liquidsoap airs fronts
+   1 + centre and surrounds 0.707, no LFE, unnormalised, which is what
+   ffmpeg's float downmix gives, while ebur128 over six channels read about
+   4 dB above the air and an integer downmix (normalised) 7.6 dB below it.
+   Mono is left alone: ebur128 reads it as Liquidsoap's upmix airs it.
+   `ebur128` also takes any rate, so a DSD file
    decoded at 352.8 kHz had its ultrasonic noise (the DSD noise shaping)
    K-weighted into the reading: a fade levelled off near -27 LUFS, and the
    edges scan found no silence at either end of any `.dsf`. A source above
-   `MEASURE_MAX_RATE` gets `aresample=48000` ahead of both; its rate comes from
-   an `ffprobe` of the header first, because ffmpeg 5.1 cannot negotiate a
+   `MEASURE_MAX_RATE` gets `aresample=48000` ahead of both. Rate and channels
+   come from an `ffprobe` of the header first (`probe_audio_format`), because ffmpeg 5.1 cannot negotiate a
    LIST of rates (`aformat` with several `sample_rates` fails on a 96 kHz
-   input). A 44.1/48 kHz file runs the command it always did, and a failed
-   probe measures at the file's own rate, as before.
+   input). A stereo or mono 44.1/48 kHz file runs the command it always did,
+   and a failed probe measures the file as it is, as before.
 
 Pinned by `scripts/analyzer_whole_file_test.py` (parsers, chunk-independent edge
 scan, the absolute floor, one decode for both, the source rule, a real ffmpeg
