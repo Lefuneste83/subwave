@@ -55,6 +55,7 @@ import { recordPlaybackFailure } from '../observability/playback-failures.js';
 import { djCallsAllowed, presentListeners } from './listeners.js';
 import { autoVoiceAllowed } from './voice-policy.js';
 import { speakClockAllowed, stationIdDaypartDrifted, stationIdDaypartStamp } from './clock-policy.js';
+import { standInToken } from './stand-in-policy.js';
 import { CLOCK_CHECK_EXEMPT_KINDS, isEnglishSpeech, reconcileClockPhrases, stripClockPhrases } from './clock-phrases.js';
 import { fuzzyAirTime } from '../llm/internal/prompts/scripts.js';
 import {
@@ -2438,6 +2439,22 @@ class Queue {
   // clock and a reminiscence states a past time, so both are exempt
   // (clock-phrases.CLOCK_CHECK_EXEMPT_KINDS), and so is verbatim operator
   // text. English only: any other language passes unchanged.
+  // Every spoken path's last text gate: a stand-in line (stand-in-policy) is
+  // dropped whole, then the clock check runs. An empty return is the callers'
+  // existing "nothing to air" case, so a dropped feature falls back exactly as
+  // a stood-down skill does. Verbatim operator text is exempt from both.
+  speakable(text: string, kind: string, persona: Persona | null, { verbatim = false } = {}): string {
+    if (!verbatim) {
+      const token = standInToken(text);
+      if (token) {
+        this.log('dj', `${kind}: dropped a stand-in line ("${token}") instead of airing it`);
+        logEvent('speech.standInDropped', { kind, token });
+        return '';
+      }
+    }
+    return this.clockChecked(text, kind, persona, { verbatim });
+  }
+
   clockChecked(text: string, kind: string, persona: Persona | null, { verbatim = false } = {}): string {
     if (verbatim || !text || CLOCK_CHECK_EXEMPT_KINDS.has(kind)) return text;
     const speaker = persona ?? settings.getEffectivePersona();
@@ -2501,7 +2518,7 @@ class Queue {
     // truth than _speak is what made the fix miss the very path that reported
     // the bug.
     const speaker = persona ?? settings.getEffectivePersona();
-    const safeText = this.clockChecked(normalizeForDisplay(
+    const safeText = this.speakable(normalizeForDisplay(
       speaker?.name ? stripSpeakerLabel(text || '', [speaker.name]) : (text || ''),
     ), kind, speaker, { verbatim });
     if (!safeText) return { accepted: false, deferred: false, completed: Promise.resolve(false) };
@@ -2709,7 +2726,7 @@ class Queue {
       // Each clip owns its speaker's gain, attribution and live-edge marker.
       // Conversational batching must preserve those before it can air here.
       for (const l of lines) {
-        const text = this.clockChecked(normalizeForDisplay(stripSpeakerLabel(l.text || '', knownNames)), kind, l.persona);
+        const text = this.speakable(normalizeForDisplay(stripSpeakerLabel(l.text || '', knownNames)), kind, l.persona);
         if (!text) continue;
         const wavPath = await this._speak(text, { kind, persona: l.persona });
         rendered.push({ ...l, text, wavPath });
@@ -2779,7 +2796,7 @@ class Queue {
     // guard as announce(): a label the model prefixed would otherwise be read
     // aloud. Same speaker resolution, for the same reason.
     const scheduledSpeaker = persona ?? settings.getEffectivePersona();
-    const safeText = this.clockChecked(normalizeForDisplay(
+    const safeText = this.speakable(normalizeForDisplay(
       scheduledSpeaker?.name ? stripSpeakerLabel(text || '', [scheduledSpeaker.name]) : (text || ''),
     ), kind, scheduledSpeaker);
     if (!safeText) return;
