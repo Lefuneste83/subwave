@@ -98,6 +98,11 @@ export interface TrackOutro {
   // Short-term loudness over the tail window (tail v3; music/loudness-curve.ts
   // has the stored form). ABSENT when not measured or malformed, never null.
   loudnessCurve?: LoudnessCurve;
+  // The whole-track curve's 1 s series, set only at read time when
+  // transitions.tailFromCurve is on (music/tail-levels.ts); never stored. The
+  // audible-end cut searches it when `loudnessCurve` never reaches the
+  // threshold.
+  wholeLoudnessCurve?: LoudnessCurve;
 }
 
 // Tonic note (sharps) + mode over a time range.

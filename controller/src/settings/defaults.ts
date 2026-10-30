@@ -698,6 +698,11 @@ export const DEFAULTS = {
     // applies from the next queued track; tracks without a curve keep today's cut.
     fadeAudibleEnd: false,
     fadeAudibleEndDb: 20,
+    // Read the tail's level readings (fade or cold, wind-down start, tail
+    // loudness, the audible-end curve) off the whole-file loudness curve
+    // instead of the librosa tail facet (music/tail-levels.ts). Off = today's
+    // readings. Controller-side, so no mixer restart.
+    tailFromCurve: false,
     // Per-effect kill switches (#1565). All on: the kit is what DJ mode IS, and
     // before this block the only way to drop one gesture was to turn djMode off
     // and lose all six. Resolved through settings/transition-effects.ts, which

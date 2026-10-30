@@ -146,6 +146,7 @@ export const SECTIONS = [
     formKeys: [
       'crossfadeDuration', 'ducking', 'maxTrackSeconds', 'maxTrackLengthMode', 'fadeAtShowEnd', 'silenceTrim', 'stream', 'loudness',
       'transitions.equalPowerCrossfade', 'transitions.fadeAudibleEnd', 'transitions.fadeAudibleEndDb',
+      'transitions.tailFromCurve',
     ],
   },
 ] as const satisfies readonly SectionSpec[];

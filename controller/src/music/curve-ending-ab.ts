@@ -6,6 +6,11 @@
 //   npm run curve-ab -- --sample 300    a random 300 tracks (seeded: --seed N)
 //   npm run curve-ab -- --list 20       also list the 20 widest disagreements
 //
+// It also lists the fades transitions.tailFromCurve would newly cut through
+// the whole-track fallback (music/silence-trim.ts): the tail series never
+// reaches the audible-end threshold, the whole-track series does. Those cuts
+// can be tens of seconds, so check them by ear before turning the switch on.
+//
 // Opening the library DB can seed track_facet_status when it is missing (as
 // `npm run facets`); safe beside a running controller (WAL).
 
@@ -76,12 +81,14 @@ async function main() {
   const dStart: number[] = [], dLufs: number[] = [], dAudible: number[] = [];
   let audibleBoth = 0, audibleOnlyOld = 0, audibleOnlyNew = 0;
   const disagreements: Array<{ row: Row; librosa: string; drop: number }> = [];
+  const wholeCuts: Array<{ row: Row; cutSec: number; earlierSec: number }> = [];
 
   for (const row of rows) {
     let outro: { ending?: string; startMs?: number; lufs?: number | null; loudnessCurve?: unknown };
     try { outro = JSON.parse(row.outro_json); } catch { continue; }
     if (outro.ending !== 'fade' && outro.ending !== 'cold') continue;
-    const d = deriveCurveEnding(parseWholeLoudnessCurve(row.loudness_curve_json), {
+    const curve = parseWholeLoudnessCurve(row.loudness_curve_json);
+    const d = deriveCurveEnding(curve, {
       decodedDurationMs: row.decoded_duration_ms, edgeTailMs: row.edge_tail_ms,
     });
     if (!d) { noCurve++; continue; }
@@ -94,6 +101,11 @@ async function main() {
     if (outro.ending === d.ending) { agree++; bf[1]++; } else disagreements.push({ row, librosa: outro.ending, drop: d.endDropDb });
     if (typeof outro.startMs === 'number') dStart.push((d.startMs - outro.startMs) / 1000);
     if (typeof outro.lufs === 'number' && d.lufs != null) dLufs.push(d.lufs - outro.lufs);
+    // The whole-track fallback: a curve fade the tail series cannot cut.
+    if (d.ending === 'fade' && curve && audibleEndSec(d.loudnessCurve, row.loudness_lufs, dial) == null) {
+      const w = audibleEndSec(curve.whole, row.loudness_lufs, dial);
+      if (w != null && w * 1000 < d.musicEndMs) wholeCuts.push({ row, cutSec: w, earlierSec: d.musicEndMs / 1000 - w });
+    }
     // The audible-end cut, as silence-trim would place it on a fade, from each curve.
     if (outro.ending === 'fade' && d.ending === 'fade') {
       const old = parseLoudnessCurve(outro.loudnessCurve);
@@ -117,6 +129,13 @@ async function main() {
   console.log(`tail loudness (curve − librosa): median ${f(q(dLufs, 0.5))} dB; |gap| p90 ${f(q(aL, 0.9))} dB`);
   const aA = dAudible.map(Math.abs);
   console.log(`audible-end cut at ${dial} dB (fades both agree on, ${audibleBoth} cut by both): median ${f(q(dAudible, 0.5))} s; |gap| median ${f(q(aA, 0.5))} s, p90 ${f(q(aA, 0.9))} s; only librosa's curve cuts: ${audibleOnlyOld}, only the new one: ${audibleOnlyNew}`);
+
+  const mmss = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+  const wc = wholeCuts.map(x => x.earlierSec);
+  console.log(`whole-track fallback at ${dial} dB (tailFromCurve): ${wholeCuts.length} fades newly cut; before the music's end by median ${f(q(wc, 0.5), 0)} s, max ${f(Math.max(...wc, NaN), 0)} s`);
+  for (const x of wholeCuts.sort((a, b) => b.earlierSec - a.earlierSec).slice(0, 25)) {
+    console.log(`  ${f(x.earlierSec, 0).padStart(4)} s earlier, cut at ${mmss(x.cutSec)} (body ${x.row.loudness_lufs ?? '?'} LUFS)  ${x.row.artist ?? '?'} — ${x.row.title ?? '?'}  [${x.row.id}]`);
+  }
 
   const list = num(args, '--list');
   if (list) {
