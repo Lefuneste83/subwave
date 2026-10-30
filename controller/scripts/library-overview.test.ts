@@ -107,10 +107,15 @@ test('no length limit in force reads null; the pure summary counts what passes f
   assert.equal(s.within, 2, '300 s and the unknown length pass; 100 s and 700 s do not');
 });
 
-test('the needs-you sum adds analysis failures, settled unmeasurable facets (not year), measurements still due and failed year lookups', () => {
+test('the needs-you sum adds analysis failures, settled unmeasurable facets (not year), measurements still due, failed year lookups and damaged decodes', () => {
   track('x');
   track('y');
   track('z');
+  // Corrupt frames: one burst long enough to wreck the loudness, one only
+  // past the peak bound; a loud master's +3 dBTP overshoot is not damage.
+  track('wrecked', { loudness_lufs: 10, peak_db: 87.7 });
+  track('clicks', { loudness_lufs: -11.5, peak_db: 13.3 });
+  track('loud-master', { loudness_lufs: -5.2, peak_db: 3.1 });
   d().prepare('UPDATE tracks SET analyze_fail_count = 99 WHERE id = ?').run('x');
   d().exec('DELETE FROM track_facet_status');
   const ins = d().prepare(`INSERT INTO track_facet_status (track_id, facet, status, version, attempts, at) VALUES (?, ?, ?, ?, 1, '2026-10-27')`);
@@ -125,7 +130,8 @@ test('the needs-you sum adds analysis failures, settled unmeasurable facets (not
   assert.equal(a.unmeasurable, 1, 'one track, however many facets; year has its own surface, the Era tab');
   assert.equal(a.remeasure, 1, 'a measurement still due is counted apart, never as an unreadable file');
   assert.equal(a.yearFailed, 1);
-  assert.equal(a.total, a.eraAlbums + a.unmeasurable + a.remeasure + a.yearFailed + a.analysisFailed);
+  assert.equal(a.damaged, 2, 'a burst far over full scale, never a loud master');
+  assert.equal(a.total, a.eraAlbums + a.unmeasurable + a.remeasure + a.yearFailed + a.analysisFailed + a.damaged);
 
   // The CSV lists exactly the tracks the tile counts, one row per track and issue.
   d().prepare(`UPDATE track_facet_status SET unmeasurable_reason = 'silent' WHERE track_id = 'x' AND facet = 'loudness'`).run();
@@ -134,8 +140,10 @@ test('the needs-you sum adds analysis failures, settled unmeasurable facets (not
   const lines = ov.exportAttentionCsv(d()).trimEnd().split('\r\n');
   assert.equal(lines[0].split(',')[0], 'issue');
   const body = lines.slice(1);
-  assert.equal(body.length, a.unmeasurable + a.remeasure + a.yearFailed + a.analysisFailed);
-  assert.deepEqual(body.map(l => l.split(',')[0]), ['analysis-gave-up', 're-measure', 'unreadable', 'year-lookup-failed']);
+  assert.equal(body.length, a.unmeasurable + a.remeasure + a.yearFailed + a.analysisFailed + a.damaged);
+  assert.deepEqual(body.map(l => l.split(',')[0]), ['analysis-gave-up', 'damaged-decode', 'damaged-decode', 're-measure', 'unreadable', 'year-lookup-failed']);
+  assert.match(body.find(l => l.includes(',wrecked,'))!, /true peak \+87\.7 dBTP, loudness 10\.0 LUFS \(loudness wrong: airs too quiet\)/);
+  assert.match(body.find(l => l.includes(',clicks,'))!, /\(loudness OK; may click on air\)/);
   const unreadable = body.find(l => l.startsWith('unreadable'))!;
   assert.match(unreadable, /loudness: silent/);
   assert.match(unreadable, /tail: not measured/);

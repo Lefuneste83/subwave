@@ -38,7 +38,7 @@ export interface LibraryOverview {
   /** Distinct canAir tracks in the play history. */
   aired: { windowDays: number; recent: number; ever: number; never: number; since: string | null };
   /** What only the operator can settle. */
-  attention: { eraAlbums: number; unmeasurable: number; remeasure: number; yearFailed: number; analysisFailed: number; total: number };
+  attention: { eraAlbums: number; unmeasurable: number; remeasure: number; yearFailed: number; analysisFailed: number; damaged: number; total: number };
   computedAt: string;
 }
 
@@ -203,6 +203,10 @@ const yearFailedSql = (p = '') => `${p}status = 'failed' AND ${p}facet = 'year'`
  *                       next facet run for it takes it again
  *   year-lookup-failed  the original-year lookup errored (not "not found")
  *   analysis-gave-up    analysis failed MAX_ANALYSIS_FAILURES times in a row
+ *   damaged-decode      the file decodes into bursts far over full scale
+ *                       (corrupt frames, db.DAMAGED_DECODE_SQL); detail = the
+ *                       measured true peak and loudness, and whether the
+ *                       loudness is wrong because of it
  */
 export function exportAttentionCsv(d = db.requireDb()): string {
   const header = 'issue,detail,id,artist,title,album,album_artist,year,file_path,file_suffix,bit_rate,file_size,duration_sec';
@@ -232,6 +236,12 @@ export function exportAttentionCsv(d = db.requireDb()): string {
       `SELECT 'analysis-gave-up' AS issue,
               COALESCE(t.analyze_error, 'failed') || ' (' || t.analyze_fail_count || ' failures)' AS detail, ${cols}
          FROM tracks t WHERE t.analyze_fail_count >= ${db.MAX_ANALYSIS_FAILURES}`,
+    ).all() as Row[]),
+    ...(d.prepare(
+      `SELECT 'damaged-decode' AS issue,
+              'true peak ' || printf('%+.1f', t.peak_db) || ' dBTP, loudness ' || printf('%.1f', t.loudness_lufs) || ' LUFS'
+                || CASE WHEN t.loudness_lufs > -3 THEN ' (loudness wrong: airs too quiet)' ELSE ' (loudness OK; may click on air)' END AS detail, ${cols}
+         FROM tracks t WHERE ${db.DAMAGED_DECODE_SQL}`,
     ).all() as Row[]),
   ];
   const fold = (v: unknown) => String(v ?? '').toLowerCase();
@@ -263,7 +273,8 @@ function readAttention(eraAlbums: number): LibraryOverview['attention'] {
     `SELECT COUNT(*) AS n FROM track_facet_status WHERE ${yearFailedSql()}`,
   ).get() as { n: number }).n);
   const analysisFailed = safeCount(() => db.analysisFailedCount());
-  return { eraAlbums, unmeasurable, remeasure, yearFailed, analysisFailed, total: eraAlbums + unmeasurable + remeasure + yearFailed + analysisFailed };
+  const damaged = safeCount(() => db.damagedDecodeCount());
+  return { eraAlbums, unmeasurable, remeasure, yearFailed, analysisFailed, damaged, total: eraAlbums + unmeasurable + remeasure + yearFailed + analysisFailed + damaged };
 }
 
 function activeLimits(): { show: string | null; minSec: number | null; maxSec: number | null } {
