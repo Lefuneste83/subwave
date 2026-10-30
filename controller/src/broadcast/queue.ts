@@ -55,6 +55,7 @@ import { recordPlaybackFailure } from '../observability/playback-failures.js';
 import { djCallsAllowed, presentListeners } from './listeners.js';
 import { autoVoiceAllowed } from './voice-policy.js';
 import { speakClockAllowed, stationIdDaypartDrifted, stationIdDaypartStamp } from './clock-policy.js';
+import { standInToken } from './stand-in-policy.js';
 import {
   currentTalkAir,
   suppressScheduledSpeechDuringHandoff,
@@ -2420,6 +2421,19 @@ class Queue {
     return { pending: true, committed: false, waitedMs: Date.now() - t0 };
   }
 
+  // Every spoken path's last text gate: a stand-in line (stand-in-policy) is
+  // dropped whole. An empty return is the callers' existing "nothing to air"
+  // case, so a dropped feature falls back exactly as a stood-down skill does.
+  // Verbatim operator text is exempt.
+  speakable(text: string, kind: string, { verbatim = false } = {}): string {
+    if (verbatim || !text) return text;
+    const token = standInToken(text);
+    if (!token) return text;
+    this.log('dj', `${kind}: dropped a stand-in line ("${token}") instead of airing it`);
+    logEvent('speech.standInDropped', { kind, token });
+    return '';
+  }
+
   // Why an operator skip aimed at `expectId` must not land, or null when it may
   // (#2017). Reads now-playing.json from disk, not the watcher's copy (up to a
   // 1.5s tick old); a jingle through its own window (jingleWindow, widened to
@@ -2467,9 +2481,9 @@ class Queue {
     // truth than _speak is what made the fix miss the very path that reported
     // the bug.
     const speaker = persona ?? settings.getEffectivePersona();
-    const safeText = normalizeForDisplay(
+    const safeText = this.speakable(normalizeForDisplay(
       speaker?.name ? stripSpeakerLabel(text || '', [speaker.name]) : (text || ''),
-    );
+    ), kind, { verbatim: meta?.verbatim === true });
     if (!safeText) return { accepted: false, deferred: false, completed: Promise.resolve(false) };
     if (hostSpeech && !session.isHostSpeechCurrent(hostSpeech)) {
       return { accepted: false, deferred: false, completed: Promise.resolve(false) };
@@ -2675,7 +2689,7 @@ class Queue {
       // Each clip owns its speaker's gain, attribution and live-edge marker.
       // Conversational batching must preserve those before it can air here.
       for (const l of lines) {
-        const text = normalizeForDisplay(stripSpeakerLabel(l.text || '', knownNames));
+        const text = this.speakable(normalizeForDisplay(stripSpeakerLabel(l.text || '', knownNames)), kind);
         if (!text) continue;
         const wavPath = await this._speak(text, { kind, persona: l.persona });
         rendered.push({ ...l, text, wavPath });
@@ -2745,9 +2759,9 @@ class Queue {
     // guard as announce(): a label the model prefixed would otherwise be read
     // aloud. Same speaker resolution, for the same reason.
     const scheduledSpeaker = persona ?? settings.getEffectivePersona();
-    const safeText = normalizeForDisplay(
+    const safeText = this.speakable(normalizeForDisplay(
       scheduledSpeaker?.name ? stripSpeakerLabel(text || '', [scheduledSpeaker.name]) : (text || ''),
-    );
+    ), kind, { verbatim: meta?.verbatim === true });
     if (!safeText) return;
     if (hostSpeech && !session.isHostSpeechCurrent(hostSpeech)) return;
     if (suppressScheduledSpeechDuringHandoff(kind, session.handoffInProgress())) {
