@@ -717,7 +717,7 @@ curve through `library.get`), `scripts/tail-placement.test.ts` (v3) and
 `ebur128` short-term values, within 0.5 LU).
 
 **The tail's level readings can be derived from the whole-file curve** (B23,
-`music/curve-ending.ts`; nothing reads them on air yet). The whole-file pass
+`music/curve-ending.ts`; on air behind `transitions.tailFromCurve`, below). The whole-file pass
 already stores a 0.5 s short-term series around where the music stops
 (`loudness_curve_json.tail`), so the four LEVEL readings of the tail facet need
 no librosa decode: the fade or cold `ending`, the wind-down `startMs`, the tail
@@ -737,6 +737,24 @@ loudness 90 % within 0.9 dB; the audible-end cut at the default 20 dB median
 0.05 s apart (90 % within 0.5 s). `npm run curve-ab` (read-only; `--sample N`,
 `--list N`) prints the same comparison for any library. Pinned by
 `scripts/curve-ending.test.ts`.
+
+**`transitions.tailFromCurve` puts them on air** (off by default, so an upgrade
+airs as before; controller-side, no mixer restart). The decision is made once,
+in `music/tail-levels.ts`, and applied in `library.get()`'s `outro` projection,
+so the queue's ending and exit canvas, the stem blend and the audible-end cut
+all read the same readings. The curve replaces the four level readings; the
+tempo, grids and vocals stay the tail facet's; a track whose curve yields
+nothing keeps its stored outro, and one with a curve but no tail facet gets an
+outro of the curve's readings with no grid and no vocals. Listening on twelve
+tracks where the two disagreed, the curve's fade-or-cold matched the ear on ten
+and librosa's on two. On, the projection also carries the whole-track 1 s
+series (`outro.wholeLoudnessCurve`, never stored), which the audible-end cut
+searches when the tail series never reaches its threshold: a drone or room
+noise after the music sits over the -50 dBFS floor, so the music's end, and the
+whole 20 s window, land on it (a measured case aired a 44 s drone). It moves the
+end only earlier, under the cut's usual bounds. `npm run curve-ab` lists every
+fade it would newly cut, because a quiet coda is music and only an ear can tell
+it from noise. Pinned by `scripts/tail-levels.test.ts`.
 
 ## Prepared artist episodes
 

@@ -1,9 +1,9 @@
 // The tail facet's LEVEL readings, derived from the whole-file loudness curve
 // (B23 step 3): the fade-or-cold ending, the wind-down start, the tail
 // loudness and the short-term curve the audible-end cut reads. Pure: no
-// library, no settings. Nothing airs from it yet; `npm run curve-ab` compares
-// it with the stored librosa readings, and switching the consumers is its own
-// change (step 5).
+// library, no settings. `npm run curve-ab` compares it with the stored librosa
+// readings; music/tail-levels.ts puts it on air behind
+// transitions.tailFromCurve.
 //
 // The librosa tail facet reads the last OUTRO_SECONDS (20 s) before the music
 // stops, as RMS at 22 kHz: `loud` is the 95th percentile of that window, the

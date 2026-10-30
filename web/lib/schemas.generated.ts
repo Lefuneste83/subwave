@@ -3094,6 +3094,7 @@ export const transitionsPatchSchema = settingsBlockOf({
       }
     })
     .transform((raw) => raw as number),
+  tailFromCurve: settingsStrictOneOf([true, false], 'transitions.tailFromCurve must be true or false'),
   effects: transitionEffectsPatchSchema,
 });
 

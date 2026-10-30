@@ -1254,6 +1254,7 @@ export async function load() {
         stored.transitions.fadeAudibleEndDb <= BOUNDS.fadeAudibleEndDb.max
           ? stored.transitions.fadeAudibleEndDb
           : DEFAULTS.transitions.fadeAudibleEndDb,
+      tailFromCurve: typeof stored.transitions?.tailFromCurve === 'boolean' ? stored.transitions.tailFromCurve : DEFAULTS.transitions.tailFromCurve,
       // Per-effect kill switches (#1565) — same absent-means-default repair as
       // every sibling, and the default is `true`, so a stored block missing a
       // field (or missing entirely) normalises to the whole kit on.
@@ -2475,8 +2476,9 @@ export async function prepareUpdate(patch, { themeIds }: { themeIds?: ReadonlySe
   if ('transitions' in patch) {
     const tr = parseSettingsPatchKey<Record<string, unknown>>('transitions', patch.transitions);
     // fadeAudibleEnd(Db) are controller-side cue points read per queued track
-    // (music/silence-trim.ts), so they need no mixer restart.
-    for (const k of ['pairDrain', 'stemBlends', 'fadeAudibleEnd', 'fadeAudibleEndDb'] as const) {
+    // (music/silence-trim.ts), and tailFromCurve picks which measurement the
+    // queue reads (music/tail-levels.ts), so they need no mixer restart.
+    for (const k of ['pairDrain', 'stemBlends', 'fadeAudibleEnd', 'fadeAudibleEndDb', 'tailFromCurve'] as const) {
       if (tr[k] !== undefined) (next.transitions as Record<string, unknown>)[k] = tr[k];
     }
     // Read once by the mixer at startup (liquidsoap_equal_power_crossfade.txt),

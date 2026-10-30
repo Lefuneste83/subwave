@@ -1088,6 +1088,31 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
                     no mixer restart; tracks not yet re-analysed keep today&apos;s cut.
                   </div>
                 </div>
+                <div className="field">
+                  <Label>Read endings from the loudness curve</Label>
+                  <div className="flex items-center gap-2">
+                    <Seg
+                      options={[
+                        { id: 'off', label: 'Off' },
+                        { id: 'on', label: 'On' },
+                      ]}
+                      value={form.transitions.tailFromCurve ? 'on' : 'off'}
+                      onChange={id =>
+                        setForm(f =>
+                          f ? { ...f, transitions: { ...f.transitions, tailFromCurve: id === 'on' } } : f,
+                        )
+                      }
+                    />
+                  </div>
+                  <SettingsFieldError path="transitions.tailFromCurve" errors={fieldErrors} />
+                  <div className="field-hint">
+                    Whether a song fades or stops cold, where it starts winding down and how loud
+                    its last seconds are, read from the whole-track loudness measurement instead of
+                    the older tail analysis. With the audible-end cut on, a fade followed by a drone
+                    or room noise is also cut where the music stops. Applies from the next queued
+                    track, no mixer restart; tracks without the measurement keep today&apos;s readings.
+                  </div>
+                </div>
                 </div>
               </Card>
             )}

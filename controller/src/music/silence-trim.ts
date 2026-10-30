@@ -19,7 +19,7 @@
 
 import * as settings from '../settings.js';
 import * as library from './library.js';
-import { audibleEndSec, parseLoudnessCurve } from './loudness-curve.js';
+import { audibleEndSec, parseLoudnessCurve, type LoudnessCurve } from './loudness-curve.js';
 
 // Keeps the cut off the attack or the decay's last ring; must clear the
 // analyzer's frame quantisation (~93ms at 22.05 kHz).
@@ -55,7 +55,7 @@ export interface SilenceTrimTrack {
   decodedDurationMs?: number | null;
   // The audible-end cut (transitions.fadeAudibleEnd) reads the measured ending
   // and the body loudness: track object first, else the library record.
-  outro?: { ending?: string | null; loudnessCurve?: unknown } | null;
+  outro?: { ending?: string | null; loudnessCurve?: unknown; wholeLoudnessCurve?: LoudnessCurve } | null;
   loudnessLufs?: number | null;
 }
 
@@ -174,7 +174,12 @@ function audibleEndFor(track: SilenceTrimTrack, m: Measured, cut: SilenceTrimRes
   const body = track.loudnessLufs ?? rec?.loudnessLufs ?? null;
   // The dial is bounded by load() (repair) and update() (refusal); an
   // unreadable one reads as no audible end, never as some other depth.
-  const e = audibleEndSec(curve, body, Number(tr.fadeAudibleEndDb));
+  // When the tail never reaches it (a drone or room noise after the music
+  // fills the whole tail window), the whole-track series places the end; it
+  // is present only with transitions.tailFromCurve on (music/tail-levels.ts).
+  const whole = outro.wholeLoudnessCurve;
+  const e = audibleEndSec(curve, body, Number(tr.fadeAudibleEndDb))
+    ?? (whole ? audibleEndSec(whole, body, Number(tr.fadeAudibleEndDb)) : null);
   if (e == null) return null;
   const endSec = Math.round(e * 1000) / 1000;
   // Only ever earlier than the end the trim (or the file) gives…

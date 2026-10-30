@@ -23,6 +23,15 @@ export function getTrack(id: string): TrackRecord | null {
   return row ? rowToTrack(row) : null;
 }
 
+// The raw whole-file loudness curve (loudness_curve_json), or null. Read on
+// its own so rowToTrack never carries it: a DJ set's runs to ~120 KB.
+export function getLoudnessCurveJson(id: string): string | null {
+  const row = requireDb()
+    .prepare(`SELECT loudness_curve_json FROM tracks WHERE id = ?`)
+    .get(id) as { loudness_curve_json: string | null } | undefined;
+  return row?.loudness_curve_json ?? null;
+}
+
 export function getTaggedAt(id: string): string | null {
   const row = requireDb()
     .prepare<[string], Pick<TrackRow, 'tagged_at'>>('SELECT tagged_at FROM tracks WHERE id = ?')
