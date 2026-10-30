@@ -132,7 +132,7 @@ async function main() {
 
   const mmss = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
   const wc = wholeCuts.map(x => x.earlierSec);
-  console.log(`whole-track fallback at ${dial} dB (tailFromCurve): ${wholeCuts.length} fades newly cut; before the music's end by median ${f(q(wc, 0.5), 0)} s, max ${f(Math.max(...wc, NaN), 0)} s`);
+  console.log(`whole-track fallback at ${dial} dB (tailFromCurve): ${wholeCuts.length} fades newly cut; before the music's end by median ${f(q(wc, 0.5), 0)} s, max ${f(wc.length ? Math.max(...wc) : NaN, 0)} s`);
   for (const x of wholeCuts.sort((a, b) => b.earlierSec - a.earlierSec).slice(0, 25)) {
     console.log(`  ${f(x.earlierSec, 0).padStart(4)} s earlier, cut at ${mmss(x.cutSec)} (body ${x.row.loudness_lufs ?? '?'} LUFS)  ${x.row.artist ?? '?'} — ${x.row.title ?? '?'}  [${x.row.id}]`);
   }
