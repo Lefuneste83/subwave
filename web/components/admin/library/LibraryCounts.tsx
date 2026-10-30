@@ -27,7 +27,7 @@ export interface LibraryOverview {
   lengthLimits: { show: string | null; minSec: number | null; maxSec: number | null; within: number } | null;
   aired: { windowDays: number; recent: number; ever: number; never: number; since: string | null };
   // `remeasure` is absent from a controller older than the split: read it as 0.
-  attention: { eraAlbums: number; unmeasurable: number; remeasure?: number; yearFailed: number; analysisFailed: number; total: number };
+  attention: { eraAlbums: number; unmeasurable: number; remeasure?: number; yearFailed: number; analysisFailed: number; damaged?: number; total: number };
   computedAt: string;
 }
 
@@ -92,7 +92,8 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
   const { adminFetch } = useLibrary();
   const [downloading, setDownloading] = useState(false);
   // The tracks behind Needs you (unreadable, year lookup failed, analysis gave
-  // up) as a CSV with their file paths; the Era albums have the Era tab's CSV.
+  // up, damaged) as a CSV with their file paths; the Era albums have the Era
+  // tab's CSV.
   const downloadAttention = async () => {
     setDownloading(true);
     try {
@@ -138,6 +139,7 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
         a.remeasure ? `${plural(a.remeasure, 'track')} to re-measure` : null,
         a.yearFailed ? `${plural(a.yearFailed, 'track')}: year lookup failed` : null,
         a.analysisFailed ? `${plural(a.analysisFailed, 'track')}: analysis gave up` : null,
+        a.damaged ? `${plural(a.damaged, 'track')} damaged` : null,
       ].filter(Boolean).join(' · ') || 'all clear'
     : '…';
   const gap = o && serverTotal != null ? serverTotal - o.library : null;
@@ -279,6 +281,7 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
               a.remeasure ? `${num(a.remeasure)} to re-measure` : null,
               a.yearFailed ? `${num(a.yearFailed)} year lookup failed` : null,
               a.analysisFailed ? `${num(a.analysisFailed)} analysis gave up` : null,
+              a.damaged ? `${num(a.damaged)} damaged (corrupt frames)` : null,
             ].filter(Boolean).join(', ')}).
           </span>
           <Btn sm onClick={downloadAttention} disabled={downloading}
