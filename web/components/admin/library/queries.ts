@@ -109,6 +109,29 @@ export function applyEraYearEvent(qc: QueryClient, ev: {
     originalYear: ev.originalYear,
     originalYearSource: ev.originalYear == null ? null : 'manual',
   }));
+
+  // The Era tab's per-album track lists show the same year. Without this the
+  // line read its OLD year between the save and the refetch: the typed draft
+  // is cleared on success, so the field fell back to its placeholder (the
+  // album's year) and looked as if that had been saved. A clear is left to the
+  // refetch: the year the lookups give back is not known here.
+  if (ev.originalYear == null) return;
+  const year = ev.originalYear;
+  qc.setQueriesData<{ tracks: EraAlbumTrack[] }>({ queryKey: [...libraryKeys.era(), 'album'] }, prev => (
+    prev?.tracks
+      ? { ...prev, tracks: prev.tracks.map(t => (!trackIds.has(t.id) ? t : {
+          ...t, originalYear: year, originalYearSource: 'manual', yearState: 'resolved',
+        })) }
+      : prev
+  ));
+}
+
+/** The fields of an Era album track line that a year save touches. */
+interface EraAlbumTrack {
+  id: string;
+  originalYear: number | null;
+  originalYearSource: string | null;
+  yearState?: string;
 }
 
 /**
