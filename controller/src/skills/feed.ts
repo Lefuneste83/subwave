@@ -10,13 +10,40 @@ import { fetchWithTimeout } from '../util/fetch-timeout.js';
 // resolver, the admin knobs and the docs.
 export const FEED_URL_KEY = 'feed';
 export const FEED_MAX_ITEMS_KEY = 'feedMaxItems';
+export const FEED_MAX_AGE_KEY = 'feedMaxAgeDays';
+// Optional further feeds read alongside `feed`, merged into one list.
+export const FEED_EXTRA_URL_KEYS = ['feed2', 'feed3'] as const;
 
 // Upper bound on `feedMaxItems`, and the `max` the admin number field enforces.
 export const FEED_MAX_ITEMS_LIMIT = 50;
+// Upper bound on `feedMaxAgeDays`.
+export const FEED_MAX_AGE_LIMIT = 365;
 
 export interface Headline {
   title: string;
   description: string;
+  /** ISO time the item was published, present only when the feed dates it. */
+  published?: string;
+}
+
+export interface ParseOptions {
+  /** Drop items published longer ago than this. Undated items are kept. */
+  maxAgeDays?: number | null;
+  now?: number;
+}
+
+// An item's publish time across the dialects: RSS 2.0 <pubDate>, Atom
+// <published>/<updated>, RSS 1.0 <dc:date> (prefix stripped to <date>).
+// Unparseable or absent is null, never "now": an item we cannot date is not
+// thereby fresh, but nor is it provably stale.
+function publishedOf(entry: Record<string, unknown>): number | null {
+  for (const node of [entry.pubDate, entry.published, entry.updated, entry.date, entry.issued]) {
+    const text = textOf(node).trim();
+    if (!text) continue;
+    const t = Date.parse(text);
+    if (Number.isFinite(t)) return t;
+  }
+  return null;
 }
 
 const parser = new XMLParser({
@@ -99,8 +126,12 @@ function entriesOf(doc: Record<string, unknown>): Record<string, unknown>[] {
 }
 
 // Parse a feed document into at most `cap` headlines. Entries with no title are
-// dropped — a headline the DJ cannot read is not a headline.
-export function parseFeed(xml: string, cap: number): Headline[] {
+// dropped — a headline the DJ cannot read is not a headline. With `maxAgeDays`,
+// an item dated older than that is dropped too, before the cap counts it: a
+// search feed (Google News) ignores its own `when:` window on a long query and
+// mixes months-old items in, and the DJ cannot tell last summer's festival from
+// tonight's. An undated item is kept (fail open: nothing says it is stale).
+export function parseFeed(xml: string, cap: number, { maxAgeDays = null, now = Date.now() }: ParseOptions = {}): Headline[] {
   let doc: Record<string, unknown> | null = null;
   try {
     doc = asRecord(parser.parse(xml));
@@ -111,16 +142,19 @@ export function parseFeed(xml: string, cap: number): Headline[] {
   }
   if (!doc) return [];
 
+  const oldest = maxAgeDays ? now - maxAgeDays * 86_400_000 : null;
   const out: Headline[] = [];
   for (const entry of entriesOf(doc)) {
     if (out.length >= cap) break;
     const title = stripHtml(textOf(entry.title));
     if (!title) continue;
+    const at = publishedOf(entry);
+    if (oldest != null && at != null && at < oldest) continue;
     // RSS carries the blurb in <description>; Atom uses <summary>, falling back
     // to <content> (which, post-removeNSPrefix, is also where RSS's
     // <content:encoded> lands).
     const description = stripHtml(textOf(entry.description ?? entry.summary ?? entry.content));
-    out.push({ title, description });
+    out.push(at == null ? { title, description } : { title, description, published: new Date(at).toISOString() });
   }
   return out;
 }
@@ -131,7 +165,7 @@ export function hashHeadline(title: string): string {
   return h.toString(36);
 }
 
-export async function fetchHeadlines({ feedUrl, maxItems }: { feedUrl?: string; maxItems?: number } = {}) {
+export async function fetchHeadlines({ feedUrl, maxItems, maxAgeDays = null }: { feedUrl?: string; maxItems?: number; maxAgeDays?: number | null } = {}) {
   const url = feedUrl || config.news.feedUrl;
   const cap = maxItems || config.news.maxItems;
   // Bounded like the web-search backends. The feed URL is operator-set
@@ -142,7 +176,7 @@ export async function fetchHeadlines({ feedUrl, maxItems }: { feedUrl?: string; 
   // times over. 15s is generous for an RSS document.
   const res = await fetchWithTimeout(url, { timeoutMs: 15_000 });
   if (!res.ok) throw new Error(`News feed HTTP ${res.status}`);
-  return parseFeed(await res.text(), cap);
+  return parseFeed(await res.text(), cap, { maxAgeDays });
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +209,26 @@ export const FEED_CONFIG_FIELDS = {
     integer: true,
     placeholder: '10',
   },
+  feedMaxAgeDays: {
+    type: 'number',
+    label: 'Max age · days',
+    min: 1,
+    max: FEED_MAX_AGE_LIMIT,
+    integer: true,
+    placeholder: 'no limit',
+    hint: 'Skip items published longer ago than this. Undated items are kept.',
+  },
+  feed2: {
+    type: 'url',
+    label: 'Second feed URL · optional',
+    placeholder: 'https://…/rss.xml',
+    hint: 'Read alongside the first feed and merged with it.',
+  },
+  feed3: {
+    type: 'url',
+    label: 'Third feed URL · optional',
+    placeholder: 'https://…/rss.xml',
+  },
 } as const;
 
 // How many FRESH items one fire hands the model. This is the news skill's
@@ -193,6 +247,10 @@ const SEEN_KEEP = 60;
 export interface ResolvedFeed {
   url: string;
   maxItems: number;
+  /** Further feeds merged with `url`; absent when none is declared. */
+  extraUrls?: string[];
+  /** Item age cap in days; absent when none is declared. */
+  maxAgeDays?: number;
 }
 
 export interface FeedResolution {
@@ -214,23 +272,60 @@ export interface FeedResolution {
 // "fetch this" in the one place that means it.
 export function resolveFeedConfig(config: Record<string, unknown> | null | undefined): FeedResolution {
   const warnings: string[] = [];
-  const raw = config?.[FEED_URL_KEY];
-  const url = raw == null ? '' : String(raw).replace(/[\r\n\t]/g, '').trim();
-  if (!url) return { feed: null, warnings };
+  const url = cleanUrl(config?.[FEED_URL_KEY]);
+  const extras = FEED_EXTRA_URL_KEYS
+    .map((key) => ({ key, url: cleanUrl(config?.[key]) }))
+    .filter((e) => e.url);
+  if (!url) {
+    // A further feed with no first one is a half-filled form, not a feed.
+    for (const e of extras) warnings.push(`${e.key}: set, but "${FEED_URL_KEY}" is empty — ignored`);
+    return { feed: null, warnings };
+  }
 
+  const problem = urlProblem(url);
+  if (problem) {
+    warnings.push(`feed: "${url}" ${problem} — no feed tool was generated`);
+    return { feed: null, warnings };
+  }
+
+  const feed: ResolvedFeed = { url, maxItems: resolveMaxItems(config?.[FEED_MAX_ITEMS_KEY], warnings) };
+  // A bad further feed is skipped with a warning; the first one still works.
+  const extraUrls: string[] = [];
+  for (const e of extras) {
+    const why = urlProblem(e.url);
+    if (why) warnings.push(`${e.key}: "${e.url}" ${why} — skipped`);
+    else if (e.url !== url && !extraUrls.includes(e.url)) extraUrls.push(e.url);
+  }
+  if (extraUrls.length) feed.extraUrls = extraUrls;
+  const maxAgeDays = resolveMaxAge(config?.[FEED_MAX_AGE_KEY], warnings);
+  if (maxAgeDays != null) feed.maxAgeDays = maxAgeDays;
+  return { feed, warnings };
+}
+
+function cleanUrl(raw: unknown): string {
+  return raw == null ? '' : String(raw).replace(/[\r\n\t]/g, '').trim();
+}
+
+function urlProblem(url: string): string | null {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    warnings.push(`feed: "${url}" is not a URL — no feed tool was generated`);
-    return { feed: null, warnings };
+    return 'is not a URL';
   }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    warnings.push(`feed: "${url}" is not an http(s) URL — no feed tool was generated`);
-    return { feed: null, warnings };
-  }
+  return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? null : 'is not an http(s) URL';
+}
 
-  return { feed: { url, maxItems: resolveMaxItems(config?.[FEED_MAX_ITEMS_KEY], warnings) }, warnings };
+// Lenient like `feedMaxItems`, but its fallback is "no limit": that is what a
+// skill without the knob has always had.
+function resolveMaxAge(raw: unknown, warnings: string[]): number | null {
+  if (raw == null || String(raw).trim() === '') return null;
+  const n = Number(String(raw).trim());
+  if (!Number.isInteger(n) || n < 1 || n > FEED_MAX_AGE_LIMIT) {
+    warnings.push(`feedMaxAgeDays: "${raw}" is not a whole number between 1 and ${FEED_MAX_AGE_LIMIT} — no age limit applied`);
+    return null;
+  }
+  return n;
 }
 
 // `feedMaxItems` is lenient where the URL is strict: a broken count still has an
@@ -275,7 +370,7 @@ function seenSetFor(state: any, kind: string): Set<string> {
 export function makeFeedTool(kind: string, feed: ResolvedFeed) {
   return async function fetchFeedItems(_ctx?: unknown, state?: any) {
     const seen = seenSetFor(state, kind);
-    const items = await fetchHeadlines({ feedUrl: feed.url, maxItems: feed.maxItems });
+    const items = await fetchMerged(feed);
     // A feed that fetched fine but carries no readable items is the same
     // answer as one that has all aired. It touches no dedup memory.
     if (!items.length) return { available: false, reason: 'the feed has no items' };
@@ -288,6 +383,39 @@ export function makeFeedTool(kind: string, feed: ResolvedFeed) {
       seen.clear();
       for (const h of kept) seen.add(h);
     }
-    return { headlines: fresh.map(it => ({ title: it.title, detail: it.description || null })) };
+    // The date rides along when the feed gave one, so the DJ can tell what is
+    // news from what is history (and never call an old event "coming up").
+    return {
+      headlines: fresh.map(it => (it.published
+        ? { title: it.title, detail: it.description || null, published: it.published.slice(0, 10) }
+        : { title: it.title, detail: it.description || null })),
+    };
   };
+}
+
+// Every declared feed, fetched together and interleaved round-robin so a busy
+// feed cannot crowd a quiet one out of the per-fire cap; a repeated headline
+// keeps its first appearance. One feed failing is skipped while another
+// answers; all of them failing rethrows the first error, the same `{ error }`
+// degradation a single feed has always had.
+async function fetchMerged(feed: ResolvedFeed): Promise<Headline[]> {
+  const urls = [feed.url, ...(feed.extraUrls || [])];
+  const opts = { maxItems: feed.maxItems, maxAgeDays: feed.maxAgeDays ?? null };
+  if (urls.length === 1) return fetchHeadlines({ feedUrl: urls[0], ...opts });
+  const results = await Promise.allSettled(urls.map((feedUrl) => fetchHeadlines({ feedUrl, ...opts })));
+  const lists = results.flatMap((r) => (r.status === 'fulfilled' ? [r.value] : []));
+  if (!lists.length) throw (results[0] as PromiseRejectedResult).reason;
+  const out: Headline[] = [];
+  const taken = new Set<string>();
+  for (let i = 0; lists.some((l) => i < l.length); i++) {
+    for (const list of lists) {
+      const it = list[i];
+      if (!it) continue;
+      const h = hashHeadline(it.title);
+      if (taken.has(h)) continue;
+      taken.add(h);
+      out.push(it);
+    }
+  }
+  return out;
 }
