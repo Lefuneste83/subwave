@@ -30,6 +30,9 @@ when a control is hidden.
   servers are all supported; pick one in Settings → LLM provider.
 - Three root .env vars boot the stack: ADMIN_USER, ADMIN_PASS, SITE_URL. Env always
   wins over wizard/settings.
+- Ten different wrong admin passwords lock sign-in for 15 minutes (429, the right
+  password is refused too). Restarting the controller clears it at once; setting
+  ADMIN_LOCKOUT=off in .env and recreating the controller turns the lock off.
 
 ## Chain-of-thought (Settings → LLM provider → Reasoning)
 - Lets "thinking" models emit a reasoning chain before answering. Costs latency and
@@ -107,8 +110,10 @@ aren't matched by feel. If coverage is zero/low, recommend running the tagger.
 Backs the DJ's artist-news segments. 'duckduckgo' is the keyless default; 'tavily'
 and 'brave' give richer results but need a key (SEARCH_API_KEY — Brave is metered
 with $5/mo free credits and requires a card on file); 'searxng' is keyless but needs
-a self-hosted instance URL. If a keyed provider is selected without a key, news
-segments can't fetch — tell them to add the key or switch to DuckDuckGo/SearXNG.
+a self-hosted instance URL; 'keenable' is keyless web search, and a Keenable key in
+SEARCH_API_KEY only raises its rate limit. If a keyed provider is selected without a
+key, news segments can't fetch — tell them to add the key or switch to
+DuckDuckGo or Keenable (both keyless), or to a self-hosted SearXNG.
 
 ## Backups
 There is a Backup feature (Admin → Backup) that exports settings, personas, custom
