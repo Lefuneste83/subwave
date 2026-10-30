@@ -716,6 +716,28 @@ curve through `library.get`), `scripts/tail-placement.test.ts` (v3) and
 `scripts/analyzer_loudness_curve_test.py` (the curve against ffmpeg's
 `ebur128` short-term values, within 0.5 LU).
 
+**The tail's level readings can be derived from the whole-file curve** (B23,
+`music/curve-ending.ts`; nothing reads them on air yet). The whole-file pass
+already stores a 0.5 s short-term series around where the music stops
+(`loudness_curve_json.tail`), so the four LEVEL readings of the tail facet need
+no librosa decode: the fade or cold `ending`, the wind-down `startMs`, the tail
+`lufs` and the `loudnessCurve` the audible-end cut reads. The tempo, beat and
+bar grid stay librosa's (they wait for a whole-track beat grid), and the tail
+vocals stay Demucs'. The window is the facet's own: the 20 s before the music's
+end (the edges, as `tailWindowFor`), read as the short-term points stamped from
+17 s before that end to the end, the blocks that lie wholly inside it. A fade is
+an end point 9 dB or more under the window's 95th percentile; the wind-down
+starts 2 s before the last point within 6 dB of it (a short-term point lags the
+audio under it); the tail loudness is the window's gated power mean. The three
+constants were fitted on 2,000 tracks of one 72,938-track library against the
+stored librosa readings and judged on the other 70,696: fade or cold 93.5 %
+alike, the disagreements split evenly both ways and mostly within 3 dB of the
+threshold; wind-down start median 0.66 s apart (90 % within 2.3 s); tail
+loudness 90 % within 0.9 dB; the audible-end cut at the default 20 dB median
+0.05 s apart (90 % within 0.5 s). `npm run curve-ab` (read-only; `--sample N`,
+`--list N`) prints the same comparison for any library. Pinned by
+`scripts/curve-ending.test.ts`.
+
 ## Prepared artist episodes
 
 `broadcast/show-preparation.ts` owns `state/show-preparations.json`. Its key is a
