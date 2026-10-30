@@ -216,13 +216,13 @@ export const FEED_CONFIG_FIELDS = {
     max: FEED_MAX_AGE_LIMIT,
     integer: true,
     placeholder: 'no limit',
-    hint: 'Skip items published longer ago than this. Undated items are kept.',
+    hint: 'Older items are skipped. Undated ones are kept.',
   },
   feed2: {
     type: 'url',
     label: 'Second feed URL · optional',
     placeholder: 'https://…/rss.xml',
-    hint: 'Read alongside the first feed and merged with it.',
+    hint: 'Merged with the first feed.',
   },
   feed3: {
     type: 'url',
