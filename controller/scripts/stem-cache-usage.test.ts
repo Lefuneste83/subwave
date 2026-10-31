@@ -15,14 +15,16 @@
 //
 // Run: npm test -- stem-cache-usage
 
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { listen } from './test-utils/http.js';
+import { createTempDir, removeTempDir } from './test-utils/temp-dir.js';
 
-const stateDir = mkdtempSync(join(tmpdir(), 'subwave-stem-usage-'));
+const stateDir = createTempDir(join(tmpdir(), 'subwave-stem-usage-'));
+after(async () => { await removeTempDir(stateDir); });
 process.env.STATE_DIR = stateDir;
 delete process.env.ADMIN_USER;
 delete process.env.ADMIN_PASS;

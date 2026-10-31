@@ -21,12 +21,15 @@
 // panel paint. Every source is optional — a resolver that cannot read the db
 // or the logs still answers, with fewer names.
 
-import { readFile, readdir } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
+import { mapPool } from '../util/async-pool.js';
 import { config } from '../config.js';
 import { requireDb } from './library-db/handle.js';
-import { stemsRoot, stemsRootStatus } from './stem-cache.js';
-import { QUARANTINE_DIR } from './orphan-purge-pure.js';
+import { SCAN_CONCURRENCY, stemsRoot, stemsRootStatus } from './stem-cache.js';
+import { IN_FLIGHT_MS, QUARANTINE_DIR } from './orphan-purge-pure.js';
 
 /** Sidecar written into a stem dir at quarantine time. Dot-prefixed so every
  *  existing walk that filters dot-entries keeps ignoring it. */
@@ -88,20 +91,28 @@ async function namesFromLogs(missing: ReadonlySet<string>, logDir: string, now: 
     const fresh = new Map<string, OrphanTrackName>();
     let files: string[] = [];
     try { files = (await readdir(logDir)).filter(f => f.startsWith('events-') && f.endsWith('.jsonl')).sort(); } catch { /* no logs dir: fine */ }
+    let complete = true;
     for (const file of files) {
-      let data = '';
-      try { data = await readFile(path.join(logDir, file), 'utf8'); } catch { continue; }
-      for (const line of data.split('\n')) {
-        if (line) parseNameHits(line, fresh); // every triple: the cache serves later calls too
-      }
+      // Line by line: a day's events file runs to tens of MB.
+      try {
+        const lines = createInterface({ input: createReadStream(path.join(logDir, file), 'utf8'), crlfDelay: Infinity });
+        for await (const line of lines) {
+          if (line) parseNameHits(line, fresh); // every triple: the cache serves later calls too
+        }
+      } catch { complete = false; }
     }
-    // Only keep the cache when the scan covered every file it could read;
-    // a half-scanned pass stays uncached so it runs again next time.
+    // Only a scan that read every file is cached; a half-scanned one answers
+    // this call and runs again next time.
+    if (!complete) return pick(fresh, missing);
     logCache = { at: now, map: fresh };
   }
+  return pick(logCache.map, missing);
+}
+
+function pick(map: ReadonlyMap<string, OrphanTrackName>, missing: ReadonlySet<string>): Map<string, OrphanTrackName> {
   const hit = new Map<string, OrphanTrackName>();
   for (const id of missing) {
-    const n = logCache.map.get(id);
+    const n = map.get(id);
     if (n) hit.set(id, n);
   }
   return hit;
@@ -229,17 +240,23 @@ export async function resolveOrphanNames(ids: readonly string[], opts: ResolveOp
   return out;
 }
 
-/** Orphan dir names at the cache root (not known ids, not dot dirs).
- *  Shares the purge's walk rules so the list and the report never disagree. */
-export async function listOrphanDirNames(knownIds: ReadonlySet<string>): Promise<string[]> {
+/** Orphan dir names at the cache root (not known ids, not dot dirs, not
+ *  written within IN_FLIGHT_MS). Shares the purge's walk rules, the in-flight
+ *  grace included, so the list and the report never disagree. */
+export async function listOrphanDirNames(knownIds: ReadonlySet<string>, now = Date.now()): Promise<string[]> {
   const status = await stemsRootStatus({ readOnly: true });
   if (!status.online) return [];
+  const root = stemsRoot();
+  let names: string[];
   try {
-    const entries = await readdir(stemsRoot(), { withFileTypes: true });
-    return entries.filter(e => e.isDirectory() && !e.name.startsWith('.') && !knownIds.has(e.name)).map(e => e.name);
+    const entries = await readdir(root, { withFileTypes: true });
+    names = entries.filter(e => e.isDirectory() && !e.name.startsWith('.') && !knownIds.has(e.name)).map(e => e.name);
   } catch {
     return [];
   }
+  const ages = await mapPool(names, SCAN_CONCURRENCY,
+    name => stat(path.join(root, name)).then(st => st.mtimeMs, () => null));
+  return names.filter((_, i) => ages[i] != null && now - ages[i]! >= IN_FLIGHT_MS);
 }
 
 export async function listQuarantineDirNames(): Promise<string[]> {

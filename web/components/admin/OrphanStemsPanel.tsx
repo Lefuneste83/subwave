@@ -2,7 +2,8 @@
 
 // Orphan stem dirs: what the cache holds for tracks that left the
 // library, and the two presses about it. A dry-run report is the default read
-// (GET never moves anything); "Move N to quarantine" confirms once; aged
+// (GET never moves anything); "Move N to quarantine" asks once, naming the
+// count and the week's grace, then moves; aged
 // quarantines delete themselves after a week, and a track id that walks back
 // into the library gets its dirs released rather than re-separated.
 // The daily cron behind the toggle is off by default — deleting operator
@@ -18,6 +19,7 @@ import { useAdminAuth } from '../../lib/adminAuth';
 import { useAdminMutation, useAdminQuery } from '../../lib/admin-query';
 import type { AdminFetch } from '../../lib/admin-query';
 import { Card, Btn, Pill } from './ui';
+import { V3AlertDialog } from '../ui/alert-dialog';
 
 export interface OrphanReport {
   dryRun: boolean;
@@ -133,6 +135,7 @@ export default function OrphanStemsPanel() {
   const ready = hydrated && !needsAuth;
   const stateQuery = useOrphanState(adminFetch, ready);
   const [showTracks, setShowTracks] = useState(false);
+  const [confirmMove, setConfirmMove] = useState(false);
   const tracksQuery = useOrphanTracks(adminFetch, ready && showTracks);
   const mutation = useOrphanMutation(adminFetch);
   const report = stateQuery.data?.report;
@@ -202,7 +205,7 @@ export default function OrphanStemsPanel() {
               sm
               tone="solid"
               disabled={report.quarantined === 0 || mutation.isPending}
-              onClick={() => act({ confirm: true })}
+              onClick={() => setConfirmMove(true)}
             >
               {mutation.isPending ? 'Working…'
                 : report.quarantined > 0 ? `Move ${report.quarantined} to quarantine` : 'Nothing to move'}
@@ -258,6 +261,17 @@ export default function OrphanStemsPanel() {
       ) : (
         <p className="text-sm text-muted">The stems share could not be read.</p>
       )}
+      <V3AlertDialog
+        open={confirmMove}
+        onOpenChange={setConfirmMove}
+        title="Move orphan stems to the quarantine"
+        description={report
+          ? `${report.quarantined.toLocaleString('en-GB')} stem folder${report.quarantined === 1 ? '' : 's'} for tracks no longer in the library move into the quarantine. A track that comes back within a week gets its folder back; after a week, the rest are deleted for good.`
+          : ''}
+        confirmLabel="move to quarantine"
+        danger
+        onConfirm={() => act({ confirm: true })}
+      />
     </Card>
   );
 }

@@ -21,6 +21,25 @@
 // dry run, reports what would happen without naming any of it as done.
 
 export const QUARANTINE_DIR = '.orphan-quarantine';
+
+/** Directories newer than this are treated as in-flight analyzer writes. */
+export const IN_FLIGHT_MS = 3600_000;
+
+/**
+ * The automatic pass's ceiling: it refuses to quarantine more than this share
+ * of the cache root in one go (and at least AUTO_MAX_MIN_DIRS dirs), leaving a
+ * move that large to an operator's confirm. A library table only partly
+ * filled (a reset, a scan still running) reads like mass deletion, and a
+ * nightly pass must not act on that reading by itself.
+ */
+export const AUTO_MAX_SHARE = 0.2;
+export const AUTO_MAX_MIN_DIRS = 100;
+
+/** Pure: does an automatic pass's plan exceed its ceiling? */
+export function exceedsAutoCeiling(quarantine: number, kept: number): boolean {
+  const total = quarantine + kept;
+  return quarantine >= AUTO_MAX_MIN_DIRS && total > 0 && quarantine / total > AUTO_MAX_SHARE;
+}
 export const QUARANTINE_GRACE_MS = 7 * 24 * 3600_000;
 
 export interface CacheEntry {

@@ -5,6 +5,8 @@ import {
   planQuarantinePurge,
   QUARANTINE_DIR,
   QUARANTINE_GRACE_MS,
+  exceedsAutoCeiling,
+  AUTO_MAX_MIN_DIRS,
 } from '../src/music/orphan-purge-pure.js';
 
 const DAY = 86400_000;
@@ -109,4 +111,11 @@ test('a young superseded quarantine waits out the grace like any other, released
   assert.deepEqual(plan.deleted, []);
   assert.deepEqual(plan.superseded, ['re-analysed-young']);
   assert.equal(plan.aging.length, 1);
+});
+
+test('the automatic ceiling: a large share of the cache, and at least AUTO_MAX_MIN_DIRS dirs', () => {
+  assert.equal(exceedsAutoCeiling(4288, 72_000), false, 'the 25 Oct churn pass (~6%) still runs on its own');
+  assert.equal(exceedsAutoCeiling(40_000, 36_000), true, 'half the cache is an operator decision');
+  assert.equal(exceedsAutoCeiling(AUTO_MAX_MIN_DIRS - 1, 0), false, 'a small cache is never held back');
+  assert.equal(exceedsAutoCeiling(0, 0), false);
 });
