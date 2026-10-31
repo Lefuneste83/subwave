@@ -23,7 +23,8 @@ export interface LibraryOverview {
   canAir: number;
   taggedCanAir: number;
   djReady: number;
-  blocked: { total: number; track: number; album: number; artist: number; rule: number };
+  // `byEntry` (per entry and rule, keyed `type:id`) is absent from an older controller.
+  blocked: { total: number; track: number; album: number; artist: number; rule: number; byEntry?: Record<string, number> };
   lengthLimits: { show: string | null; minSec: number | null; maxSec: number | null; within: number } | null;
   aired: { windowDays: number; recent: number; ever: number; never: number; since: string | null };
   // `remeasure` is absent from a controller older than the split: read it as 0.
