@@ -10,7 +10,7 @@ import { loadSecretsIntoEnv } from '../../setup/secrets.js';
 import { loadNavidromeConfig } from '../../setup/config.js';
 import { reportProgress, reportCatalogueReady } from '../tagger-progress.js';
 import { logEvent } from './log.js';
-import { changedAfterMeasure } from '../replaced-file-policy.js';
+import { changedAfterMeasure, decideReplacedClear } from '../replaced-file-policy.js';
 import { backfillOriginalYears, pendingOriginalYearIds } from './enrich.js';
 
 function parseIntFlag(args: string[], name: string): number | null {
@@ -120,17 +120,21 @@ export function walkFileInfo(song: any): {
   };
 }
 
-export async function walkNavidrome(): Promise<{ walked: number; liveIds: Set<string> }> {
+export async function walkNavidrome(
+  { confirmReplaced = process.argv.includes('--confirm-replaced') }: { confirmReplaced?: boolean } = {},
+): Promise<{ walked: number; liveIds: Set<string> }> {
   reportProgress({ phase: 'walk', label: 'Scanning Navidrome library', done: 0 });
   let walked = 0;
   const liveIds = new Set<string>();
   // Blast radius of the era gate, reported once at the end so an operator sees
   // it in the log rather than as a show that stopped picking (#1418).
   const eraReasons = new Map<string, number>();
-  // Files replaced at the same path (same id, a different size): their audio
-  // analysis is cleared by the upsert, their stems dropped after the walk.
-  const replaced: string[] = [];
+  // Files replaced at the same path (same id): candidates from both signals,
+  // cleared together after the walk behind a mass hold. id -> the walked size
+  // (the size signal) or null (the change-time signal).
+  const candidates = new Map<string, number | null>();
   for await (const song of subsonic.iterateAllSongs({ requireComplete: true })) {
+    const fileInfo = walkFileInfo(song);
     const fileReplaced = db.upsertTrackMeta(song.id, {
       title: song.title,
       artist: song.artist,
@@ -153,9 +157,9 @@ export async function walkNavidrome(): Promise<{ walked: number; liveIds: Set<st
       eraUntrusted: song.albumEraUntrusted ?? null,
       genres: subsonic.songGenres(song),
       duration: song.duration,
-      ...walkFileInfo(song),
+      ...fileInfo,
     });
-    if (fileReplaced) replaced.push(song.id);
+    if (fileReplaced) candidates.set(song.id, fileInfo.fileSize);
     liveIds.add(song.id);
     if (song.albumEraUntrusted && song.albumEraReason) {
       eraReasons.set(song.albumEraReason, (eraReasons.get(song.albumEraReason) ?? 0) + 1);
@@ -173,16 +177,25 @@ export async function walkNavidrome(): Promise<{ walked: number; liveIds: Set<st
   // An empty walk (an outage that listed nothing) asks nothing more of the server.
   const fileChanges = walked === 0 ? null
     : await import('../file-changes.js').then(m => m.changedFiles(db.earliestMeasuredAt())).catch(() => null);
+  const sizeCandidates = candidates.size;
   if (fileChanges) {
-    const seen = new Set(replaced);
     for (const c of fileChanges.changes) {
-      if (seen.has(c.id) || !liveIds.has(c.id)) continue;
+      if (candidates.has(c.id) || !liveIds.has(c.id)) continue;
       if (!changedAfterMeasure(c.updatedAt, db.lastMeasuredAt(c.id))) continue;
-      db.clearTrackAudio(c.id);
-      replaced.push(c.id);
-      seen.add(c.id);
+      candidates.set(c.id, null);
     }
   }
+  // One line per walk on the change-time signal, whatever it found.
+  logEvent('info', walked === 0 ? 'Replaced-file check: skipped (empty walk)'
+    : !fileChanges ? 'Replaced-file check: size only (the music server reports no change times)'
+      : `Replaced-file check: ${fileChanges.changes.length.toLocaleString('en-GB')} change(s) read since `
+        + `${fileChanges.since ?? 'the start'}${fileChanges.complete ? '' : ' (partial: the server stopped answering part-way, the mark stays)'}`
+        + (fileChanges.futureDated ? `, ${fileChanges.futureDated} future-dated file(s) skipped (a wrong clock on the files)` : '')
+        + `; ${sizeCandidates} by size, ${candidates.size - sizeCandidates} by change time`);
+  const decision = decideReplacedClear({ candidates: candidates.size, knownTracks: walked, confirmed: confirmReplaced });
+  if (!decision.clear) logEvent('warning', decision.message);
+  const replaced = decision.clear ? [...candidates.keys()] : [];
+  for (const [id, size] of decision.clear ? candidates : []) db.clearTrackAudio(id, size);
   if (replaced.length > 0) {
     const stems = await import('../stem-cache.js')
       .then(m => m.forgetStems(replaced))
@@ -196,8 +209,9 @@ export async function walkNavidrome(): Promise<{ walked: number; liveIds: Set<st
         (stems.offline ? ` (stem cache offline: ${stems.offline})` : ''),
     );
   }
-  // Only once acted on: a walk that dies before here asks again from the old mark.
-  if (fileChanges?.complete) await import('../file-changes.js').then(m => m.saveMark(fileChanges.newest)).catch(() => {});
+  // Only once acted on: a walk that dies before here, or a held clear, asks
+  // again from the old mark.
+  if (fileChanges?.complete && decision.clear) await import('../file-changes.js').then(m => m.saveMark(fileChanges.newest)).catch(() => {});
   const suspect = [...eraReasons.values()].reduce((a, b) => a + b, 0);
   if (suspect) {
     const breakdown = [...eraReasons.entries()]

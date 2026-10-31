@@ -532,9 +532,6 @@ function withPriorities(
   }));
 }
 
-// Evict by ascending stem priority, then mtime, until the byte budget fits. Report failedDirs
-// and overBudgetBytes so callers can expose deletion failures; retry failed deletions next
-// sweep. #1257.
 // Drop the stem dirs of tracks whose file was replaced at the same path
 // (library-db.clearTrackAudio cleared their stamps): the render is cache-hit-
 // only (hasWindow), so stems cut from the old audio would otherwise keep
@@ -556,9 +553,20 @@ export async function forgetStems(trackIds: readonly string[]): Promise<{ remove
       removed += 1;
     } catch { failed += 1; }
   }
+  // The usage snapshot still counts those dirs' bytes, which would size the
+  // backfill too small (headroomTracks) until the next full walk. The walk
+  // runs in the tagger's process, so the snapshot file goes, not an
+  // in-memory flag: whichever process sweeps next walks again.
+  if (removed > 0) {
+    snapshotUntrusted = true;
+    await rm(snapshotPath(), { force: true }).catch(() => {});
+  }
   return { removed, failed };
 }
 
+// Evict by ascending stem priority, then mtime, until the byte budget fits. Report failedDirs
+// and overBudgetBytes so callers can expose deletion failures; retry failed deletions next
+// sweep. #1257.
 export async function sweep(budget = budgetBytes(), { force = false }: { force?: boolean } = {}): Promise<{
   removed: number;
   freedBytes: number;
