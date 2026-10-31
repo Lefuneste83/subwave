@@ -132,15 +132,20 @@ every feed skill gets the same behaviour:
 - **RSS 2.0, Atom and RDF/RSS-1.0** all parse — namespaced tags
   (`<dc:title>`, `<content:encoded>`) and CDATA included.
 - `feedMaxItems` (1–50, default 10) caps how much of the feed is read per fire.
+  With `feed2`/`feed3` it is read from each feed and also caps the merged list,
+  so a fire never offers more than that many items in total.
 - `feedMaxAgeDays` (1–365, default no limit) drops items published longer ago
   than that, before `feedMaxItems` counts them, and each item that carries a date
-  reaches the DJ with its day (`published: 2026-10-30`). Search feeds need it:
+  reaches the DJ with its day in the station's timezone (`published: 2026-10-30`). Search feeds need it:
   Google News ignores its own `when:7d` on a long query and mixes in items months
   old, which the DJ would otherwise present as news. Undated items are kept.
 - `feed2` and `feed3` add further feeds. They are fetched together and merged
   round-robin, so a busy feed cannot crowd a quiet one out, and a headline that
   appears in two of them is offered once. One of them failing is skipped while
-  another answers; only all of them failing stands the segment down.
+  another answers, with a warning in the log naming the feed and the error
+  (once, until it recovers). If the feeds that answered have no items, the
+  failure is reported as the fetch error, as with a single feed; all of them
+  failing stands the segment down.
 - Items are **burned on read**: at most 6 fresh items reach one segment, and the
   next fire offers the ones after them rather than repeating. That memory is
   per-skill and lives for as long as the controller runs.
