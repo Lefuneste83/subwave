@@ -13,7 +13,7 @@ import { config } from '../config.js';
 import { login, nativeFetch } from './navidrome-players.js';
 import { serverKind } from './navidrome-players-policy.js';
 import { pingWith } from './subsonic.js';
-import { changesFloor } from './replaced-file-policy.js';
+import { capMark, changesFloor, futureDated } from './replaced-file-policy.js';
 import { writeFileAtomic } from '../util/atomic-file.js';
 
 const PAGE = 1000;
@@ -21,6 +21,17 @@ const PAGE = 1000;
 const MAX_PAGES = 500;
 
 export interface FileChange { id: string; updatedAt: string }
+
+export interface ChangedFiles {
+  changes: FileChange[];
+  /** The mark to save once acted on: the newest change read, never past now. */
+  newest: string | null;
+  complete: boolean;
+  /** The floor the read stopped at (ISO), for the walk's log line. */
+  since: string | null;
+  /** Files dated past now + the margin: skipped (a wrong clock, not a change). */
+  futureDated: number;
+}
 
 const markPath = () => path.join(config.stateDir, 'navidrome-file-changes.json');
 
@@ -46,10 +57,20 @@ export async function saveMark(newest: string | null): Promise<void> {
  * "ambiguous column name", past ~51k rows of this sort): the changes read so
  * far are the newest and still acted on, but the mark is not moved past them.
  * Null when the server is not Navidrome or its API is unavailable.
+ *
+ * `_sort=updated_at` is not a column Navidrome's song resource maps: it works
+ * because Navidrome falls back to sorting by the raw column name, and that
+ * same fallback is what turns ambiguous (the 500) once its pagination
+ * optimisation joins past ~50k rows. When a walk never reads complete, every
+ * walk re-pages from the same floor (~51 pages of 1,000 rows): bounded, but
+ * worth knowing on a large library.
+ * A file dated in the future (its mtime: a wrong clock, a shifted mount) is
+ * skipped and counted, never a change, and the saved mark never passes now.
  */
 export async function changedFiles(
   earliestMeasured: string | null,
-): Promise<{ changes: FileChange[]; newest: string | null; complete: boolean } | null> {
+  now: number = Date.now(),
+): Promise<ChangedFiles | null> {
   if (!config.navidrome.url || !config.navidrome.user || !config.navidrome.password) return null;
   try {
     const ping = await pingWith({ url: config.navidrome.url, user: config.navidrome.user, pass: config.navidrome.password });
@@ -57,11 +78,12 @@ export async function changedFiles(
     const token = await login();
     const mark = await readMark();
     const firstFloor = earliestMeasured ? Date.parse(earliestMeasured) : NaN;
-    const floor = changesFloor(mark) ?? (Number.isFinite(firstFloor) ? firstFloor : null);
+    const floor = changesFloor(mark, now) ?? (Number.isFinite(firstFloor) ? firstFloor : null);
     // Nothing measured yet: nothing can be stale.
-    if (floor == null) return { changes: [], newest: mark, complete: true };
+    if (floor == null) return { changes: [], newest: capMark(mark, now), complete: true, since: null, futureDated: 0 };
     const changes: FileChange[] = [];
     let complete = true;
+    let future = 0;
     for (let page = 0; page < MAX_PAGES; page++) {
       let rows: Array<{ id?: unknown; updatedAt?: unknown }> | null;
       try {
@@ -79,12 +101,21 @@ export async function changedFiles(
       let older = false;
       for (const r of rows) {
         if (typeof r.id !== 'string' || typeof r.updatedAt !== 'string') continue;
-        if (Date.parse(r.updatedAt) < floor) { older = true; break; }
+        const t = Date.parse(r.updatedAt);
+        if (!Number.isFinite(t)) continue;
+        if (futureDated(t, now)) { future += 1; continue; }
+        if (t < floor) { older = true; break; }
         changes.push({ id: r.id, updatedAt: r.updatedAt });
       }
       if (older || rows.length < PAGE) break;
     }
-    return { changes, newest: changes[0]?.updatedAt ?? mark, complete };
+    return {
+      changes,
+      newest: capMark(changes[0]?.updatedAt ?? mark, now),
+      complete,
+      since: new Date(floor).toISOString(),
+      futureDated: future,
+    };
   } catch {
     return null;
   }

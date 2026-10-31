@@ -76,6 +76,14 @@ const server: Server = createServer((req, res) => {
       + `</channel></rss>`);
     return;
   }
+  if (path === '/late') {
+    // 22:30 UTC on the 30th is already the 31st in Athens (UTC+2).
+    res.writeHead(200, { 'content-type': 'application/rss+xml' });
+    res.end(`<?xml version="1.0"?><rss version="2.0"><channel><title>Late</title>`
+      + `<item><title>Late story</title><pubDate>Fri, 30 Oct 2026 22:30:00 GMT</pubDate></item>`
+      + `</channel></rss>`);
+    return;
+  }
   if (path === '/local') {
     res.writeHead(200, { 'content-type': 'application/rss+xml' });
     // "Story 2" repeats an item of /other: merged, it must appear once.
@@ -194,6 +202,7 @@ const { loadSkills, readTemplate } = await import('../src/skills/loader.js');
 const { buildSegmentTools, fetchSegmentData } = await import('../src/llm/internal/tools/segment-tools.js');
 const { resolveFeedConfig, makeFeedTool, FEED_ITEMS_PER_FIRE } = await import('../src/skills/feed.js');
 const { requiresGrounding, standDownReason } = await import('../src/skills/abstain-policy.js');
+const { setStationTimezone } = await import('../src/time.js');
 
 const caps = await loadSkills();
 const capOf = (kind: string) => caps.find(c => c.kind === kind);
@@ -426,16 +435,48 @@ test('a tighter window keeps only what is inside it, plus the undated item', asy
   assert.deepEqual(result.headlines.map((h: any) => h.title), ["Tonight's talk", 'Undated notice']);
 });
 
+test('the merged list is capped at feedMaxItems in total', async () => {
+  const tool = makeFeedTool('merged-cap', { url: feedUrl('/other'), maxItems: 3, extraUrls: [feedUrl('/local')] });
+  const result: any = await tool({}, {});
+  assert.deepEqual(result.headlines.map((h: any) => h.title), ['Story 1', 'Local 1', 'Story 2']);
+});
+
+test("an item's day is the station's, not UTC's", async () => {
+  try {
+    setStationTimezone('Europe/Athens');
+    const athens: any = await makeFeedTool('late-athens', { url: feedUrl('/late'), maxItems: 5 })({}, {});
+    assert.equal(athens.headlines[0].published, '2026-10-31');
+    setStationTimezone('UTC');
+    const utc: any = await makeFeedTool('late-utc', { url: feedUrl('/late'), maxItems: 5 })({}, {});
+    assert.equal(utc.headlines[0].published, '2026-10-30');
+  } finally {
+    setStationTimezone('');
+  }
+});
+
 test('further feeds merge round-robin, a repeated headline appears once', async () => {
   const tool = makeFeedTool('merged', { url: feedUrl('/other'), maxItems: 10, extraUrls: [feedUrl('/local')] });
   const result: any = await tool({}, {});
   assert.deepEqual(result.headlines.map((h: any) => h.title), ['Story 1', 'Local 1', 'Story 2', 'Story 3', 'Local 2']);
 });
 
-test('one failing feed is skipped while another answers; all failing is the fetch error', async () => {
-  const some = makeFeedTool('half', { url: feedUrl('/boom'), maxItems: 10, extraUrls: [feedUrl('/local')] });
+test('one failing feed is skipped while another answers, and is reported once until it recovers', async () => {
+  const warnings: string[] = [];
+  const some = makeFeedTool('half', { url: feedUrl('/boom'), maxItems: 10, extraUrls: [feedUrl('/local')] }, m => warnings.push(m));
   const ok: any = await some({}, {});
   assert.deepEqual(ok.headlines.map((h: any) => h.title), ['Local 1', 'Story 2', 'Local 2']);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /127\.0\.0\.1:\d+\/boom failed and was skipped.*HTTP 500/);
+  await some({}, {});
+  assert.equal(warnings.length, 1, 'the same failure is not repeated on every fire');
+});
+
+test('a failing feed is the answer when the feeds that answered have none', async () => {
+  const tool = makeFeedTool('hidden', { url: feedUrl('/boom'), maxItems: 10, extraUrls: [feedUrl('/empty')] });
+  await assert.rejects(() => tool({}, {}), /HTTP 500/, 'not { available: false, reason: "the feed has no items" }');
+});
+
+test('all feeds failing is the fetch error', async () => {
   const none = makeFeedTool('none', { url: feedUrl('/boom'), maxItems: 10, extraUrls: [feedUrl('/boom')] });
   await assert.rejects(() => none({}, {}), /HTTP 500/);
 });

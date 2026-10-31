@@ -281,7 +281,7 @@ It has to stay split, because Navidrome credentials are per-station: two
 stations can index different libraries, and this cache is keyed by track id
 alone.
 
-Three things to know before you do it:
+Before you do it, know this:
 
 - **Mount it in the controller *and* the analyzer, at the identical path.**
   The controller hands the analyzer a filesystem *path*, not audio (the same

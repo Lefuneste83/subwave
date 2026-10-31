@@ -13,18 +13,27 @@
 // rather than repairing it: there is nothing in a stand-in to repair.
 
 // Compared after folding (lower case, outer quotes/brackets/punctuation and
-// inner runs of space or punctuation collapsed to one space).
+// inner runs of space or punctuation collapsed to one space). Only tokens that
+// never occur as speech on their own: a one-word reply a guest could give in
+// banter ("None.", "Empty.", "Example?", "Blank.") is speech, and dropping it
+// would leave the host's next line answering nothing.
 const STAND_IN_LINES = new Set([
   'placeholder', 'placeholder text', 'text placeholder', 'segment placeholder',
-  'text', 'your text', 'your text here', 'text here', 'insert text', 'insert text here',
-  'segment text', 'line', 'your line here', 'script', 'string', 'content',
-  'tbd', 'tba', 'todo', 'to do', 'tktk', 'fixme',
-  'n a', 'none', 'null', 'undefined', 'empty', 'blank',
-  'example', 'sample text', 'dummy text',
+  'your text', 'your text here', 'text here', 'insert text', 'insert text here',
+  'segment text', 'your line here',
+  'tbd', 'tba', 'todo', 'tktk', 'fixme',
+  'n a', 'null', 'undefined',
+  'sample text', 'dummy text',
 ]);
 
 const LOREM = /^lorem ipsum\b/;
 const HAS_WORD = /[\p{L}\p{N}]/u;
+// Template text left in brackets: "[Insert weather update here]",
+// "{your text}", "<placeholder for the news segment>". A line wholly inside one
+// bracket pair whose words start like a template's. A real aside in brackets
+// starts with anything else and airs.
+const BRACKETED = /^\s*(?:\[[^\]]*\]|\{[^}]*\}|<[^>]*>)\s*[.!?]?\s*$/;
+const TEMPLATE_START = /^(?:placeholder|insert|your|tbd)\b/;
 
 export function foldStandIn(text: string): string {
   return text
@@ -42,5 +51,6 @@ export function standInToken(text: string | null | undefined): string | null {
   if (!HAS_WORD.test(raw)) return raw.slice(0, 24);
   const folded = foldStandIn(raw);
   if (STAND_IN_LINES.has(folded) || LOREM.test(folded)) return folded.slice(0, 40);
+  if (BRACKETED.test(raw) && TEMPLATE_START.test(folded)) return folded.slice(0, 40);
   return null;
 }
