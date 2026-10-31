@@ -841,7 +841,7 @@ export default function SkillEditModal({ mode, skill, personas, tagSuggestions, 
                 <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14, flexWrap: 'wrap', marginTop: 16 }}>
                   {configFields.map(f => (
                     <label key={f.key} style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: f.type === 'number' ? `0 0 ${NUMBER_FIELD_WIDTH}px` : '1 1 320px', minWidth: 0 }}>
-                      <span style={{ fontSize: 10, letterSpacing: '0.18em', textTransform: 'uppercase', color: 'var(--muted)', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.label}</span>
+                      <span style={{ fontSize: 10, letterSpacing: '0.18em', textTransform: 'uppercase', color: 'var(--muted)', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={f.label}>{f.label}</span>
                       <input
                         type={f.type === 'number' ? 'number' : f.type === 'url' ? 'url' : 'text'}
                         min={f.type === 'number' ? f.min : undefined}
