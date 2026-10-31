@@ -1,19 +1,20 @@
 // A stand-in line never airs. A model told "silence is not an option" but
 // handed no data answered {"text": "placeholder"}, and the DJ read the word
 // out (eleven times, from a prompt-only skill). stand-in-policy decides what
-// a stand-in is; these pin the matcher and the three speech paths that must
-// consult it (announce, announceAtNextTrack, announceExchange), asserting on
-// what reaches _speak.
+// a stand-in is; these pin the matcher and the speech paths that must consult
+// it (announce, announceAtNextTrack, announceExchange, and a pushed pick's
+// link or request intro), asserting on what reaches _speak.
 //
 // Run: npm test -- stand-in-speech
 
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createTempDir, removeTempDir } from './test-utils/temp-dir.js';
 import { weekFor as fullScheduleWeek } from './test-utils/fixtures.js';
 
-const root = createTempDir('subwave-stand-in-');
+const root = createTempDir(join(tmpdir(), 'subwave-stand-in-'));
 process.env.STATE_DIR = root;
 
 const settings = await import('../src/settings.js');
@@ -28,8 +29,24 @@ test('the stand-ins seen on air and their kin are caught', () => {
   for (const line of [
     'placeholder', 'Placeholder.', '"placeholder"', '[placeholder]', '<placeholder>',
     'PLACEHOLDER TEXT', 'TBD', 'todo', 'N/A', 'null', 'undefined', 'Your text here',
-    '{text}', 'Lorem ipsum dolor sit amet, consectetur adipiscing elit.', '...', '—', '…',
+    '{your text}', 'Lorem ipsum dolor sit amet, consectetur adipiscing elit.', '...', '—', '…',
   ]) assert.ok(standInToken(line), `should catch ${JSON.stringify(line)}`);
+});
+
+test('template text left in brackets is a stand-in; a real aside in brackets is not', () => {
+  for (const line of [
+    '[Insert weather update here]', '[Placeholder for the news segment]', '{Your intro here}',
+    '<TBD: closing line>', '[insert track intro].',
+  ]) assert.ok(standInToken(line), `should catch ${JSON.stringify(line)}`);
+  for (const line of [
+    '[laughs] That was a long one.', '(Insert coin to continue, as the arcades said.)',
+    '[Music swells]', 'Insert the tape and press play: Plakias, 1986.',
+  ]) assert.equal(standInToken(line), null, `should keep ${JSON.stringify(line)}`);
+});
+
+test('a one-word reply a guest could give in banter is speech', () => {
+  for (const line of ['None.', 'Empty.', 'Blank.', 'Example?', 'Text!', 'Content.', 'Line.', 'Script?', 'To do.'])
+    assert.equal(standInToken(line), null, `should keep ${JSON.stringify(line)}`);
 });
 
 test('real speech airs, even when it names a stand-in word', () => {
@@ -96,10 +113,13 @@ after(async () => {
   await removeTempDir(root);
 });
 
-test('announce drops a stand-in before TTS and reports it not accepted', async () => {
+test('announce drops a stand-in before TTS and reports it not accepted, as a stand-in', async () => {
   const out = await queue.announce('placeholder', 'programme-feature', { persona: HOST as never });
   assert.equal(out.accepted, false);
+  assert.equal(out.reason, 'stand-in', 'the skill runner backs off on this, not on a queue refusal');
   assert.deepEqual(spoken, []);
+  const empty = await queue.announce('', 'programme-feature', { persona: HOST as never });
+  assert.equal(empty.reason, undefined, 'no line is not a stand-in');
 });
 
 test('announce still airs real speech', async () => {
@@ -120,6 +140,31 @@ test('an exchange airs its real lines and skips a stand-in one', async () => {
     { persona: GUEST as never, text: 'placeholder' },
   ], 'banter', { castNames: [HOST.name, GUEST.name] });
   assert.deepEqual(spoken, ['Big rescue exercise in Heraklion this week.']);
+});
+
+test('an exchange whose every line is a stand-in airs nothing', async () => {
+  const aired = await queue.announceExchange([
+    { persona: HOST as never, text: 'placeholder' },
+    { persona: GUEST as never, text: '[Insert reply here]' },
+  ], 'banter', { castNames: [HOST.name, GUEST.name] });
+  assert.equal(aired, false);
+  assert.deepEqual(spoken, []);
+});
+
+test('a pick whose link is a stand-in is queued without a link', async () => {
+  await queue.push({ track: { id: 'linked', title: 'Song', artist: 'Artist' } as never, introScript: 'placeholder', introPersona: HOST as never });
+  const item = queue.upcoming.find(i => i.track.id === 'linked')!;
+  assert.ok(item, 'the track is still queued');
+  assert.equal(item.introScript, null);
+  assert.equal(item.introPersona, null);
+  await queue.push({ track: { id: 'real', title: 'Song', artist: 'Artist' } as never, introScript: 'Here comes a good one.', introPersona: HOST as never });
+  assert.equal(queue.upcoming.find(i => i.track.id === 'real')!.introScript, 'Here comes a good one.');
+});
+
+test('a recovered link from before the gate is cleaned the same way', () => {
+  const item = { track: { id: 'old', title: 'Song', artist: 'Artist' }, introScript: 'TBD', introPersona: HOST, introLabelChecked: false } as never as Parameters<typeof queue.cleanUnrenderedIntro>[0];
+  queue.cleanUnrenderedIntro(item);
+  assert.equal(item.introScript, null);
 });
 
 test('operator text airs as typed, even a stand-in word (verbatim is exempt)', async () => {
