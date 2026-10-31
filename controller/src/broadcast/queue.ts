@@ -318,6 +318,9 @@ function recoveredPendingHandoff(raw: unknown): PendingVoice | null {
 export interface AnnounceOutcome {
   accepted: boolean;
   deferred: boolean;
+  /** Why it was not accepted, when the caller acts on the cause: 'stand-in' =
+   *  the line was a stand-in (stand-in-policy), dropped before TTS. */
+  reason?: 'stand-in';
   /** Resolves true after ordinary post-air bookkeeping runs, false if the held
    *  segment is displaced or cannot be handed over. */
   completed: Promise<boolean>;
@@ -489,6 +492,13 @@ class Queue {
     if (!item.introScript) return;
     const speaker = item.introPersona ?? settings.getEffectivePersona();
     item.introScript = normalizeForDisplay(stripSpeakerLabel(item.introScript, speaker?.name ? [speaker.name] : []));
+    // A recovered script predates the stand-in gate in push(): the same test,
+    // and the track plays without its link.
+    if (item.introScript && !this.speakable(item.introScript, item.introKind || 'dj-speak')) {
+      item.introScript = null;
+      item.introPersona = null;
+      item.introHostSpeech = null;
+    }
     item.introLabelChecked = true;
   }
 
@@ -1012,6 +1022,13 @@ class Queue {
     if (introScript && !introLabelChecked) {
       const speaker = introPersona ?? settings.getEffectivePersona();
       introScript = normalizeForDisplay(stripSpeakerLabel(introScript, speaker?.name ? [speaker.name] : []));
+    }
+    // A pick's link and a request intro are model-written too: a stand-in goes,
+    // and the track plays without a link.
+    if (introScript && !this.speakable(introScript, introKind)) {
+      introScript = null;
+      introPersona = null;
+      introHostSpeech = null;
     }
     const item = {
       track, requestedBy, operator, intent, introScript, introLabelChecked: true, introKind, introPersona, introHostSpeech,
@@ -2421,15 +2438,19 @@ class Queue {
     return { pending: true, committed: false, waitedMs: Date.now() - t0 };
   }
 
-  // Every spoken path's last text gate: a stand-in line (stand-in-policy) is
-  // dropped whole. An empty return is the callers' existing "nothing to air"
-  // case, so a dropped feature falls back exactly as a stood-down skill does.
-  // Verbatim operator text is exempt.
+  // The last text gate on every model-written spoken path: scheduled speech
+  // (announce, announceExchange, announceAtNextTrack) and a pick's link or
+  // request intro (push, cleanUnrenderedIntro). A stand-in line
+  // (stand-in-policy) is dropped whole. An empty return is the callers'
+  // existing "nothing to air" case, so a dropped feature falls back exactly as
+  // a stood-down skill does. Operator text is exempt: a raw /dj/say
+  // (`verbatim`) and a jingle's script, which the operator typed
+  // (jingles.create from the Imaging page and onboarding).
   speakable(text: string, kind: string, { verbatim = false } = {}): string {
     if (verbatim || !text) return text;
     const token = standInToken(text);
     if (!token) return text;
-    this.log('dj', `${kind}: dropped a stand-in line ("${token}") instead of airing it`);
+    this.log('scheduler', `${kind}: dropped a stand-in line ("${token}") instead of airing it`);
     logEvent('speech.standInDropped', { kind, token });
     return '';
   }
@@ -2481,10 +2502,16 @@ class Queue {
     // truth than _speak is what made the fix miss the very path that reported
     // the bug.
     const speaker = persona ?? settings.getEffectivePersona();
-    const safeText = this.speakable(normalizeForDisplay(
+    const displayText = normalizeForDisplay(
       speaker?.name ? stripSpeakerLabel(text || '', [speaker.name]) : (text || ''),
-    ), kind, { verbatim: meta?.verbatim === true });
-    if (!safeText) return { accepted: false, deferred: false, completed: Promise.resolve(false) };
+    );
+    const safeText = this.speakable(displayText, kind, { verbatim: meta?.verbatim === true });
+    if (!safeText) {
+      return {
+        accepted: false, deferred: false, completed: Promise.resolve(false),
+        ...(displayText ? { reason: 'stand-in' as const } : {}),
+      };
+    }
     if (hostSpeech && !session.isHostSpeechCurrent(hostSpeech)) {
       return { accepted: false, deferred: false, completed: Promise.resolve(false) };
     }
