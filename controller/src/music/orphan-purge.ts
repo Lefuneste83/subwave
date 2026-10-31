@@ -14,9 +14,12 @@
 //   simply ages out — never merged over the new copy.
 // - Quarantine age comes from an `.orphaned-at` sidecar written at move time
 //   (the move itself only touches ctime, but writing the sidecars bumps the
-//   dir's mtime, and the stem-priority lesson is that cache mtimes lie); the
-//   entry's own mtime is only the fallback for quarantines that lost the
-//   sidecar.
+//   dir's mtime, and the stem-priority lesson is that cache mtimes lie). The
+//   mtime is never a fallback: a rename keeps the dir's old mtime, so a fresh
+//   quarantine would read as days old and be deleted on the next pass. A move
+//   whose sidecar cannot be written is undone (counted as failed), and a
+//   quarantine whose sidecar is missing or unreadable starts its grace NOW
+//   (stamped by the next confirmed pass): later, never sooner.
 // - Dirs touched in the last hour are left alone: the analyzer writes stems
 //   into a fresh dir, and a purge must never eat an in-flight set.
 // - An empty id set is REFUSED, not treated as an empty library. The only
@@ -98,17 +101,15 @@ async function dirBytes(dir: string): Promise<number> {
   return total;
 }
 
-// Quarantine age: the sidecar written at move time, else the entry's mtime.
-async function quarantinedAgeMs(entryDir: string, now: number): Promise<number> {
+// Quarantine age from the sidecar written at move time, or null when it is
+// missing or unreadable. Never the dir's mtime (see the header): the caller
+// reads null as "quarantined now".
+async function quarantinedAgeMs(entryDir: string, now: number): Promise<number | null> {
   try {
     const stamped = Number(await readFileSafe(path.join(entryDir, ORPHANED_AT)));
     if (Number.isFinite(stamped) && stamped > 0) return Math.max(0, now - stamped);
-  } catch { /* fall through */ }
-  try {
-    return Math.max(0, now - (await stat(entryDir)).mtimeMs);
-  } catch {
-    return 0;
-  }
+  } catch { /* unreadable: no age */ }
+  return null;
 }
 
 async function readFileSafe(file: string): Promise<string> {
@@ -234,7 +235,15 @@ async function purgePass(opts: Parameters<typeof runOrphanPurge>[0]): Promise<Pu
   for (const name of quNames) {
     const entryDir = path.join(qu, name);
     const liveSlotFree = !(await stat(path.join(root, name)).then(() => true, () => false));
-    quEntries.push({ name, known: known.has(name), ageMs: await quarantinedAgeMs(entryDir, now), liveSlotFree });
+    let ageMs = await quarantinedAgeMs(entryDir, now);
+    if (ageMs == null) {
+      // No readable stamp: its grace starts now. A confirmed pass stamps it so
+      // the clock holds from here; if even that fails it stays at 0 and ages
+      // never, which keeps it rather than deleting it early.
+      if (opts.confirm) await stampQuarantine(entryDir, now).catch(() => {});
+      ageMs = 0;
+    }
+    quEntries.push({ name, known: known.has(name), ageMs, liveSlotFree });
   }
   const qplan = planQuarantinePurge(quEntries, { now, confirm: opts.confirm, ...(opts.graceMs !== undefined ? { graceMs: opts.graceMs } : {}) });
   report.released = qplan.released;
@@ -248,16 +257,29 @@ async function purgePass(opts: Parameters<typeof runOrphanPurge>[0]): Promise<Pu
     for (const name of qplan.released) {
       try {
         await rename(path.join(qu, name), path.join(root, name));
-      } catch { report.failed += 1; }
+      } catch { report.failed += 1; continue; }
+      // Back in the cache it is not quarantined: a stale stamp must not ride
+      // along into a later quarantine.
+      await rm(path.join(root, name, ORPHANED_AT), { force: true }).catch(() => {});
     }
     // 2. Aged (and superseded-with-fresh-copy) quarantines: delete for good.
     for (const { name } of qplan.deleted) {
       const entryDir = path.join(qu, name);
+      const before = await dirBytes(entryDir);
+      let removed = true;
       try {
-        report.freedBytes += await dirBytes(entryDir);
         await rm(entryDir, { recursive: true, force: true });
+      } catch { removed = false; }
+      // Freed is what is really gone: a delete refused part-way (a squashed
+      // share) leaves files behind, and those are not reclaimed space.
+      const gone = await stat(entryDir).then(() => false, () => true);
+      if (removed && gone) {
+        report.freedBytes += before;
         report.deletedCount += 1;
-      } catch { report.failed += 1; }
+      } else {
+        if (!gone) report.freedBytes += Math.max(0, before - await dirBytes(entryDir));
+        report.failed += 1;
+      }
     }
     // 3. Orphans: move into quarantine (same-filesystem rename; no merge).
     await mkdirSafe(qu);
@@ -270,13 +292,12 @@ async function purgePass(opts: Parameters<typeof runOrphanPurge>[0]): Promise<Pu
       const collision = await stat(to).then(() => true, () => false);
       if (collision) {
         // A quarantine entry for the same id already exists — it can only have
-        // been re-created in the library and orphaned again. Keep the OLDER
-        // quarantine (it is closer to its real age), drop the newer copy.
-        const existingAge = await quarantinedAgeMs(to, now);
-        const freshAge = await quarantinedAgeMs(from, now);
+        // been re-created in the library and orphaned again. Keep the existing
+        // quarantine with its own stamp and drop the live copy. (This used to
+        // compare ages, but the live dir's only age was its mtime, which a
+        // rename keeps and the header rules out.)
         try {
-          if (existingAge >= freshAge) { await rm(from, { recursive: true, force: true }); }
-          else { await rm(to, { recursive: true, force: true }); await rename(from, to); await stampQuarantine(to, now); }
+          await rm(from, { recursive: true, force: true });
           await writeNameSidecar(to, names?.get(name), now);
           report.quarantined += 1;
         } catch { report.failed += 1; }
@@ -284,10 +305,18 @@ async function purgePass(opts: Parameters<typeof runOrphanPurge>[0]): Promise<Pu
       }
       try {
         await rename(from, to);
+      } catch { report.failed += 1; continue; }
+      try {
         await stampQuarantine(to, now);
-        await writeNameSidecar(to, names?.get(name), now);
-        report.quarantined += 1;
-      } catch { report.failed += 1; }
+      } catch {
+        // Unstamped, the quarantine would have no age to keep it 7 days: undo
+        // the move and leave the dir in the cache for the next pass.
+        await rename(to, from).catch(() => {});
+        report.failed += 1;
+        continue;
+      }
+      await writeNameSidecar(to, names?.get(name), now);
+      report.quarantined += 1;
     }
     if (report.quarantined || report.deletedCount || report.released.length) {
       // The usage snapshot cached the pre-purge totals; drop it so the next
@@ -302,10 +331,9 @@ async function purgePass(opts: Parameters<typeof runOrphanPurge>[0]): Promise<Pu
   return report;
 }
 
+// Throws when the stamp cannot be written: the move is then undone.
 async function stampQuarantine(entryDir: string, now: number): Promise<void> {
-  try {
-    await writeFile(path.join(entryDir, ORPHANED_AT), String(now));
-  } catch { /* the mtime fallback covers it */ }
+  await writeFile(path.join(entryDir, ORPHANED_AT), String(now));
 }
 
 // Shared like the cache root (stem-cache.ts): mkdir's mode is masked by the

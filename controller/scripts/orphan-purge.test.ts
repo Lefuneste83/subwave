@@ -11,7 +11,7 @@
 
 import { createTempDir, removeTempDir } from './test-utils/temp-dir.js';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { after } from 'node:test';
@@ -137,12 +137,63 @@ test('a quarantine that cannot be deleted is counted, never thrown', async () =>
   // is read-only, so removing the file inside fails). readdir still works.
   chmodSync(q, 0o555);
   try {
+    const before = await purge.runOrphanPurge({ knownIds: ['_sentinel'], confirm: false, now: NOW_BASE + 8 * DAY });
+    // What the other aged quarantines really hold, measured before the pass.
+    const { readdirSync } = await import('node:fs');
+    const others = before.deletedNames.filter(n => n !== stuck)
+      .reduce((sum, n) => sum + readdirSync(join(QU, n)).reduce((s, f) => s + statSync(join(QU, n, f)).size, 0), 0);
+    assert.ok(before.deletedCount <= 10, 'deletedNames lists every candidate here');
     const rep = await purge.runOrphanPurge({ knownIds: ['_sentinel'], confirm: true, now: NOW_BASE + 8 * DAY });
     assert.equal(rep.failed, 1);
     assert.ok(existsSync(q));
+    // Its bytes are still on disk, so they are not reported as freed: only the
+    // other aged quarantines' bytes are (the dry run counted it as deletable).
+    assert.equal(rep.deletedCount, before.deletedCount - 1);
+    assert.equal(rep.freedBytes, others, 'the stuck quarantine\'s bytes are not counted as freed');
   } finally {
     chmodSync(q, 0o755);
   }
+});
+
+test('a quarantine with no readable stamp starts its grace now, never from the dir mtime', async () => {
+  // The dir's mtime is two days old and a rename keeps it; with the stamp
+  // gone, the old fallback read a just-quarantined dir as old enough to delete.
+  const unstamped = seedStem();
+  await purge.runOrphanPurge({ knownIds: ['_sentinel'], confirm: true, now: NOW_BASE + 500 * DAY });
+  const q = join(QU, unstamped);
+  rmSync(join(q, '.orphaned-at'));
+  const t = new Date(NOW_BASE - 30 * DAY);
+  utimesSync(q, t, t);
+  const first = await purge.runOrphanPurge({ knownIds: ['_sentinel'], confirm: true, now: NOW_BASE + 500 * DAY + 60_000 });
+  assert.ok(existsSync(q), 'kept, a minute after the move');
+  assert.ok(!first.deletedNames.includes(unstamped));
+  assert.equal(Number(readFileSync(join(q, '.orphaned-at'), 'utf8')), NOW_BASE + 500 * DAY + 60_000, 'stamped now');
+  const later = await purge.runOrphanPurge({ knownIds: ['_sentinel'], confirm: true, now: NOW_BASE + 508 * DAY });
+  assert.ok(later.deletedNames.includes(unstamped) || !existsSync(q), 'deleted once the grace has passed from the new stamp');
+});
+
+test('a move whose stamp cannot be written is undone and counted', async () => {
+  const id = seedStem();
+  const live = join(ROOT, id);
+  // The rename works, the stamp write does not (a directory sits where the
+  // stamp goes, so writeFile fails with EISDIR, as a refused write would). The
+  // dir must go back to the cache, unquarantined.
+  mkdirSync(join(live, '.orphaned-at'));
+  const t = new Date(NOW_BASE - 2 * DAY);
+  utimesSync(live, t, t);
+  const rep = await purge.runOrphanPurge({ knownIds: ['_sentinel'], confirm: true, now: NOW_BASE + 600 * DAY });
+  assert.ok(rep.failed >= 1);
+  assert.ok(existsSync(join(live, 'window-drums.flac')), 'moved back to the cache');
+  assert.ok(!existsSync(join(QU, id)));
+  rmSync(live, { recursive: true, force: true });
+});
+
+test('a released dir drops its quarantine stamp', async () => {
+  const id = seedStem();
+  await purge.runOrphanPurge({ knownIds: ['_sentinel'], confirm: true, now: NOW_BASE + 700 * DAY });
+  await purge.runOrphanPurge({ knownIds: [id, '_sentinel'], confirm: true, now: NOW_BASE + 701 * DAY });
+  assert.ok(existsSync(join(ROOT, id)));
+  assert.ok(!existsSync(join(ROOT, id, '.orphaned-at')));
 });
 
 test('the usage snapshot is invalidated when the purge moved anything', async () => {
