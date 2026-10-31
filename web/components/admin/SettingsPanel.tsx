@@ -3,7 +3,7 @@
 import type { ChangeEvent } from 'react';
 import { settingsForm } from './settings/form-state';
 import { atPath, samePath, sameForm, countLeafDiffs, dirtyPaths, restorePaths, ownsErrorPath, mergePatchErrors, unsavedAnywhere } from './settings/form-diff';
-import { archivesSavePayload, dangerSavePayload } from './settings/save-payload';
+import { archivesSavePayload, dangerSavePayload, stemsSavePayload } from './settings/save-payload';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { notify, errorMessage } from '../../lib/notify';
@@ -340,7 +340,7 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
    * Post a whole-block patch — unless a number box in it was left blank, in
    * which case name the box and save nothing. See `save-payload.ts`.
    */
-  const saveBlock = ({ patch, fieldErrors }: ReturnType<typeof dangerSavePayload> | ReturnType<typeof archivesSavePayload>) => {
+  const saveBlock = ({ patch, fieldErrors }: ReturnType<typeof dangerSavePayload> | ReturnType<typeof archivesSavePayload> | ReturnType<typeof stemsSavePayload>) => {
     const blanks = Object.keys(fieldErrors);
     if (blanks.length > 0) {
       setFieldErrors(prev => mergePatchErrors(prev, patch, fieldErrors));
@@ -370,6 +370,9 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
   const saveBroadcast = () => {
     if (form) saveBlock(dangerSavePayload(form));
   };
+  const saveStems = () => {
+    if (form) saveBlock(stemsSavePayload(form));
+  };
   // A5 — the budget's save path: a budget lowered under what the cache holds
   // makes the next hourly sweep delete the difference, so that save asks
   // first. An unchanged budget (even one already under the cache) and a
@@ -379,9 +382,9 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
     && Number(form.transitions.stemCacheGb) < Number(formBaselineRef.current.transitions.stemCacheGb)
     ? stemBudgetImpact(stemUsage, Number(form.transitions.stemCacheGb))
     : null;
-  const saveBroadcastGuarded = () => {
+  const saveStemsGuarded = () => {
     if (stemBudgetCut) setConfirmStemBudget(true);
-    else saveBroadcast();
+    else saveStems();
   };
 
   const activeSpec = sectionById(activeSection);
@@ -895,10 +898,10 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
             <SaveBar
               note="Stem cache, budget and blend settings apply to the next pick — no restart."
               busy={busy}
-              onSave={saveBroadcastGuarded}
+              onSave={saveStemsGuarded}
               saveLabel="Save stems"
               errors={fieldErrors}
-              ownedKeys={['transitions', 'audio']}
+              ownedKeys={['transitions.pairDrain', 'transitions.stemBlends', 'audio.stemCache', 'audio.stemCacheGb']}
             />
           </>
         )}
@@ -1894,7 +1897,7 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
               onSave={saveBroadcast}
               saveLabel="Save broadcast & mixer"
               errors={fieldErrors}
-              ownedKeys={['crossfadeDuration', 'ducking', 'maxTrackSeconds', 'maxTrackLengthMode', 'fadeAtShowEnd', 'silenceTrim', 'audio', 'loudness', 'stream', 'transitions.equalPowerCrossfade', 'transitions.fadeAudibleEnd', 'transitions.fadeAudibleEndDb']}
+              ownedKeys={['crossfadeDuration', 'ducking', 'maxTrackSeconds', 'maxTrackLengthMode', 'fadeAtShowEnd', 'silenceTrim', 'loudness', 'stream', 'transitions.equalPowerCrossfade', 'transitions.fadeAudibleEnd', 'transitions.fadeAudibleEndDb', 'transitions.effects']}
             />
           </>
         )}
@@ -1910,7 +1913,7 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
           : ''}
         confirmLabel="save and delete"
         danger
-        onConfirm={saveBroadcast}
+        onConfirm={saveStems}
       />
       <V3AlertDialog
         open={confirmRestart}

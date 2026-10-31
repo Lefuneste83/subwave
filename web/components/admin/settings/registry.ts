@@ -49,6 +49,13 @@ export const LLM_PROVIDER_FORM_KEYS = [
 // typo guard on SETTINGS_INDEX, ADVANCED_CARDS and `activeSection` — down with
 // it. A bad id then compiles clean and dies quietly at runtime (`sectionById`
 // → undefined → no formKeys → no dirty tracking, no save bar).
+// The Stems page's fields: the stem half of `transitions` (the form keeps the
+// stem cache under transitions; it saves to `audio.*`). One list, read by the
+// section's dirty check and its save payload's error scope.
+export const STEM_FORM_KEYS = [
+  'transitions.pairDrain', 'transitions.stemBlends', 'transitions.stemCache', 'transitions.stemCacheGb',
+] as const;
+
 export const SECTIONS = [
   {
     id: 'station', group: 'the station', label: 'Station',
@@ -127,9 +134,11 @@ export const SECTIONS = [
     // The whole stem story on one page: the cache/blends settings (moved off
     // Broadcast & mixer) above the orphan-dir cleanup (B10). The old
     // ?section=orphans link redirects here (SettingsPanel RENAMED).
+    // `transitions` is split at the leaf: the crossfade curve and the DJ
+    // transition effects stay on Broadcast & mixer, where their cards are.
     id: 'stems', group: 'operations', label: 'Stems',
     hint: 'cache · blends · cleanup', icon: Layers,
-    formKeys: ['transitions'],
+    formKeys: STEM_FORM_KEYS,
   },
   {
     // Was "Danger zone": most of it is everyday broadcast tuning, and the name
@@ -141,13 +150,14 @@ export const SECTIONS = [
     // list is what drives the dirty-check that decides whether the save bar
     // shows at all. Without it, toggling "Fade out at a show change" alone
     // never registers as a change and the save prompt never appears.
-    // 'transitions' moved to the Stems section with its card; the Crossfade
-    // card's own transitions fields stay here by path, or editing them alone
-    // never shows this section's save bar.
+    // 'transitions' is split at the leaf: its stem fields moved to the Stems
+    // section with their card; the Crossfade card's own fields and the DJ
+    // transition effects stay here by path, or editing them alone never shows
+    // this section's save bar.
     formKeys: [
       'crossfadeDuration', 'ducking', 'maxTrackSeconds', 'maxTrackLengthMode', 'fadeAtShowEnd', 'silenceTrim', 'stream', 'loudness',
       'transitions.equalPowerCrossfade', 'transitions.fadeAudibleEnd', 'transitions.fadeAudibleEndDb',
-      'transitions.tailFromCurve',
+      'transitions.tailFromCurve', 'transitions.effects',
     ],
   },
 ] as const satisfies readonly SectionSpec[];

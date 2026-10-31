@@ -13,9 +13,10 @@
 //   fresh analysis already took the slot the quarantine is superseded and
 //   simply ages out — never merged over the new copy.
 // - Quarantine age comes from an `.orphaned-at` sidecar written at move time
-//   (rename rewrites mtime, and the stem-priority lesson is that cache mtimes
-//   lie); the entry's own mtime is only the fallback for quarantines that lost
-//   the sidecar.
+//   (the move itself only touches ctime, but writing the sidecars bumps the
+//   dir's mtime, and the stem-priority lesson is that cache mtimes lie); the
+//   entry's own mtime is only the fallback for quarantines that lost the
+//   sidecar.
 // - Dirs touched in the last hour are left alone: the analyzer writes stems
 //   into a fresh dir, and a purge must never eat an in-flight set.
 // - An empty id set is REFUSED, not treated as an empty library. The only
@@ -26,21 +27,34 @@
 //   cannot delete on a squashed share must keep running and keep saying so.
 // - Any mutation drops the usage snapshot (stem-cache's cached walk totals),
 //   so the next sweep re-measures instead of trusting stale bytes.
+// - One confirmed pass at a time (the cron, a manual confirm): a second one
+//   is refused while the first runs, so two never interleave their moves and
+//   each report is what its own pass did. A release that lands on a live slot
+//   an analyzer mkdir just created replaces that empty dir (rename onto an
+//   empty dir), and onto a non-empty one fails and is counted.
+// - The automatic pass (runScheduledOrphanPurge) refuses a plan above
+//   AUTO_MAX_SHARE of the cache and leaves it to an operator's confirm, and
+//   stamps each quarantine's name like the manual one.
 
 import { readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
+import { mapPool } from '../util/async-pool.js';
 import * as stemCache from './stem-cache.js';
-import { writeNameSidecar, type OrphanTrackName } from './orphan-names.js';
+import { resolveOrphanNames, writeNameSidecar, type OrphanTrackName } from './orphan-names.js';
 import {
+  exceedsAutoCeiling,
+  IN_FLIGHT_MS,
   planOrphanPurge,
   planQuarantinePurge,
   QUARANTINE_DIR,
   type QuarantineEntry,
 } from './orphan-purge-pure.js';
 
-/** Directories newer than this are treated as in-flight analyzer writes. */
-export const IN_FLIGHT_MS = 3600_000;
+export { IN_FLIGHT_MS };
+
+// Set while a confirmed pass runs; a second confirmed pass is refused.
+let confirmedPassRunning = false;
 
 /** Sidecar stamped into a quarantine entry at move time. */
 const ORPHANED_AT = '.orphaned-at';
@@ -128,13 +142,32 @@ export async function runOrphanPurge(opts: {
    *  it returns is stamped into each quarantine as `.track-meta.json` so the
    *  name outlives the log retention that produced it. */
   resolveNames?: (ids: string[]) => Promise<ReadonlyMap<string, OrphanTrackName>>;
+  /** The automatic pass: refuse a plan above AUTO_MAX_SHARE of the cache. */
+  automatic?: boolean;
 }): Promise<PurgeReport> {
-  const now = opts.now ?? Date.now();
-  const empty: PurgeReport = {
-    dryRun: !opts.confirm, keptCount: 0, quarantined: 0, quarantinedNames: [], released: [],
+  if (!opts.confirm) return purgePass(opts);
+  if (confirmedPassRunning) {
+    return { ...emptyReport(false), refused: true, reason: 'another purge pass is running' };
+  }
+  confirmedPassRunning = true;
+  try {
+    return await purgePass(opts);
+  } finally {
+    confirmedPassRunning = false;
+  }
+}
+
+function emptyReport(dryRun: boolean): PurgeReport {
+  return {
+    dryRun, keptCount: 0, quarantined: 0, quarantinedNames: [], released: [],
     deletedCount: 0, deletedNames: [], agingCount: 0, supersededCount: 0, inFlight: 0, failed: 0,
     freedBytes: 0,
   };
+}
+
+async function purgePass(opts: Parameters<typeof runOrphanPurge>[0]): Promise<PurgeReport> {
+  const now = opts.now ?? Date.now();
+  const empty = emptyReport(!opts.confirm);
   const rootStatus = await stemCache.stemsRootStatus({ readOnly: true });
   const root = stemCache.stemsRoot();
   const qu = opts.quarantineDir ?? path.join(root, QUARANTINE_DIR);
@@ -166,16 +199,32 @@ export async function runOrphanPurge(opts: {
       return { ...report, refused: true, reason: `cache root ${root} could not be read` };
     }
   }
+  // Only an orphan needs its mtime (the in-flight check): a known id is kept
+  // whatever its age, so the walk stats just the orphans, in parallel, which
+  // keeps a 76k-dir share from costing one round trip per track.
   const cacheEntries: Array<{ name: string; known: boolean }> = [];
+  const orphanNames: string[] = [];
   for (const name of entries) {
-    let mtimeMs = 0;
-    try {
-      mtimeMs = (await stat(path.join(root, name))).mtimeMs;
-    } catch { continue; /* vanished mid-walk */ }
-    if (!known.has(name) && now - mtimeMs < inFlightMs) { report.inFlight += 1; continue; }
-    cacheEntries.push({ name, known: known.has(name) });
+    if (known.has(name)) cacheEntries.push({ name, known: true });
+    else orphanNames.push(name);
   }
+  const ages = await mapPool(orphanNames, stemCache.SCAN_CONCURRENCY,
+    name => stat(path.join(root, name)).then(st => st.mtimeMs, () => null));
+  orphanNames.forEach((name, i) => {
+    const mtimeMs = ages[i];
+    if (mtimeMs == null) return; // vanished mid-walk
+    if (now - mtimeMs < inFlightMs) { report.inFlight += 1; return; }
+    cacheEntries.push({ name, known: false });
+  });
   const plan = planOrphanPurge(cacheEntries, { now, confirm: opts.confirm });
+  if (opts.automatic && opts.confirm && exceedsAutoCeiling(plan.quarantine.length, plan.keptCount)) {
+    return {
+      ...report, keptCount: plan.keptCount, quarantined: 0, refused: true,
+      reason: `would quarantine ${plan.quarantine.length} of ${plan.quarantine.length + plan.keptCount} stem dirs, `
+        + 'more than an automatic pass moves on its own (is the library half-loaded?): '
+        + 'check the Stems page and confirm the move there if it is right',
+    };
+  }
   report.keptCount = plan.keptCount;
   report.quarantinedNames = plan.quarantine.map(q => q.name).slice(0, 10);
 
@@ -266,6 +315,22 @@ async function mkdirSafe(dir: string): Promise<void> {
   const fs = await import('node:fs/promises');
   try { await fs.mkdir(dir, { recursive: true, mode: 0o777 }); } catch { /* reported by the move failures */ }
   try { await fs.chmod(dir, 0o777); } catch { /* not ours to change; the moves report failures */ }
+}
+
+/**
+ * The nightly pass (scheduler.ts): confirmed, automatic (the share ceiling
+ * applies), and stamping each quarantine's name like the manual confirm, so
+ * the names outlive the event-log retention for the folders the cron moved
+ * too.
+ */
+export async function runScheduledOrphanPurge(knownIds: readonly string[], now?: number): Promise<PurgeReport> {
+  return runOrphanPurge({
+    knownIds,
+    confirm: true,
+    automatic: true,
+    resolveNames: ids => resolveOrphanNames(ids),
+    ...(now !== undefined ? { now } : {}),
+  });
 }
 
 /** Dry-run convenience for the doctor and the admin route. */
