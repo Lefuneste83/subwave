@@ -9,16 +9,17 @@
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { existsSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { after, beforeEach } from 'node:test';
-import { removeTempDir } from './test-utils/temp-dir.js';
+import { createTempDir, removeTempDir } from './test-utils/temp-dir.js';
 
 const HOUR = 3_600_000;
 const T0 = Date.parse('2026-10-28T16:00:00Z');
 // 2,500 songs, one hour apart, newest first.
-const SONGS = Array.from({ length: 2_500 }, (_, i) => ({ id: `s${i}`, updatedAt: new Date(T0 - i * HOUR).toISOString() }));
+let SONGS = Array.from({ length: 2_500 }, (_, i) => ({ id: `s${i}`, updatedAt: new Date(T0 - i * HOUR).toISOString() }));
+const BASE_SONGS = SONGS;
 let serverType = 'navidrome';
 let failFromStart: number | null = null;
 const listCalls: number[] = [];
@@ -52,7 +53,7 @@ function handler(req: IncomingMessage, res: ServerResponse) {
 const server = createServer(handler);
 await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
 const port = (server.address() as AddressInfo).port;
-const dir = mkdtempSync(join(tmpdir(), 'subwave-file-changes-'));
+const dir = createTempDir(join(tmpdir(), 'subwave-file-changes-'));
 process.env.STATE_DIR = dir;
 process.env.NAVIDROME_URL = `http://127.0.0.1:${port}`;
 process.env.NAVIDROME_USER = 'u';
@@ -67,7 +68,8 @@ beforeEach(async () => {
   serverType = 'navidrome';
   failFromStart = null;
   listCalls.length = 0;
-  await removeTempDir(markFile).catch(() => {});
+  SONGS = BASE_SONGS;
+  rmSync(markFile, { force: true });
 });
 
 test('a first walk pages down to the oldest measurement, then the mark bounds the next', async () => {
@@ -89,7 +91,7 @@ test('a first walk pages down to the oldest measurement, then the mark bounds th
 
 test('nothing measured yet: nothing is stale, Navidrome is not paged', async () => {
   const r = await fc.changedFiles(null);
-  assert.deepEqual(r, { changes: [], newest: null, complete: true });
+  assert.deepEqual(r, { changes: [], newest: null, complete: true, since: null, futureDated: 0 });
   assert.deepEqual(listCalls, []);
 });
 
@@ -110,4 +112,25 @@ test('a failed first page, or another server, is no answer at all', async () => 
   listCalls.length = 0;
   assert.equal(await fc.changedFiles(new Date(T0 - 10 * HOUR).toISOString()), null);
   assert.deepEqual(listCalls, [], 'never asks a server that is not Navidrome');
+});
+
+test('a future-dated file is skipped, never moves the mark past now, and a future mark is read as now', async () => {
+  // updatedAt is the file's mtime: one file from a device with a wrong clock
+  // used to become the saved mark, blinding every later walk, and to postdate
+  // every measurement, re-analysed on every walk.
+  const now = T0 + HOUR;
+  SONGS = [{ id: 'skewed', updatedAt: new Date(now + 400 * 24 * HOUR).toISOString() }, ...BASE_SONGS];
+  const r = await fc.changedFiles(new Date(T0 - 10 * HOUR).toISOString(), now);
+  assert.ok(r);
+  assert.equal(r.futureDated, 1);
+  assert.ok(!r.changes.some(c => c.id === 'skewed'), 'not a change');
+  assert.equal(r.newest, SONGS[1].updatedAt, 'the mark is the newest real change');
+  assert.equal(r.changes.length, 11);
+  // A mark already saved in the future (an older build, a skewed clock) is read as now.
+  writeFileSync(markFile, JSON.stringify({ newest: new Date(now + 30 * 24 * HOUR).toISOString() }));
+  const next = await fc.changedFiles(null, now);
+  assert.ok(next);
+  assert.equal(next.since, new Date(now - CHANGE_MARK_MARGIN_MS).toISOString());
+  assert.ok(next.changes.length > 0, 'the floor is now less the margin, not above every change');
+  assert.ok(Date.parse(next.newest!) <= now, 'never saved past now');
 });

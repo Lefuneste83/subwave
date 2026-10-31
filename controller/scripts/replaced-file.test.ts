@@ -1,8 +1,10 @@
 // A file replaced at the same path keeps its track id (Navidrome derives the
 // id from the path), so the walk's size change is the only signal that the
-// audio is new: library-db.upsertTrackMeta clears every audio measurement of
-// the track (clearTrackAudio), the facet rows follow, and the walk drops the
-// stem files (stem-cache.forgetStems). Metadata, the year and its row stay.
+// audio is new: library-db.upsertTrackMeta reports it (keeping the old size),
+// the walk clears every audio measurement of the track at its end
+// (clearTrackAudio, behind decideReplacedClear's mass hold), the facet rows
+// follow, and the walk drops the stem files (stem-cache.forgetStems).
+// Metadata, the year and its row stay.
 //
 // Run: npm test -- replaced-file
 
@@ -70,6 +72,43 @@ test('the Navidrome signal: re-imported after the track was last measured', () =
   assert.equal(policy.changesFloor('2026-10-28T15:00:00Z'), Date.parse('2026-10-28T15:00:00Z') - policy.CHANGE_MARK_MARGIN_MS);
 });
 
+test('a future-dated file is never a change, and a future mark reads as now', () => {
+  // updatedAt is the file's mtime: a wrong clock on the device that wrote it.
+  const now = Date.parse('2026-10-31T12:00:00Z');
+  const measured = '2026-10-31T11:00:00Z';
+  assert.equal(policy.changedAfterMeasure('2027-06-01T00:00:00Z', measured, now), false, 'past now + the margin');
+  assert.equal(policy.changedAfterMeasure('2026-10-31T13:00:00Z', measured, now), true, 'inside the margin: clock skew, still a change');
+  assert.equal(policy.changesFloor('2027-06-01T00:00:00Z', now), now - policy.CHANGE_MARK_MARGIN_MS);
+  assert.equal(policy.capMark('2027-06-01T00:00:00Z', now), new Date(now).toISOString());
+  assert.equal(policy.capMark('2026-10-30T00:00:00Z', now), '2026-10-30T00:00:00Z');
+  assert.equal(policy.capMark(null, now), null);
+});
+
+test('a mass replacement is held, like a mass prune: nothing cleared without --confirm-replaced', () => {
+  // A tag editor's "save all" changes every file's size and date.
+  assert.deepEqual(policy.decideReplacedClear({ candidates: 5, knownTracks: 72_000, confirmed: false }), { clear: true });
+  const held = policy.decideReplacedClear({ candidates: 40_000, knownTracks: 72_000, confirmed: false });
+  assert.equal(held.clear, false);
+  assert.match((held as { message: string }).message, /--confirm-replaced/);
+  assert.deepEqual(policy.decideReplacedClear({ candidates: 40_000, knownTracks: 72_000, confirmed: true }), { clear: true });
+  // The prune's threshold: max(200, 2 % of the library).
+  assert.equal(policy.decideReplacedClear({ candidates: 1_440, knownTracks: 72_000, confirmed: false }).clear, true);
+  assert.equal(policy.decideReplacedClear({ candidates: 1_441, knownTracks: 72_000, confirmed: false }).clear, false);
+  assert.equal(policy.decideReplacedClear({ candidates: 200, knownTracks: 50, confirmed: false }).clear, true);
+});
+
+test('a held candidate keeps its old size, so the next walk finds it again', () => {
+  measured('held');
+  assert.equal(db.upsertTrackMeta('held', meta(3_000)), true);
+  const t = sql('SELECT file_size, bpm FROM tracks WHERE id = ?').get('held') as { file_size: number; bpm: number };
+  assert.equal(t.file_size, 1_000, 'not stored until the clear');
+  assert.equal(t.bpm, 100, 'nothing is cleared by the upsert');
+  assert.equal(db.upsertTrackMeta('held', meta(3_000)), true, 'the next walk sees it again');
+  db.clearTrackAudio('held', 3_000);
+  assert.equal(db.upsertTrackMeta('held', meta(3_000)), false, 'once cleared, the new size is the stored one');
+  consistent();
+});
+
 test('lastMeasuredAt reads the analysis rows only, never the year', () => {
   measured('when');
   sql(`UPDATE track_facet_status SET at = '2026-10-01T00:00:00Z' WHERE track_id = 'when'`).run();
@@ -101,6 +140,7 @@ test('a replaced file: its audio analysis is due again, its metadata and year st
   measured('swap');
   assert.ok(rows('swap').includes('edges:ok') && rows('swap').includes('clap:ok') && rows('swap').includes('stems:ok'), rows('swap').join());
   assert.equal(db.upsertTrackMeta('swap', meta(2_000)), true);
+  db.clearTrackAudio('swap', 2_000);
   const t = sql('SELECT * FROM tracks WHERE id = ?').get('swap') as Record<string, unknown>;
   for (const col of ['bpm', 'musical_key', 'analysis_version', 'loudness_lufs', 'loudness_version', 'decoded_duration_ms',
     'edge_tail_ms', 'outro_json', 'tail_version', 'vocal_ranges_json', 'stems_at', 'audio_moods', 'map_x']) {
@@ -121,6 +161,7 @@ test('a settled "silent" answer from the old file does not survive the replaceme
   sql(`INSERT OR REPLACE INTO track_facet_status (track_id, facet, version, status, reason, attempts, source, at, unmeasurable_reason)
        VALUES ('silent', 'loudness', ?, 'unmeasurable', 'silent', 0, 'url', '2026-10-28', 'silent')`).run(db.FACET_VERSIONS.loudness);
   assert.equal(db.upsertTrackMeta('silent', meta(9_000_000)), true);
+  db.clearTrackAudio('silent', 9_000_000);
   assert.ok(!rows('silent').some(r => r.endsWith(':unmeasurable')), rows('silent').join());
   consistent();
 });
