@@ -9,15 +9,17 @@
 // and gives every test its own directory names. Quarantine age is steered by
 // passing a future `now` to the pass, not by racing mtimes.
 
-import { createTempDir } from './test-utils/temp-dir.js';
+import { createTempDir, removeTempDir } from './test-utils/temp-dir.js';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import test from 'node:test';
+import test, { after } from 'node:test';
 
 const DAY = 86400_000;
 
-const stateDir = createTempDir('subwave-orphan-io-');
+const stateDir = createTempDir(join(tmpdir(), 'subwave-orphan-io-'));
+after(async () => { await removeTempDir(stateDir); });
 process.env.STATE_DIR = stateDir;
 const cache = await import('../src/music/stem-cache.js');
 const purge = await import('../src/music/orphan-purge.js');
@@ -170,4 +172,50 @@ test('a lost marker does not strand an aged quarantine (quarantine present prove
   assert.ok(rep.deletedCount >= 1);
   assert.ok(!existsSync(join(QU, stranded)));
   writeFileSync(join(ROOT, cache.STEMS_MARKER), '{}'); // restore for later tests
+});
+
+test('the nightly pass stamps each quarantine\'s name, like the manual confirm', async () => {
+  // Most quarantining is the cron's: without the stamp, a folder's name
+  // outlived nothing once the event logs aged out.
+  const gone = seedStem();
+  writeFileSync(join(stateDir, 'recent-plays.json'), JSON.stringify([
+    { id: gone, title: 'Marionette', artist: 'Mathew Jonson', album: 'Remixes' },
+  ]));
+  const rep = await purge.runScheduledOrphanPurge(['_sentinel'], NOW_BASE + 403 * DAY);
+  assert.ok(rep.quarantined >= 1);
+  const meta = JSON.parse(readFileSync(join(QU, gone, '.track-meta.json'), 'utf8'));
+  assert.equal(meta.title, 'Marionette');
+  assert.equal(meta.artist, 'Mathew Jonson');
+});
+
+test('one confirmed pass at a time: a second one is refused while the first runs', async () => {
+  seedStem();
+  const [a, b] = await Promise.all([
+    purge.runOrphanPurge({ knownIds: ['_sentinel'], confirm: true, now: NOW_BASE + 404 * DAY }),
+    purge.runOrphanPurge({ knownIds: ['_sentinel'], confirm: true, now: NOW_BASE + 404 * DAY }),
+  ]);
+  assert.equal(a.refused, undefined);
+  assert.equal(b.refused, true);
+  assert.match(b.reason ?? '', /another purge pass is running/);
+  // A dry run is never held back: it moves nothing.
+  const dry = await purge.runOrphanPurge({ knownIds: ['_sentinel'], confirm: false, now: NOW_BASE + 404 * DAY });
+  assert.equal(dry.refused, undefined);
+});
+
+test('the nightly pass refuses a mass move and leaves it to an operator; a manual confirm still makes it', async () => {
+  // A library table half-filled after a reset reads like most of the cache
+  // left the library. The cron must not act on that by itself.
+  const known: string[] = [];
+  for (let i = 0; i < 20; i++) known.push(seedStem());
+  const orphans: string[] = [];
+  for (let i = 0; i < 120; i++) orphans.push(seedStem());
+  const now = NOW_BASE + 405 * DAY;
+  const auto = await purge.runScheduledOrphanPurge(known, now);
+  assert.equal(auto.refused, true);
+  // Earlier tests leave a few dirs of their own at the shared root.
+  assert.match(auto.reason ?? '', /would quarantine \d+ of \d+ stem dirs/);
+  assert.ok(orphans.every(id => existsSync(join(ROOT, id))), 'nothing moved');
+  const manual = await purge.runOrphanPurge({ knownIds: known, confirm: true, now });
+  assert.ok(manual.quarantined >= 120);
+  assert.ok(orphans.every(id => existsSync(join(QU, id))));
 });

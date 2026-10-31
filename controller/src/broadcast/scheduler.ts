@@ -27,7 +27,7 @@ import { getFullContext } from '../context.js';
 import { queue } from './queue.js';
 import { createPoolBuilder } from './auto-pool.js';
 import { applyTrackFloor, capCueOutSec, trackLengthSeconds } from '../music/track-floor.js';
-import { runOrphanPurge } from '../music/orphan-purge.js';
+import { runScheduledOrphanPurge } from '../music/orphan-purge.js';
 import { allTrackIdsOrdered } from '../music/library-db.js';
 import { airableAnchorTracks, coastFloor, COAST_MIN_SEC, rotationCoast, rotationOrder, showNoRepeatGuard } from '../music/show-recency.js';
 import { knownDurationSec } from './queue/pure.js';
@@ -1209,7 +1209,7 @@ async function nightlyDoctor() {
 async function stemOrphanPurgeTick() {
   try {
     if (settings.get()?.audio?.stemOrphanPurgeEnabled !== true) return;
-    const r = await runOrphanPurge({ knownIds: allTrackIdsOrdered(), confirm: true });
+    const r = await runScheduledOrphanPurge(allTrackIdsOrdered());
     if (r.refused) { queue.log('error', `Stem orphan purge: refused — ${r.reason}`); return; }
     if (r.quarantined || r.deletedCount || r.released.length || r.failed) {
       queue.log('scheduler',

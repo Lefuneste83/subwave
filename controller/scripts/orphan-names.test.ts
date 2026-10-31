@@ -4,13 +4,16 @@
 // source is optional, and these tests own the file-backed half of the chain;
 // the plays/table half runs against a real db in the app's own test lanes.
 
-import { createTempDir } from './test-utils/temp-dir.js';
+import { createTempDir, removeTempDir } from './test-utils/temp-dir.js';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import test from 'node:test';
+import test, { after } from 'node:test';
 
-const stateDir = createTempDir('subwave-orphan-names-');
+const stateDir = createTempDir(join(tmpdir(), 'subwave-orphan-names-'));
+const made: string[] = [stateDir];
+after(async () => { for (const d of made) await removeTempDir(d); });
 process.env.STATE_DIR = stateDir;
 const names = await import('../src/music/orphan-names.js');
 
@@ -37,7 +40,8 @@ test('parseNameHits collects {id,title,artist} triples, honoring escapes and id 
 });
 
 function freshDirs() {
-  const base = createTempDir('subwave-orphan-dirs-');
+  const base = createTempDir(join(tmpdir(), 'subwave-orphan-dirs-'));
+  made.push(base);
   const stems = join(base, 'stems');
   const logs = join(base, 'logs');
   mkdirSync(stems, { recursive: true });
@@ -134,4 +138,19 @@ test('a confirmed quarantine stamps the resolved name before the logs can age it
   assert.equal(stamped.title, 'Stamped Title');
   assert.equal(stamped.artist, 'Stamper');
   assert.equal(typeof stamped.orphanedAt, 'number');
+});
+
+test('the orphan list keeps the purge\'s in-flight grace: a dir written within the hour is not listed', async () => {
+  // The panel's "Show tracks" list and the report count the same folders.
+  const cache = await import('../src/music/stem-cache.js');
+  const root = cache.stemsRoot();
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, cache.STEMS_MARKER), '{}');
+  const old = join(root, ID_C);
+  const fresh = join(root, ID_D);
+  mkdirSync(old, { recursive: true });
+  mkdirSync(fresh, { recursive: true });
+  const t = new Date(Date.now() - 2 * 3600_000);
+  utimesSync(old, t, t);
+  assert.deepEqual(await names.listOrphanDirNames(new Set()), [ID_C]);
 });
