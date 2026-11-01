@@ -5,11 +5,13 @@ The analyzer image runs as an unprivileged user with the default umask 022, so
 a plain makedirs/open leaves stems/<id>/ at 755 and its files at 644. The
 controller deletes those folders (stem-cache eviction), and on a share where it
 is not that user (a remote analyzer, or NFS squashing root to nobody) it cannot
-delete inside a 755 folder. The state bootstrap's rule applies instead: shared
-folders 777, shared files 666, whatever the process umask.
+delete inside a 755 folder. So shared folders are 777, the state bootstrap's
+rule for its folders, and shared files 666 to match, whatever the process umask.
 A refused chmod, on a folder or a file, never stops the write (the
 entrypoint's rule too), and a failed write leaves no partial .tmp behind.
-Pure stdlib: numpy and soundfile are stubbed.
+soundfile is stubbed, so no audio is decoded. numpy is real, because
+render_transition is array arithmetic, and a missing one fails rather than skips
+(analyzer_silence_test.py beside it): npm test installs it.
 """
 
 import atexit
@@ -22,8 +24,14 @@ import stat
 import sys
 import tempfile
 import types
+from unittest.mock import patch
 
-sys.modules.setdefault("numpy", types.ModuleType("numpy"))
+try:
+    import numpy as np
+except ImportError:
+    print("FAIL: numpy is required for this suite (pip install numpy)")
+    sys.exit(1)
+
 sf = types.ModuleType("soundfile")
 
 
@@ -103,11 +111,8 @@ def t_foreign_dir_tolerated():
             raise PermissionError(1, "Operation not permitted", path)
         return real(path, m, *a, **k)
 
-    os.chmod = deny
-    try:
+    with patch("os.chmod", deny):
         aw.write_stems({"other": Stem()}, "tail", d)
-    finally:
-        os.chmod = real
     assert mode(os.path.join(d, "tail-other.flac")) == 0o666
 
 
@@ -123,21 +128,47 @@ def t_file_chmod_refused():
             raise OSError(95, "Operation not supported", path)
         return real(path, m, *a, **k)
 
-    aw._shared_chmod_logged = False
-    os.chmod = refuse
     err = io.StringIO()
-    try:
-        with contextlib.redirect_stderr(err):
-            aw.write_stems({"drums": Stem(), "bass": Stem()}, "tail", d)
-            aw.write_tail_meta(d, 10.0, 20.0)
-    finally:
-        os.chmod = real
+    with patch.object(aw, "_shared_chmod_logged", False), patch("os.chmod", refuse), \
+            contextlib.redirect_stderr(err):
+        aw.write_stems({"drums": Stem(), "bass": Stem()}, "tail", d)
+        aw.write_tail_meta(d, 10.0, 20.0)
     for name in ("tail-drums.flac", "tail-bass.flac", "tail-meta.json"):
-        assert os.path.exists(os.path.join(d, name)), f"{name} not published"
+        p = os.path.join(d, name)
+        assert os.path.exists(p), f"{name} not published"
+        assert mode(p) == 0o644, f"{name} {oct(mode(p))}: not the mount's mode"
     assert not [f for f in os.listdir(d) if f.endswith(".tmp")]
     lines = [ln for ln in err.getvalue().splitlines() if "could not set mode" in ln]
     assert len(lines) == 1, err.getvalue()
-    assert ".tmp" in lines[0] and "track-5" in lines[0], lines[0]
+    # The name an operator can look up, not a temp file already renamed away.
+    assert "track-5/tail-drums.flac " in lines[0] and ".tmp" not in lines[0], lines[0]
+
+
+def t_writable_refusal_is_silent():
+    # transitions/ is created root-owned 777, so it refuses the analyzer's chmod
+    # on every render and works fine. The warning keys on writability, never on
+    # chmod's exit status (the entrypoint's state_writable_by_others), and that
+    # silence must not spend the one line a real refusal needs.
+    healthy = os.path.join(root, "transitions-root-owned")
+    stuck = os.path.join(root, "stems", "track-7")
+    for path, m in ((healthy, 0o777), (stuck, 0o755)):
+        os.makedirs(path)
+        os.chmod(path, m)
+    real = os.chmod
+
+    def deny(path, m, *a, **k):
+        if path in (healthy, stuck):
+            raise PermissionError(1, "Operation not permitted", path)
+        return real(path, m, *a, **k)
+
+    err = io.StringIO()
+    with patch.object(aw, "_shared_chmod_logged", False), patch("os.chmod", deny), \
+            contextlib.redirect_stderr(err):
+        aw.make_shared_dir(healthy)
+        assert "could not set mode" not in err.getvalue(), err.getvalue()
+        aw.make_shared_dir(stuck)
+    lines = [ln for ln in err.getvalue().splitlines() if "could not set mode" in ln]
+    assert len(lines) == 1 and stuck in lines[0], err.getvalue()
 
 
 def t_failed_write_leaves_no_tmp():
@@ -164,23 +195,74 @@ def t_failed_write_leaves_no_tmp():
     assert os.listdir(d) == [], os.listdir(d)
 
 
+def t_planted_tmp_not_followed():
+    # The folder is 777, so anyone on the share can plant a link at a predictable
+    # temp name. The write never goes through it and never chmods its target.
+    d = os.path.join(root, "stems", "track-8")
+    target = os.path.join(root, "planted-target")
+    with open(target, "w") as f:
+        f.write("keep")
+    os.chmod(target, 0o600)
+    aw.make_shared_dir(d)
+    os.symlink(target, os.path.join(d, "tail-drums.flac.tmp"))
+    aw.write_stems({"drums": Stem()}, "tail", d)
+    with open(target) as f:
+        assert f.read() == "keep", "written through the link"
+    assert mode(target) == 0o600, oct(mode(target))
+    assert not os.path.islink(os.path.join(d, "tail-drums.flac"))
+    assert mode(os.path.join(d, "tail-drums.flac")) == 0o666
+
+
+def render_clip(out):
+    # The real render, cached stems to published clip.
+    sr = aw.DEMUCS_SR
+    stems = {name: Stem() for name in ("drums", "bass", "other", "vocals")}
+    out_stems = os.path.join(root, "stems", "track-out")
+    in_stems = os.path.join(root, "stems", "track-in")
+    aw.write_stems(stems, "tail", out_stems)
+    aw.write_tail_meta(out_stems, 170.0, 200.0)
+    aw.write_stems(stems, "head", in_stems)
+    audio = np.full((4 * sr, 2), 0.1, dtype=np.float32)
+    with patch.object(sf, "read", lambda path, **_: (audio, sr), create=True):
+        res = aw.render_transition({
+            "out": {"stems_dir": out_stems, "gain_db": 0.0,
+                    "outro": {"bars": [171000, 172000, 173000], "start_ms": 195000}},
+            "in": {"stems_dir": in_stems, "gain_db": 0.0, "bars": [500 * i for i in range(8)]},
+            "out_dir": out, "clip_name": "clip.wav",
+        })
+    assert res.get("ok"), res
+    assert res["path"] == os.path.join(out, "clip.wav"), res
+    assert mode(res["path"]) == 0o666, oct(mode(res["path"]))
+    assert os.listdir(out) == ["clip.wav"], os.listdir(out)
+
+
 def t_transition_output():
-    # render_transition's clip lands through the same two helpers.
-    out = os.path.join(root, "transitions")
-    aw.make_shared_dir(out)
-    path = os.path.join(out, "clip.wav")
-    with aw.shared_output(path) as tmp:
-        with open(tmp, "wb") as f:
-            f.write(b"RIFF")
+    # A folder the render makes itself comes out open, so the controller's clip
+    # sweep can delete inside it. It starts missing: pre-setting 777 here would
+    # pass with a plain makedirs at the umask's 755.
+    out = os.path.join(root, "transitions-made-here")
+    render_clip(out)
     assert mode(out) == 0o777, oct(mode(out))
-    assert mode(path) == 0o666
-    assert not os.path.exists(path + ".tmp")
-    with open(aw.__file__) as f:
-        src = f.read()
-    body = src[src.index("def render_transition"):]
-    body = body[:body.index("\ndef ")]
-    assert "make_shared_dir(out_dir)" in body and "shared_output(out_path)" in body
-    assert "os.makedirs(out_dir" not in body and "os.replace(" not in body
+
+
+def t_transition_refused_chmod():
+    # transitions/ is created root-owned 777, so its chmod is refused on every
+    # render, silently.
+    out = os.path.join(root, "transitions")
+    os.makedirs(out)
+    os.chmod(out, 0o777)
+    real = os.chmod
+
+    def deny(path, m, *a, **k):
+        if path == out:
+            raise PermissionError(1, "Operation not permitted", path)
+        return real(path, m, *a, **k)
+
+    err = io.StringIO()
+    with patch.object(aw, "_shared_chmod_logged", False), patch("os.chmod", deny), \
+            contextlib.redirect_stderr(err):
+        render_clip(out)
+    assert "could not set mode" not in err.getvalue(), err.getvalue()
 
 
 print("analyzer_shared_modes_test.py")
@@ -189,6 +271,9 @@ test("tail-meta.json 666", t_tail_meta)
 test("a 755 folder from an older analyzer is opened up", t_existing_dir_reopened)
 test("a folder it cannot chmod still gets its files written", t_foreign_dir_tolerated)
 test("a file it cannot chmod is still published, logged once", t_file_chmod_refused)
+test("a refused chmod on a writable folder is silent, a stuck one still logs", t_writable_refusal_is_silent)
 test("a failed write leaves no partial .tmp", t_failed_write_leaves_no_tmp)
+test("a link planted at the temp name is not followed", t_planted_tmp_not_followed)
 test("render_transition writes its folder and clip shared", t_transition_output)
+test("render_transition in a root-owned 777 folder refuses silently", t_transition_refused_chmod)
 sys.exit(1 if failures else 0)

@@ -1766,37 +1766,52 @@ def stems_dir_to_write(stems_dir, require_marker):
 # makedirs/open leaves what it shares with the controller at 755/644. Where the
 # controller is another user on that share (a remote analyzer, or NFS squashing
 # root to nobody), it then cannot delete inside stems/<id>/ when it evicts the
-# track. Shared folders get 777 and shared files 666, the state bootstrap's
-# rule (docker/broadcast-entrypoint.sh), set explicitly so no umask can narrow them.
+# track. Shared folders get 777, the state bootstrap's rule for its folders
+# (docker/broadcast-entrypoint.sh), set explicitly so no umask can narrow them.
+# Shared files get 666 to match. That half is this module's choice, not the
+# bootstrap's, which sets 666 only on the two playlists: eviction needs just the
+# folder, and whoever can write the folder can already replace a file in it.
 # A refused chmod never stops a write, on a folder or a file: the entrypoint's
 # own rule (state_prepare_file's `chmod ... || true`), because the shares this is
 # for (ACL-only NFS, some NAS exports, FUSE) answer a mode change on SETATTR
 # with EPERM, ENOTSUP or ENOSYS. The item then keeps the mount's mode, and the
 # analyzer says so once per process, naming the path, so a cache that stays
-# 755 is explained in its own log.
+# 755 is explained in its own log. The warning keys on writability, never on
+# chmod's exit status (the entrypoint's state_writable_by_others): transitions/
+# is created root-owned 777, so it refuses this user on every render and is a
+# working config, which must neither warn nor spend the one line a real refusal needs.
 SHARED_DIR_MODE = 0o777
 SHARED_FILE_MODE = 0o666
 _shared_chmod_logged = False
 
 
-def _shared_chmod(path, mode):
+def _writable_by_others(path):
+    try:
+        return bool(os.stat(path).st_mode & 0o002)
+    except OSError:
+        return False
+
+
+def _shared_chmod(path, mode, shown_as=None):
     global _shared_chmod_logged
     try:
         os.chmod(path, mode)
     except OSError as err:
-        if not _shared_chmod_logged:
-            _shared_chmod_logged = True
-            log(f"could not set mode {oct(mode)} on {path} ({err.strerror or err}): "
-                "it keeps the mount's mode, and the write goes ahead (logged once)")
+        if _shared_chmod_logged or _writable_by_others(path):
+            return
+        _shared_chmod_logged = True
+        log(f"could not set mode {oct(mode)} on {shown_as or path} ({err.strerror or err}): "
+            "it keeps the mount's mode, and the write goes ahead (logged once)")
 
 
 def make_shared_dir(path):
     """makedirs + an explicit 777 on the leaf. makedirs gives any missing
-    parent the umask's mode; the roots (stems/, transitions/, a relocated
-    STEMS_DIR) are created 777 by the broadcast entrypoint and the
-    controller's marker setup, and stems_require_marker makes sure they exist,
-    so only an older controller that sends no marker flag ever reaches here
-    with one missing."""
+    parent the umask's mode. For stems, stems_require_marker means the root
+    already exists, created 777 by the broadcast entrypoint or the controller's
+    marker setup, so only an older controller that sends no marker flag reaches
+    here with one missing. render_transition has no marker check: its out_dir
+    is transitions/, which the entrypoint creates 777 and which is the leaf
+    here anyway, so a parent can only be missing if the state dir itself is."""
     os.makedirs(path, exist_ok=True)
     _shared_chmod(path, SHARED_DIR_MODE)
 
@@ -1806,12 +1821,20 @@ def shared_output(path):
     """Yields the temp path to write; on success sets 666 and renames it into
     place atomically (the chmod comes first, so the final name never appears
     at the umask's mode). On any failure, the write's or the rename's, the
-    temp file is removed so a partial file never counts against the cache
-    budget, and the error goes up to the caller, which degrades."""
-    tmp = path + ".tmp"
+    temp file is removed, so a failed write costs the cache budget nothing,
+    and the error goes up to the caller, which degrades. A killed worker
+    cleans up nothing: its partial .tmp stays until the folder is evicted, or
+    until the clip sweep ages it out of transitions/.
+
+    The temp name is unique and created O_EXCL, because these folders are open
+    to everyone: a link planted at a predictable name would be written through
+    and chmodded (write_state_marker's mktemp is there for the same reason).
+    Not mkstemp itself: its 600 is what a refused chmod would then publish."""
+    tmp = f"{path}.{os.urandom(4).hex()}.tmp"
     try:
+        os.close(os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
         yield tmp
-        _shared_chmod(tmp, SHARED_FILE_MODE)
+        _shared_chmod(tmp, SHARED_FILE_MODE, shown_as=path)
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):
