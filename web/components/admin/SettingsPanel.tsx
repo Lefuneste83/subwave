@@ -38,7 +38,7 @@ import {
   type LoudnessSource, type TransitionEffect,
 } from './settings/shared';
 import {
-  SECTIONS, SECTION_GROUPS, RESTART_PATHS, sectionById, type SectionId,
+  SECTIONS, SECTION_GROUPS, RESTART_PATHS, STEM_FORM_KEYS, sectionById, type SectionId,
 } from './settings/registry';
 import { Advanced, SectionChromeProvider } from './settings/section-chrome';
 import { SettingsSearch, type SettingsJump } from './settings/SettingsSearch';
@@ -60,7 +60,7 @@ import {
   useSettingsQuery,
   useStemUsageQuery,
 } from './settings/queries';
-import { fmtGb, fmtMeasured, stemBudgetImpact } from './settings/stem-budget';
+import { fmtGb, fmtMeasured, stemBudgetImpact, usageCaveat } from './settings/stem-budget';
 import {
   cloudSaveSnapshot, cloudSaveReadReady, rebaselineSavedPatch, reconcileSavedCloud,
   adoptServerPaths, committedReadReady, LLM_SWAP_FORM_KEYS,
@@ -844,7 +844,7 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
                           <div className="field-hint">
                             Cache used: <span className="mono-num">{fmtGb(stemUsage.bytes)}</span>
                             {' '}&middot; {stemUsage.dirs.toLocaleString('en-GB')} tracks
-                            {at ? ` (measured ${at}${stemUsage.fresh ? '' : stemUsage.passRunning ? ', analysis pass adding more' : ', over a day old'})` : ''}
+                            {at ? ` (measured ${at}${usageCaveat(stemUsage)})` : ''}
                           </div>
                           {impact && (
                             <div className="field-hint text-destructive" role="status">
@@ -901,7 +901,7 @@ export default function SettingsPanel({ djBrainEnabled = false }: { djBrainEnabl
               onSave={saveStemsGuarded}
               saveLabel="Save stems"
               errors={fieldErrors}
-              ownedKeys={['transitions.pairDrain', 'transitions.stemBlends', 'audio.stemCache', 'audio.stemCacheGb']}
+              ownedKeys={STEM_FORM_KEYS}
             />
           </>
         )}

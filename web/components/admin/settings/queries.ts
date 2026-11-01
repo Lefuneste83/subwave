@@ -21,7 +21,7 @@ export const settingsKeys = {
   all: ['settings'] as const,
   detail: () => ['settings', 'detail'] as const,
   genreSuggestions: () => ['settings', 'genre-suggestions'] as const,
-  // A5 — the stem cache's stored size, read beside the budget field.
+  // The stem cache's stored size, read beside the budget field.
   stemUsage: () => ['settings', 'stem-usage'] as const,
 };
 
@@ -54,7 +54,7 @@ export function useSettingsQuery<T>({
   });
 }
 
-/** A5 — the stem cache's STORED size (never a walk) for the budget field.
+/** The stem cache's STORED size (never a walk) for the budget field.
  *  Silent on failure: the field simply shows no figure. */
 export function useStemUsageQuery({ adminFetch, enabled }: { adminFetch: AdminFetch; enabled: boolean }) {
   return useAdminQuery<StemUsageResponse>({

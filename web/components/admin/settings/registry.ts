@@ -44,18 +44,18 @@ export const LLM_PROVIDER_FORM_KEYS = [
   'llm.exemptRequests', 'llm.maxOutputTokens', 'llm.geminiSafety', 'llm.fallback',
 ] as const;
 
+// The Stems page's fields: the stem half of `transitions` (the form keeps the
+// stem cache under transitions; it saves to `audio.*`). One list, read by the
+// section's dirty check and its SaveBar's error scope.
+export const STEM_FORM_KEYS = [
+  'transitions.pairDrain', 'transitions.stemBlends', 'transitions.stemCache', 'transitions.stemCacheGb',
+] as const;
+
 // `satisfies`, never a `readonly SectionSpec[]` annotation: the annotation
 // widens every `id` back to `string` and takes `SectionId` — and with it every
 // typo guard on SETTINGS_INDEX, ADVANCED_CARDS and `activeSection` — down with
 // it. A bad id then compiles clean and dies quietly at runtime (`sectionById`
 // → undefined → no formKeys → no dirty tracking, no save bar).
-// The Stems page's fields: the stem half of `transitions` (the form keeps the
-// stem cache under transitions; it saves to `audio.*`). One list, read by the
-// section's dirty check and its save payload's error scope.
-export const STEM_FORM_KEYS = [
-  'transitions.pairDrain', 'transitions.stemBlends', 'transitions.stemCache', 'transitions.stemCacheGb',
-] as const;
-
 export const SECTIONS = [
   {
     id: 'station', group: 'the station', label: 'Station',
@@ -332,8 +332,8 @@ export const SETTINGS_INDEX: readonly IndexEntry[] = [
   { label: 'Lyrics', section: 'library', card: 'Enrichment', keywords: 'lyrics embed text' },
 
   // ── web search ─────────────────────────────────────────────────────────────
-  { label: 'Provider', section: 'search', card: 'Provider', keywords: 'duckduckgo tavily brave searxng keenable live facts' },
-  { label: 'API key', section: 'search', card: 'Provider', keywords: 'tavily brave keenable token search_api_key' },
+  { label: 'Provider', section: 'search', card: 'Provider', keywords: 'duckduckgo tavily brave searxng keenable firecrawl live facts' },
+  { label: 'API key', section: 'search', card: 'Provider', keywords: 'tavily brave keenable firecrawl token search_api_key' },
   { label: 'SearXNG URL', section: 'search', card: 'Provider', keywords: 'self hosted meta search json' },
   { label: 'Engines', section: 'search', card: 'Provider', keywords: 'searxng engines pin restrict google duckduckgo wikipedia' },
 
@@ -375,6 +375,7 @@ export const SETTINGS_INDEX: readonly IndexEntry[] = [
   { label: 'Stem cache', section: 'stems', card: 'Stem transitions', keywords: 'demucs drums bass vocals disk' },
   { label: 'Stem cache budget', section: 'stems', card: 'Stem transitions', keywords: 'gb evict oldest' },
   { label: 'Stem-blend seams', section: 'stems', card: 'Stem transitions', keywords: 'drums carry under intro blend' },
+  { label: 'Orphan stems cleanup', section: 'stems', card: 'Orphan stems cleanup', keywords: 'quarantine purge deleted tracks left library reclaim disk daily pass' },
   { label: 'Crossfade curve', section: 'broadcast', card: 'Crossfade', keywords: 'equal power linear dip fade shape' },
   { label: 'Cut fade endings at their audible end', section: 'broadcast', card: 'Crossfade', keywords: 'fade out ending tail silence quiet inaudible cue out exit overlap' },
   { label: 'Audible end (dB under the track\'s loudness)', section: 'broadcast', card: 'Crossfade', keywords: 'fade ending threshold db lufs quiet inaudible cut earlier' },

@@ -14,6 +14,7 @@ export const FEED_MAX_ITEMS_KEY = 'feedMaxItems';
 export const FEED_MAX_AGE_KEY = 'feedMaxAgeDays';
 // Optional further feeds read alongside `feed`, merged into one list.
 export const FEED_EXTRA_URL_KEYS = ['feed2', 'feed3'] as const;
+type FeedExtraKey = (typeof FEED_EXTRA_URL_KEYS)[number];
 
 // Upper bound on `feedMaxItems`, and the `max` the admin number field enforces.
 export const FEED_MAX_ITEMS_LIMIT = 50;
@@ -23,7 +24,10 @@ export const FEED_MAX_AGE_LIMIT = 365;
 export interface Headline {
   title: string;
   description: string;
-  /** ISO time the item was published, present only when the feed dates it. */
+  /**
+   * When the item was published, present only when the feed dates it: an ISO
+   * time, or a bare YYYY-MM-DD when the feed gives a day and no clock.
+   */
   published?: string;
 }
 
@@ -39,14 +43,36 @@ export interface ParseOptions {
 // thereby fresh, but nor is it provably stale. That includes zone names
 // Date.parse does not know ("CEST"): such an item is kept as undated, the safe
 // direction, on purpose.
-function publishedOf(entry: Record<string, unknown>): number | null {
+function publishedOf(entry: Record<string, unknown>): { at: number; stamp: string } | null {
   for (const node of [entry.pubDate, entry.published, entry.updated, entry.date, entry.issued]) {
     const text = textOf(node).trim();
     if (!text) continue;
-    const t = Date.parse(text);
-    if (Number.isFinite(t)) return t;
+    const at = Date.parse(text);
+    if (Number.isFinite(at)) return { at, stamp: calendarDayOf(text) ?? new Date(at).toISOString() };
   }
   return null;
+}
+
+// A stamp with no clock names a calendar day, not a moment, so it keeps that day:
+// read as a moment it is midnight somewhere, and the day before on any station
+// west of there. A zone on such a stamp ("30 Oct 2026 GMT", "2026-10-30Z") only
+// says whose midnight, so it is set aside. Date.parse then takes the ISO forms as
+// UTC and the rest ("30 Oct 2026") as local time, and each is read back that way.
+function calendarDayOf(text: string): string | null {
+  if (/\d:\d/.test(text)) return null;
+  // No `\s*` in the pattern: over a long run of spaces it goes quadratic, and a
+  // regex holds the event loop in a way no tool deadline can interrupt.
+  const bare = text.trim().replace(/(?:Z|GMT|UTC?|[ECMP][SD]T)$/i, '').trimEnd();
+  const d = new Date(bare);
+  if (Number.isNaN(d.getTime())) return null;
+  if (/^\d{4}(-\d{2}){0,2}$/.test(bare)) return d.toISOString().slice(0, 10);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// The day an item reaches the DJ with: a moment lands on the station's calendar,
+// and a bare day is already a calendar day.
+function stationDay(published: string): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(published) ? published : zonedISODate(new Date(published));
 }
 
 const parser = new XMLParser({
@@ -128,21 +154,34 @@ function entriesOf(doc: Record<string, unknown>): Record<string, unknown>[] {
   return [];
 }
 
+function parseDocument(xml: string): Record<string, unknown> | null {
+  try {
+    return asRecord(parser.parse(xml));
+  } catch {
+    // Malformed XML — treat it as an empty feed rather than throwing into the
+    // segment director, which is what the regex scanner did by construction.
+    return null;
+  }
+}
+
+// Whether a document is a feed at all, empty or not. A front page or a challenge
+// page answers 200 and parses to no entries, exactly as an empty feed does.
+function isFeedDocument(doc: Record<string, unknown> | null): boolean {
+  if (!doc) return false;
+  return Object.keys(doc).some((root) => /^(rss|feed|rdf)$/i.test(root)) || entriesOf(doc).length > 0;
+}
+
 // Parse a feed document into at most `cap` headlines. Entries with no title are
 // dropped — a headline the DJ cannot read is not a headline. With `maxAgeDays`,
 // an item dated older than that is dropped too, before the cap counts it: a
 // search feed (Google News) ignores its own `when:` window on a long query and
 // mixes months-old items in, and the DJ cannot tell last summer's festival from
 // tonight's. An undated item is kept (fail open: nothing says it is stale).
-export function parseFeed(xml: string, cap: number, { maxAgeDays = null, now = Date.now() }: ParseOptions = {}): Headline[] {
-  let doc: Record<string, unknown> | null = null;
-  try {
-    doc = asRecord(parser.parse(xml));
-  } catch {
-    // Malformed XML — treat it as an empty feed rather than throwing into the
-    // segment director, which is what the regex scanner did by construction.
-    return [];
-  }
+export function parseFeed(xml: string, cap: number, options: ParseOptions = {}): Headline[] {
+  return headlinesIn(parseDocument(xml), cap, options);
+}
+
+function headlinesIn(doc: Record<string, unknown> | null, cap: number, { maxAgeDays = null, now = Date.now() }: ParseOptions = {}): Headline[] {
   if (!doc) return [];
 
   const oldest = maxAgeDays ? now - maxAgeDays * 86_400_000 : null;
@@ -151,13 +190,13 @@ export function parseFeed(xml: string, cap: number, { maxAgeDays = null, now = D
     if (out.length >= cap) break;
     const title = stripHtml(textOf(entry.title));
     if (!title) continue;
-    const at = publishedOf(entry);
-    if (oldest != null && at != null && at < oldest) continue;
+    const published = publishedOf(entry);
+    if (oldest != null && published && published.at < oldest) continue;
     // RSS carries the blurb in <description>; Atom uses <summary>, falling back
     // to <content> (which, post-removeNSPrefix, is also where RSS's
     // <content:encoded> lands).
     const description = stripHtml(textOf(entry.description ?? entry.summary ?? entry.content));
-    out.push(at == null ? { title, description } : { title, description, published: new Date(at).toISOString() });
+    out.push(published ? { title, description, published: published.stamp } : { title, description });
   }
   return out;
 }
@@ -168,7 +207,17 @@ export function hashHeadline(title: string): string {
   return h.toString(36);
 }
 
-export async function fetchHeadlines({ feedUrl, maxItems, maxAgeDays = null }: { feedUrl?: string; maxItems?: number; maxAgeDays?: number | null } = {}) {
+// A fetch error can quote the URL it was handed, credentials and all ("Request
+// cannot be constructed from a URL that includes credentials: https://user:pass@…").
+// An error from here becomes `{ error }`, which an agent's tool call hands to the
+// model, so its text never carries a URL.
+function withoutUrls(err: unknown): unknown {
+  if (!(err instanceof Error)) return err;
+  const message = err.message.replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, '[url]');
+  return message === err.message ? err : new Error(message);
+}
+
+export async function fetchHeadlines({ feedUrl, maxItems, maxAgeDays = null, deadlineMs, requireFeed = false }: { feedUrl?: string; maxItems?: number; maxAgeDays?: number | null; deadlineMs?: number; requireFeed?: boolean } = {}) {
   const url = feedUrl || config.news.feedUrl;
   const cap = maxItems || config.news.maxItems;
   // Bounded like the web-search backends. The feed URL is operator-set
@@ -176,10 +225,19 @@ export async function fetchHeadlines({ feedUrl, maxItems, maxAgeDays = null }: {
   // deadline is about liveness. It runs inside the segment director on the
   // autonomous DJ path, where a hung socket would otherwise park the whole
   // segment on undici's ~300s default and eat the agent's own 45s budget many
-  // times over. 15s is generous for an RSS document.
-  const res = await fetchWithTimeout(url, { timeoutMs: 15_000 });
-  if (!res.ok) throw new Error(`News feed HTTP ${res.status}`);
-  return parseFeed(await res.text(), cap, { maxAgeDays });
+  // times over. 15s is generous for an RSS document. `deadlineMs` is for a caller
+  // with less time than that, and it covers the body as well as the headers.
+  try {
+    const res = await fetchWithTimeout(url, deadlineMs ? { timeoutMs: deadlineMs, bodyDeadline: true } : { timeoutMs: 15_000 });
+    if (!res.ok) throw new Error(`News feed HTTP ${res.status}`);
+    const doc = parseDocument(await res.text());
+    // A lone feed answers this as "no items", which it always has. `requireFeed`
+    // is for a merge, where it would otherwise contribute nothing without a word.
+    if (requireFeed && !isFeedDocument(doc)) throw new Error(`HTTP ${res.status}, but not a feed`);
+    return headlinesIn(doc, cap, { maxAgeDays });
+  } catch (err) {
+    throw withoutUrls(err);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -236,8 +294,8 @@ export const FEED_CONFIG_FIELDS = {
 
 // How many FRESH items one fire hands the model. This is the news skill's
 // historical return cap, kept for every feed skill: `feedMaxItems` caps how much
-// of the feed is read (and so lowers this ceiling when it is smaller), while
-// this caps how much of it is spent — burning a whole 50-item feed on one
+// of each feed is read (and lowers this ceiling when it is smaller), while this
+// caps how much of it is spent — burning a whole 50-item feed on one
 // between-track aside leaves nothing for the next break.
 export const FEED_ITEMS_PER_FIRE = 6;
 
@@ -250,8 +308,8 @@ const SEEN_KEEP = 60;
 export interface ResolvedFeed {
   url: string;
   maxItems: number;
-  /** Further feeds merged with `url`; absent when none is declared. */
-  extraUrls?: string[];
+  /** Further feeds merged with `url`, by frontmatter key; absent when none is declared. */
+  extraUrls?: Partial<Record<FeedExtraKey, string>>;
   /** Item age cap in days; absent when none is declared. */
   maxAgeDays?: number;
 }
@@ -293,16 +351,25 @@ export function resolveFeedConfig(config: Record<string, unknown> | null | undef
 
   const feed: ResolvedFeed = { url, maxItems: resolveMaxItems(config?.[FEED_MAX_ITEMS_KEY], warnings) };
   // A bad further feed is skipped with a warning; the first one still works.
-  const extraUrls: string[] = [];
+  const extraUrls: NonNullable<ResolvedFeed['extraUrls']> = {};
   for (const e of extras) {
     const why = urlProblem(e.url);
     if (why) warnings.push(`${e.key}: "${e.url}" ${why} — skipped`);
-    else if (e.url !== url && !extraUrls.includes(e.url)) extraUrls.push(e.url);
+    else if (e.url !== url && !Object.values(extraUrls).includes(e.url)) extraUrls[e.key] = e.url;
   }
-  if (extraUrls.length) feed.extraUrls = extraUrls;
+  if (Object.keys(extraUrls).length) feed.extraUrls = extraUrls;
   const maxAgeDays = resolveMaxAge(config?.[FEED_MAX_AGE_KEY], warnings);
   if (maxAgeDays != null) feed.maxAgeDays = maxAgeDays;
   return { feed, warnings };
+}
+
+// The keys only the generated tool reads. A skill with its own tool.mjs never gets
+// that tool, so on it they do nothing unless its code reads them, and code that
+// does declares them in `configFields`. `feed` and `feedMaxItems` are not here: a
+// tool.mjs reading those for itself is the documented shape.
+export function unreadFeedKeys(config: Record<string, unknown> | null | undefined, declared: { key: string }[]): string[] {
+  return [FEED_MAX_AGE_KEY, ...FEED_EXTRA_URL_KEYS]
+    .filter((key) => String(config?.[key] ?? '').trim() && !declared.some((f) => f.key === key));
 }
 
 function cleanUrl(raw: unknown): string {
@@ -363,8 +430,8 @@ function seenSetFor(state: any, kind: string): Set<string> {
 // caller (llm/internal/tools/segment-tools.ts, the forced path, the co-hosted
 // path) is unchanged — including the timeout and the `{ error }` degradation.
 //
-// Returns the news shape, `{ headlines: [{ title, detail }] }`, when there is
-// something fresh, and `{ available: false, reason }` when there is not — never
+// Returns the news shape, `{ headlines: [{ title, detail, published? }] }`, when
+// there is something fresh, and `{ available: false, reason }` when there is not — never
 // an empty list (#1830). An empty list read as usable data to
 // abstain-policy.ts, so Run now, a skill cron or a programme beat on a drained
 // feed ordered a line with no items in it, and the model invented a headline.
@@ -391,7 +458,10 @@ export function makeFeedTool(kind: string, feed: ResolvedFeed, warn: (message: s
     // A feed that fetched fine but carries no readable items is the same
     // answer as one that has all aired. It touches no dedup memory.
     if (!items.length) return { available: false, reason: 'the feed has no items' };
-    const fresh = items.filter(it => !seen.has(hashHeadline(it.title))).slice(0, FEED_ITEMS_PER_FIRE);
+    // Capped after the seen filter: capped before it, a low `feedMaxItems` would
+    // leave only the first feed's items in the list, and a later feed would read
+    // as aired without ever being offered.
+    const fresh = items.filter(it => !seen.has(hashHeadline(it.title))).slice(0, Math.min(FEED_ITEMS_PER_FIRE, feed.maxItems));
     if (!fresh.length) return { available: false, reason: 'every item on the feed has already aired' };
     // Burn on read so a later tick doesn't re-offer the same item.
     for (const it of fresh) seen.add(hashHeadline(it.title));
@@ -404,16 +474,31 @@ export function makeFeedTool(kind: string, feed: ResolvedFeed, warn: (message: s
     // news from what is history (and never call an old event "coming up").
     return {
       headlines: fresh.map(it => (it.published
-        ? { title: it.title, detail: it.description || null, published: zonedISODate(new Date(it.published)) }
+        ? { title: it.title, detail: it.description || null, published: stationDay(it.published) }
         : { title: it.title, detail: it.description || null })),
     };
   };
 }
 
-interface FeedFailure { url: string; error: string }
+interface FeedFailure { key: string; url: string; error: string }
+
+// How long one feed of several may take, body included. The tool wrapper
+// (llm/internal/tools/segment-tools.ts) gives up at 8 s and does not cancel, so a
+// merge that waited past it would lose the feeds that answered, and its abandoned
+// run would then burn items nobody received. A feed still out at this point has
+// failed: it takes the skip path, with time left to hand back the rest.
+const MERGED_FEED_DEADLINE_MS = 6_000;
+
+// Every reason here came through fetchHeadlines, so its message holds no URL.
+function failureText(reason: unknown): string {
+  if (!(reason instanceof Error)) return 'fetch failed';
+  return reason.name === 'AbortError' ? `no answer within ${MERGED_FEED_DEADLINE_MS / 1000}s` : reason.message;
+}
 
 // A feed named in a log line: host and path. The query is dropped, both for
-// length (a news search lives there) and because a private feed's token can.
+// length (a news search lives there) and because a private feed's token can. The
+// path can hold one too, so this never goes in an `{ error }`, which reaches the
+// model: that names the feed by its key.
 function feedLabel(url: string): string {
   try {
     const u = new URL(url);
@@ -425,30 +510,30 @@ function feedLabel(url: string): string {
 
 // Every declared feed, fetched together and interleaved round-robin so a busy
 // feed cannot crowd a quiet one out; a repeated headline keeps its first
-// appearance. `maxItems` is read from each feed and caps the merged list too,
-// so a fire never offers more than one feed's worth, and the burn-on-read
-// memory (SEEN_KEEP) always covers a whole list. A feed failing while another
-// answers is reported; if the ones that answered had no items, the failure is
-// the answer (rethrown), so a broken feed is never hidden behind an empty one.
-// All of them failing rethrows the first error, the same `{ error }`
-// degradation a single feed has always had.
+// appearance. `maxItems` is read from each feed, and makeFeedTool applies it to
+// what one fire offers. The list stops at SEEN_KEEP, so the burn-on-read memory
+// always covers a whole list and a trim can't bring an aired headline back. A
+// feed failing while another answers is reported; if the ones that answered had
+// no items, the failure is the answer, so a broken feed is never hidden behind an
+// empty one. That error, and all of them failing, is the same `{ error }`
+// degradation a single feed has always had, naming every feed that failed by its
+// key: with several, "HTTP 500" alone does not say which one to go and fix.
 async function fetchMerged(
   feed: ResolvedFeed,
   report: (failures: FeedFailure[], answered: string[]) => void = () => {},
 ): Promise<Headline[]> {
-  const urls = [feed.url, ...(feed.extraUrls || [])];
+  const feeds = [{ key: FEED_URL_KEY, url: feed.url }, ...Object.entries(feed.extraUrls || {}).map(([key, url]) => ({ key, url }))];
   const opts = { maxItems: feed.maxItems, maxAgeDays: feed.maxAgeDays ?? null };
-  if (urls.length === 1) return fetchHeadlines({ feedUrl: urls[0], ...opts });
-  const results = await Promise.allSettled(urls.map((feedUrl) => fetchHeadlines({ feedUrl, ...opts })));
+  if (feeds.length === 1) return fetchHeadlines({ feedUrl: feed.url, ...opts });
+  const results = await Promise.allSettled(feeds.map(({ url }) => fetchHeadlines({ feedUrl: url, ...opts, deadlineMs: MERGED_FEED_DEADLINE_MS, requireFeed: true })));
   const lists = results.flatMap((r) => (r.status === 'fulfilled' ? [r.value] : []));
-  const firstFailure = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
-  if (!lists.length || (firstFailure && !lists.some((l) => l.length))) throw firstFailure!.reason;
-  report(
-    results.flatMap((r, i) => (r.status === 'rejected'
-      ? [{ url: urls[i], error: r.reason instanceof Error ? r.reason.message : String(r.reason) }]
-      : [])),
-    urls.filter((_, i) => results[i].status === 'fulfilled'),
-  );
+  const failures = results.flatMap((r, i) => (r.status === 'rejected'
+    ? [{ ...feeds[i], error: failureText(r.reason) }]
+    : []));
+  if (!lists.length || (failures.length && !lists.some((l) => l.length))) {
+    throw new Error(failures.map(({ key, error }) => `${key}: ${error}`).join('; '));
+  }
+  report(failures, feeds.filter((_, i) => results[i].status === 'fulfilled').map(({ url }) => url));
   const out: Headline[] = [];
   const taken = new Set<string>();
   for (let i = 0; lists.some((l) => i < l.length); i++) {
@@ -461,5 +546,5 @@ async function fetchMerged(
       out.push(it);
     }
   }
-  return out.slice(0, feed.maxItems);
+  return out.slice(0, SEEN_KEEP);
 }

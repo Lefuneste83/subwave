@@ -1,4 +1,4 @@
-// B10 — orphan stem names (music/orphan-names.ts). The parse and the chain:
+// Orphan stem names (music/orphan-names.ts). The parse and the chain:
 // sidecar → library/plays → recent-plays → event logs, with the log cache
 // invalidated per test. The library db is deliberately CLOSED here — every
 // source is optional, and these tests own the file-backed half of the chain;
@@ -102,14 +102,6 @@ test('event logs answer last, and only for what the cheap sources missed', async
   assert.equal(again.get(ID_A)?.title, 'From Logs');
 });
 
-test('skipLogs keeps a cheap resolver cheap', async () => {
-  const dirs = freshDirs();
-  writeFileSync(join(dirs.logDir, 'events-2026-10-01.jsonl'),
-    `{"type":"navidrome","songIds":[{"id":"${ID_A}","title":"Should Not Be Read","artist":"Nope"}]}\n`);
-  const got = await names.resolveOrphanNames([ID_A], { ...dirs, skipLogs: true });
-  assert.equal(got.get(ID_A), undefined);
-});
-
 test('a confirmed quarantine stamps the resolved name before the logs can age it', async () => {
   // The IO half: runOrphanPurge with an injected resolver writes .track-meta.json
   // into the quarantine for exactly the ids it moved. Same cached stem-cache
@@ -122,7 +114,7 @@ test('a confirmed quarantine stamps the resolved name before the logs can age it
   const id = ID_A;
   const dir = join(root, id);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'window-drums.flac'), 'x');
+  writeFileSync(join(dir, 'head-drums.flac'), 'x');
   const { utimesSync } = await import('node:fs');
   const t = new Date(Date.now() - 2 * 86400_000);
   utimesSync(dir, t, t);
@@ -140,7 +132,7 @@ test('a confirmed quarantine stamps the resolved name before the logs can age it
   assert.equal(typeof stamped.orphanedAt, 'number');
 });
 
-test('the orphan list keeps the purge\'s in-flight grace: a dir written within the hour is not listed', async () => {
+test('the orphan list keeps the purge\'s rules: no dir written within the hour, and nothing that is not stems', async () => {
   // The panel's "Show tracks" list and the report count the same folders.
   const cache = await import('../src/music/stem-cache.js');
   const root = cache.stemsRoot();
@@ -150,7 +142,14 @@ test('the orphan list keeps the purge\'s in-flight grace: a dir written within t
   const fresh = join(root, ID_D);
   mkdirSync(old, { recursive: true });
   mkdirSync(fresh, { recursive: true });
+  writeFileSync(join(old, 'head-drums.flac'), 'x');
+  writeFileSync(join(fresh, 'head-drums.flac'), 'x');
   const t = new Date(Date.now() - 2 * 3600_000);
   utimesSync(old, t, t);
-  assert.deepEqual(await names.listOrphanDirNames(new Set()), [ID_C]);
+  const foreign = join(root, 'operator-backup');
+  mkdirSync(foreign, { recursive: true });
+  writeFileSync(join(foreign, 'keep-me.tar'), 'x');
+  utimesSync(foreign, t, t);
+  const { listOrphanDirNames } = await import('../src/music/orphan-purge.js');
+  assert.deepEqual(await listOrphanDirNames(new Set()), [ID_C]);
 });

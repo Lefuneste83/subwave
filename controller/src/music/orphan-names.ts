@@ -1,4 +1,4 @@
-// B10 — giving orphan stem dirs their names back.
+// Giving orphan stem dirs their names back.
 //
 // An orphan dir is named by its track id, and by the time a purge looks, that
 // id is GONE from `tracks` (a refresh deletes rows for files the music server
@@ -22,18 +22,15 @@
 // or the logs still answers, with fewer names.
 
 import { createReadStream } from 'node:fs';
-import { readFile, readdir, stat } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
-import { mapPool } from '../util/async-pool.js';
 import { config } from '../config.js';
-import { requireDb } from './library-db/handle.js';
-import { SCAN_CONCURRENCY, stemsRoot, stemsRootStatus } from './stem-cache.js';
-import { IN_FLIGHT_MS, QUARANTINE_DIR } from './orphan-purge-pure.js';
+import { storedTrackNames } from './library-db.js';
+import { stemsRoot } from './stem-cache.js';
+import { NAME_SIDECAR, QUARANTINE_DIR } from './orphan-purge-pure.js';
 
-/** Sidecar written into a stem dir at quarantine time. Dot-prefixed so every
- *  existing walk that filters dot-entries keeps ignoring it. */
-export const NAME_SIDECAR = '.track-meta.json';
+export { NAME_SIDECAR };
 
 export interface OrphanTrackName {
   title: string;
@@ -48,9 +45,6 @@ export interface ResolveOpts {
   logDir?: string;
   stateDir?: string;
   now?: number;
-  /** Skip the (lazy, expensive) event-log scan — used by the quarantine
-   *  stamp path when the caller already accepted a coarse answer. */
-  skipLogs?: boolean;
 }
 
 // ---- event-log scan ---------------------------------------------------------
@@ -116,40 +110,6 @@ function pick(map: ReadonlyMap<string, OrphanTrackName>, missing: ReadonlySet<st
     if (n) hit.set(id, n);
   }
   return hit;
-}
-
-// ---- library db -------------------------------------------------------------
-
-function chunk<T>(items: readonly T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
-  return out;
-}
-
-/** tracks-row hit (a dir whose id came back) then the `plays` air snapshot.
- *  Db closed/unavailable → empty map; names are a courtesy, not a guarantee. */
-function namesFromDb(ids: readonly string[]): Map<string, OrphanTrackName> {
-  const out = new Map<string, OrphanTrackName>();
-  if (ids.length === 0) return out;
-  let db: ReturnType<typeof requireDb> | null = null;
-  try { db = requireDb(); } catch { return out; }
-  for (const part of chunk(ids, 500)) {
-    const ph = part.map(() => '?').join(',');
-    try {
-      for (const r of db.prepare(`SELECT id, title, artist, album FROM tracks WHERE id IN (${ph})`).all(...part) as Array<{ id: string; title: string | null; artist: string | null; album: string | null }>) {
-        if (r.title) out.set(r.id, { title: r.title, artist: r.artist ?? undefined, album: r.album ?? undefined, source: 'library' });
-      }
-    } catch { /* keep what we have */ }
-    try {
-      // Newest play per id wins; ORDER BY id DESC on the rowid-ish key first,
-      // so a later row only overwrites an id it has not already resolved.
-      const rows = db.prepare(`SELECT track_id, title, artist, album, MAX(played_at) AS played_at FROM plays WHERE track_id IN (${ph}) GROUP BY track_id`).all(...part) as Array<{ track_id: string; title: string | null; artist: string | null; album: string | null }>;
-      for (const r of rows) {
-        if (r.title && !out.has(r.track_id)) out.set(r.track_id, { title: r.title, artist: r.artist ?? undefined, album: r.album ?? undefined, source: 'plays' });
-      }
-    } catch { /* keep what we have */ }
-  }
-  return out;
 }
 
 // ---- recent-plays sidecar ---------------------------------------------------
@@ -223,7 +183,7 @@ export async function resolveOrphanNames(ids: readonly string[], opts: ResolveOp
   // 2. Library db (rows that came back; then plays snapshots).
   let missing = ids.filter(id => !out.has(id));
   if (missing.length > 0) {
-    for (const [id, n] of namesFromDb(missing)) out.set(id, n);
+    for (const [id, n] of storedTrackNames(missing)) out.set(id, n);
   }
 
   // 3. recent-plays.json.
@@ -234,34 +194,8 @@ export async function resolveOrphanNames(ids: readonly string[], opts: ResolveOp
 
   // 4. Event logs — the lazy, cached, expensive tail.
   missing = ids.filter(id => !out.has(id));
-  if (!opts.skipLogs && missing.length > 0) {
+  if (missing.length > 0) {
     for (const [id, n] of await namesFromLogs(new Set(missing), logDir, now)) out.set(id, n);
   }
   return out;
-}
-
-/** Orphan dir names at the cache root (not known ids, not dot dirs, not
- *  written within IN_FLIGHT_MS). Shares the purge's walk rules, the in-flight
- *  grace included, so the list and the report never disagree. */
-export async function listOrphanDirNames(knownIds: ReadonlySet<string>, now = Date.now()): Promise<string[]> {
-  const status = await stemsRootStatus({ readOnly: true });
-  if (!status.online) return [];
-  const root = stemsRoot();
-  let names: string[];
-  try {
-    const entries = await readdir(root, { withFileTypes: true });
-    names = entries.filter(e => e.isDirectory() && !e.name.startsWith('.') && !knownIds.has(e.name)).map(e => e.name);
-  } catch {
-    return [];
-  }
-  const ages = await mapPool(names, SCAN_CONCURRENCY,
-    name => stat(path.join(root, name)).then(st => st.mtimeMs, () => null));
-  return names.filter((_, i) => ages[i] != null && now - ages[i]! >= IN_FLIGHT_MS);
-}
-
-export async function listQuarantineDirNames(): Promise<string[]> {
-  try {
-    const entries = await readdir(path.join(stemsRoot(), QUARANTINE_DIR), { withFileTypes: true });
-    return entries.filter(e => e.isDirectory()).map(e => e.name);
-  } catch { return []; }
 }

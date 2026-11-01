@@ -1,17 +1,24 @@
-// B10 — orphan-stem purge, IO layer.
+// Orphan-stem purge, IO layer.
 //
 // planOrphanPurge / planQuarantinePurge (orphan-purge-pure.ts) decide; this
 // file performs the moves on the share and reports. Rules the IO must keep:
 //
+// - An orphan is a dir that READS as stems (isStemDirListing), not just one the
+//   library has no id for: a share holds things SUB/WAVE never wrote, and those
+//   are neither moved nor, should an earlier build have moved one, aged out.
 // - NEVER delete an orphan directly. Orphans MOVE into <root>/.orphan-quarantine
 //   (a dot-directory, so scanDirs and the marker walk ignore it), and only a
 //   quarantine past the grace period is deleted. The quarantine is a move on
 //   the same filesystem, so it is atomic and costs no copy — the property
-//   root-squashed NFS shares need.
+//   root-squashed NFS shares need. The one delete inside the grace: an id that
+//   is quarantined already gives way to the newer live copy of that same id,
+//   which starts its own grace, so the track never holds less than a week.
 // - A quarantine whose id is in the library again is RELEASED back (the live
-//   slot is free: a quarantine is a move, so exactly one copy exists). If a
-//   fresh analysis already took the slot the quarantine is superseded and
-//   simply ages out — never merged over the new copy.
+//   slot is free: a quarantine is a move, so exactly one copy exists), and a
+//   complete set stamps the row's stems_at. If a fresh analysis already took
+//   the slot the quarantine is superseded and simply ages out — never merged
+//   over the new copy. A release brings blends back, it does not save the
+//   separation (orphan-purge-pure.ts says why).
 // - Quarantine age comes from an `.orphaned-at` sidecar written at move time
 //   (the move itself only touches ctime, but writing the sidecars bumps the
 //   dir's mtime, and the stem-priority lesson is that cache mtimes lie). The
@@ -22,32 +29,46 @@
 //   (stamped by the next confirmed pass): later, never sooner.
 // - Dirs touched in the last hour are left alone: the analyzer writes stems
 //   into a fresh dir, and a purge must never eat an in-flight set.
+// - An id still rotating (the id_rotation_journal holds it) is known: its dir is
+//   the rename's to move, and libraryIds says why that matters.
 // - An empty id set is REFUSED, not treated as an empty library. The only
 //   cheap way to get zero ids is a closed or half-open database, and quarantining
 //   a whole cache on that reading is exactly the mass deletion quarantine exists
 //   to survive.
+// - Quarantine bytes sit OUTSIDE the byte budget, on purpose: scanDirs skips the
+//   dot-dir, so the sweep neither counts nor evicts them. The budget says how
+//   many stems the cache may keep for blends, and the sweep cannot evict a
+//   quarantine without breaking its grace, so if those bytes counted, the only
+//   way back under budget would be evicting live tracks to pay for dead ones.
+//   The grace bounds the quarantine instead: disk use can reach the budget plus
+//   a week of orphans, so leave that headroom on a small share. With the daily
+//   pass off the week only ends at the next manual pass.
 // - Delete failures are counted and reported, never thrown — a purge that
 //   cannot delete on a squashed share must keep running and keep saying so.
-// - Any mutation drops the usage snapshot (stem-cache's cached walk totals),
-//   so the next sweep re-measures instead of trusting stale bytes.
+// - Any mutation marks the usage snapshot stale (stem-cache's cached walk
+//   totals), so the next sweep re-measures instead of trusting those bytes,
+//   while the budget field keeps a flagged figure and its confirm.
 // - One confirmed pass at a time (the cron, a manual confirm): a second one
 //   is refused while the first runs, so two never interleave their moves and
 //   each report is what its own pass did. A release that lands on a live slot
 //   an analyzer mkdir just created replaces that empty dir (rename onto an
 //   empty dir), and onto a non-empty one fails and is counted.
 // - The automatic pass (runScheduledOrphanPurge) refuses a plan above
-//   AUTO_MAX_SHARE of the cache and leaves it to an operator's confirm, and
-//   stamps each quarantine's name like the manual one.
+//   AUTO_MAX_SHARE of the cache and leaves it, and that night's aged deletes,
+//   to an operator's confirm. It still releases what came back, and it stamps
+//   each quarantine's name like the manual one.
 
 import { readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { config } from '../config.js';
 import { mapPool } from '../util/async-pool.js';
+import * as db from './library-db.js';
 import * as stemCache from './stem-cache.js';
 import { resolveOrphanNames, writeNameSidecar, type OrphanTrackName } from './orphan-names.js';
 import {
   exceedsAutoCeiling,
   IN_FLIGHT_MS,
+  isStemDirListing,
+  ORPHANED_AT,
   planOrphanPurge,
   planQuarantinePurge,
   QUARANTINE_DIR,
@@ -59,9 +80,6 @@ export { IN_FLIGHT_MS };
 // Set while a confirmed pass runs; a second confirmed pass is refused.
 let confirmedPassRunning = false;
 
-/** Sidecar stamped into a quarantine entry at move time. */
-const ORPHANED_AT = '.orphaned-at';
-
 export interface PurgeReport {
   dryRun: boolean;
   /** Cache dirs whose track is still in the library. */
@@ -69,7 +87,7 @@ export interface PurgeReport {
   /** Orphans moved into the quarantine (dry run: would move). */
   quarantined: number;
   quarantinedNames: string[];
-  /** Quarantine entries moved back to the live cache. */
+  /** Quarantine entries moved back to the live cache (dry run: would move). */
   released: string[];
   /** Quarantine entries deleted (dry run: would delete). */
   deletedCount: number;
@@ -82,9 +100,14 @@ export interface PurgeReport {
   inFlight: number;
   /** Moves/deletes that failed this pass (permissions, squashed roots). */
   failed: number;
+  /** Everything in the quarantine, whatever a pass would do with it. */
+  quarantineEntries: number;
   /** True when the pass refused to run; `reason` says why. */
   refused?: boolean;
   reason?: string;
+  /** Dry run: why the automatic pass would refuse this plan. A manual confirm
+   *  still makes it, so the dry run itself is not refused. */
+  autoRefusal?: string;
   /** Bytes freed by deleted quarantines (quarantining itself frees nothing). */
   freedBytes: number;
   offline?: string;
@@ -99,6 +122,19 @@ async function dirBytes(dir: string): Promise<number> {
     }
   } catch { /* vanished mid-scan */ }
   return total;
+}
+
+// Delete a dir and say what really went: a delete refused part-way (a squashed
+// share) leaves files behind, and those are not reclaimed space.
+async function deleteDir(dir: string): Promise<{ gone: boolean; freedBytes: number }> {
+  const before = await dirBytes(dir);
+  let removed = true;
+  try {
+    await rm(dir, { recursive: true, force: true });
+  } catch { removed = false; }
+  const gone = await stat(dir).then(() => false, () => true);
+  if (removed && gone) return { gone: true, freedBytes: before };
+  return { gone: false, freedBytes: gone ? 0 : Math.max(0, before - await dirBytes(dir)) };
 }
 
 // Quarantine age from the sidecar written at move time, or null when it is
@@ -124,6 +160,67 @@ async function listDirs(dir: string): Promise<string[]> {
   } catch {
     return []; // no quarantine yet
   }
+}
+
+// The ids a pass counts as the library's. An id rotation commits the new ids
+// first and renames the dirs afterwards, one at a time, and its journal stays
+// open until that is done. So an old id in the journal still owns its dir: read
+// as an orphan it would be quarantined out from under the rename, the track
+// would keep a stems_at with nothing behind it, and absence alone never brings
+// a track back into the backfill. A journal that cannot be read throws, so the
+// pass stops rather than reading that as "nothing is rotating".
+function libraryIds(knownIds: Iterable<string>): Set<string> {
+  return new Set([...knownIds, ...db.pendingIdRotations().keys()]);
+}
+
+async function readsAsStems(dir: string): Promise<boolean> {
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    return isStemDirListing(entries.map(e => ({ name: e.name, isDirectory: e.isDirectory() })));
+  } catch {
+    return false; // vanished mid-walk
+  }
+}
+
+/**
+ * One walk of the cache root, shared by the pass and the panel's track list so
+ * the two never disagree. Only an orphan is read at all: a known id is kept
+ * whatever its age or contents, so the walk stats and lists just the unknown
+ * dirs, in parallel, which keeps a 76k-dir share from costing one round trip
+ * per track. Throws when the root cannot be read.
+ */
+async function walkCacheRoot(root: string, known: ReadonlySet<string>, now: number, inFlightMs: number) {
+  const names = (await readdir(root, { withFileTypes: true }))
+    .filter(e => e.isDirectory() && !e.name.startsWith('.'))
+    .map(e => e.name);
+  const kept = names.filter(name => known.has(name));
+  const unknown = names.filter(name => !known.has(name));
+  const verdicts = await mapPool(unknown, stemCache.SCAN_CONCURRENCY, async (name) => {
+    const mtimeMs = await stat(path.join(root, name)).then(st => st.mtimeMs, () => null);
+    if (mtimeMs == null) return 'gone'; // vanished mid-walk
+    if (now - mtimeMs < inFlightMs) return 'in-flight';
+    return (await readsAsStems(path.join(root, name))) ? 'orphan' : 'foreign';
+  });
+  return {
+    kept,
+    orphans: unknown.filter((_, i) => verdicts[i] === 'orphan'),
+    inFlight: verdicts.filter(v => v === 'in-flight').length,
+  };
+}
+
+/** The orphan dirs a pass would quarantine right now, for the panel's list. */
+export async function listOrphanDirNames(knownIds: ReadonlySet<string>, now = Date.now()): Promise<string[]> {
+  const status = await stemCache.stemsRootStatus({ readOnly: true });
+  if (!status.online) return [];
+  try {
+    return (await walkCacheRoot(stemCache.stemsRoot(), libraryIds(knownIds), now, IN_FLIGHT_MS)).orphans;
+  } catch {
+    return [];
+  }
+}
+
+export function listQuarantineDirNames(): Promise<string[]> {
+  return listDirs(path.join(stemCache.stemsRoot(), QUARANTINE_DIR));
 }
 
 /**
@@ -158,11 +255,22 @@ export async function runOrphanPurge(opts: {
   }
 }
 
+/** A pass in one line, for the booth log: the daily tick and a manual press word
+ *  it the same way. */
+export function purgeSummary(r: PurgeReport): string {
+  const failed = r.failed ? `, ${r.failed} failed (check ownership on the stems share)` : '';
+  if (r.refused) return `refused — ${r.reason}${r.released.length ? `, released ${r.released.length}` : ''}${failed}`;
+  return `quarantined ${r.quarantined}, released ${r.released.length}, deleted ${r.deletedCount}`
+    + ` (${Math.round(r.freedBytes / 1_000_000)} MB freed)`
+    + failed
+    + (r.inFlight ? `, ${r.inFlight} in-flight dir(s) skipped` : '');
+}
+
 function emptyReport(dryRun: boolean): PurgeReport {
   return {
     dryRun, keptCount: 0, quarantined: 0, quarantinedNames: [], released: [],
     deletedCount: 0, deletedNames: [], agingCount: 0, supersededCount: 0, inFlight: 0, failed: 0,
-    freedBytes: 0,
+    quarantineEntries: 0, freedBytes: 0,
   };
 }
 
@@ -177,62 +285,49 @@ async function purgePass(opts: Parameters<typeof runOrphanPurge>[0]): Promise<Pu
     // "Offline" normally means an unmounted share, and then the purge must do
     // nothing. But a quarantine that is visible proves the share IS mounted
     // (a marker can be lost while entries age): in that reading only the aged
-    // delete runs — quarantining NEW dirs into a share we cannot vouch for is
-    // the step that stays refused.
+    // delete runs — quarantining NEW dirs, or releasing old ones, into a share
+    // we cannot vouch for stays refused.
     if (!quExists) return { ...empty, refused: true, reason: 'offline', offline: rootStatus.message };
   }
 
   if (opts.knownIds.length === 0) {
     return { ...empty, refused: true, reason: 'empty library id set: refusing (a closed or half-loaded database must never quarantine the cache)' };
   }
-  const known = new Set(opts.knownIds);
+  const known = libraryIds(opts.knownIds);
   const inFlightMs = opts.inFlightMs ?? IN_FLIGHT_MS;
   const report: PurgeReport = { ...empty };
 
   // ---- cache-root walk: quarantine orphans --------------------------------
-  let entries: string[] = [];
+  const cacheEntries: Array<{ name: string; known: boolean }> = [];
   if (rootStatus.online) {
     try {
-      entries = (await readdir(root, { withFileTypes: true }))
-        .filter(e => e.isDirectory() && !e.name.startsWith('.'))
-        .map(e => e.name);
+      const walk = await walkCacheRoot(root, known, now, inFlightMs);
+      report.inFlight = walk.inFlight;
+      cacheEntries.push(
+        ...walk.kept.map(name => ({ name, known: true })),
+        ...walk.orphans.map(name => ({ name, known: false })),
+      );
     } catch {
       return { ...report, refused: true, reason: `cache root ${root} could not be read` };
     }
   }
-  // Only an orphan needs its mtime (the in-flight check): a known id is kept
-  // whatever its age, so the walk stats just the orphans, in parallel, which
-  // keeps a 76k-dir share from costing one round trip per track.
-  const cacheEntries: Array<{ name: string; known: boolean }> = [];
-  const orphanNames: string[] = [];
-  for (const name of entries) {
-    if (known.has(name)) cacheEntries.push({ name, known: true });
-    else orphanNames.push(name);
-  }
-  const ages = await mapPool(orphanNames, stemCache.SCAN_CONCURRENCY,
-    name => stat(path.join(root, name)).then(st => st.mtimeMs, () => null));
-  orphanNames.forEach((name, i) => {
-    const mtimeMs = ages[i];
-    if (mtimeMs == null) return; // vanished mid-walk
-    if (now - mtimeMs < inFlightMs) { report.inFlight += 1; return; }
-    cacheEntries.push({ name, known: false });
-  });
-  const plan = planOrphanPurge(cacheEntries, { now, confirm: opts.confirm });
-  if (opts.automatic && opts.confirm && exceedsAutoCeiling(plan.quarantine.length, plan.keptCount)) {
-    return {
-      ...report, keptCount: plan.keptCount, quarantined: 0, refused: true,
-      reason: `would quarantine ${plan.quarantine.length} of ${plan.quarantine.length + plan.keptCount} stem dirs, `
-        + 'more than an automatic pass moves on its own (is the library half-loaded?): '
-        + 'check the Stems page and confirm the move there if it is right',
-    };
-  }
+  const plan = planOrphanPurge(cacheEntries, { confirm: opts.confirm });
+  // Only the automatic pass stops at the ceiling. A dry run names it instead,
+  // which is how the reason reaches the Stems page while the operator can still
+  // confirm the move.
+  const overCeiling = exceedsAutoCeiling(plan.quarantine.length, plan.keptCount);
+  const ceilingReason = `would quarantine ${plan.quarantine.length} of ${plan.quarantine.length + plan.keptCount} stem dirs, `
+    + 'more than an automatic pass moves on its own (is the library half-loaded?): '
+    + 'confirm the move on the Stems page if it is right';
+  const held = opts.automatic === true && opts.confirm && overCeiling;
+  if (!opts.confirm && overCeiling) report.autoRefusal = ceilingReason;
   report.keptCount = plan.keptCount;
-  report.quarantinedNames = plan.quarantine.map(q => q.name).slice(0, 10);
+  report.quarantinedNames = held ? [] : plan.quarantine.map(q => q.name).slice(0, 10);
 
   // ---- quarantine walk -----------------------------------------------------
-  const quEntries: QuarantineEntry[] = [];
-  const quNames = await listDirs(qu);
-  for (const name of quNames) {
+  // In parallel like the root walk: a dry run reads every entry on each Stems
+  // page open, and a network share holds thousands of them.
+  const quEntries: QuarantineEntry[] = await mapPool(await listDirs(qu), stemCache.SCAN_CONCURRENCY, async (name) => {
     const entryDir = path.join(qu, name);
     const liveSlotFree = !(await stat(path.join(root, name)).then(() => true, () => false));
     let ageMs = await quarantinedAgeMs(entryDir, now);
@@ -243,92 +338,107 @@ async function purgePass(opts: Parameters<typeof runOrphanPurge>[0]): Promise<Pu
       if (opts.confirm) await stampQuarantine(entryDir, now).catch(() => {});
       ageMs = 0;
     }
-    quEntries.push({ name, known: known.has(name), ageMs, liveSlotFree });
-  }
-  const qplan = planQuarantinePurge(quEntries, { now, confirm: opts.confirm, ...(opts.graceMs !== undefined ? { graceMs: opts.graceMs } : {}) });
-  report.released = qplan.released;
-  report.deletedNames = qplan.deleted.map(d => d.name).slice(0, 10);
+    return { name, known: known.has(name), ageMs, liveSlotFree };
+  });
+  report.quarantineEntries = quEntries.length;
+  const qplan = planQuarantinePurge(quEntries, { confirm: opts.confirm, ...(opts.graceMs !== undefined ? { graceMs: opts.graceMs } : {}) });
+  // The delete is the step nothing undoes, so it reads the dir again: an entry
+  // that is not stems (an earlier build moved it) stays where it is.
+  const deletable = await mapPool(qplan.deleted, stemCache.SCAN_CONCURRENCY, d => readsAsStems(path.join(qu, d.name)));
+  const toDelete = qplan.deleted.filter((_, i) => deletable[i]);
+  // Offline, only the aged delete runs: a release writes into a root that
+  // cannot be vouched for, and the entry loses nothing by waiting.
+  const toRelease = rootStatus.online ? qplan.released : [];
+  report.deletedNames = held ? [] : toDelete.map(d => d.name).slice(0, 10);
   report.agingCount = qplan.aging.length;
   report.supersededCount = qplan.superseded.length;
 
   if (opts.confirm) {
     // 1. Releases first: an id that is both known now and sitting in the
     //    quarantine gets its copy back rather than being re-quarantined below.
-    for (const name of qplan.released) {
+    for (const name of toRelease) {
       try {
         await rename(path.join(qu, name), path.join(root, name));
       } catch { report.failed += 1; continue; }
       // Back in the cache it is not quarantined: a stale stamp must not ride
       // along into a later quarantine.
       await rm(path.join(root, name, ORPHANED_AT), { force: true }).catch(() => {});
+      await stampReleasedStems(name);
+      report.released.push(name);
     }
-    // 2. Aged (and superseded-with-fresh-copy) quarantines: delete for good.
-    for (const { name } of qplan.deleted) {
-      const entryDir = path.join(qu, name);
-      const before = await dirBytes(entryDir);
-      let removed = true;
-      try {
-        await rm(entryDir, { recursive: true, force: true });
-      } catch { removed = false; }
-      // Freed is what is really gone: a delete refused part-way (a squashed
-      // share) leaves files behind, and those are not reclaimed space.
-      const gone = await stat(entryDir).then(() => false, () => true);
-      if (removed && gone) {
-        report.freedBytes += before;
-        report.deletedCount += 1;
-      } else {
-        if (!gone) report.freedBytes += Math.max(0, before - await dirBytes(entryDir));
-        report.failed += 1;
+    // The ceiling reads as a half-loaded library, and on that reading a release
+    // is safe while a delete is the one step nothing undoes, so a held pass
+    // stops here and leaves the deletes and the moves to an operator's confirm.
+    if (held) {
+      report.refused = true;
+      report.reason = ceilingReason;
+    } else {
+      // 2. Aged (and superseded-with-fresh-copy) quarantines: delete for good.
+      for (const { name } of toDelete) {
+        const { gone, freedBytes } = await deleteDir(path.join(qu, name));
+        report.freedBytes += freedBytes;
+        if (gone) report.deletedCount += 1;
+        else report.failed += 1;
       }
-    }
-    // 3. Orphans: move into quarantine (same-filesystem rename; no merge).
-    await mkdirSafe(qu);
-    const names = opts.resolveNames && plan.quarantine.length
-      ? await opts.resolveNames(plan.quarantine.map(q => q.name))
-      : undefined;
-    for (const { name } of plan.quarantine) {
-      const from = path.join(root, name);
-      const to = path.join(qu, name);
-      const collision = await stat(to).then(() => true, () => false);
-      if (collision) {
-        // A quarantine entry for the same id already exists — it can only have
-        // been re-created in the library and orphaned again. Keep the existing
-        // quarantine with its own stamp and drop the live copy. (This used to
-        // compare ages, but the live dir's only age was its mtime, which a
-        // rename keeps and the header rules out.)
+      // 3. Orphans: move into quarantine (same-filesystem rename; no merge).
+      await mkdirSafe(qu);
+      const names = opts.resolveNames && plan.quarantine.length
+        ? await opts.resolveNames(plan.quarantine.map(q => q.name))
+        : undefined;
+      for (const { name } of plan.quarantine) {
+        const from = path.join(root, name);
+        const to = path.join(qu, name);
+        if (await stat(to).then(() => true, () => false)) {
+          // This id is quarantined already: it came back, a fresh analysis took
+          // the live slot, and it left again. The live copy is the newer one, so
+          // it replaces the stale copy and starts a whole grace of its own. Never
+          // the reverse: dropping the live copy would delete the only fresh stems
+          // on the spot, and leave what remains to age out on the old stamp.
+          // Deleting, so it reads the dir first, like the aged delete: an entry
+          // that is not stems is left alone, and the live copy with it.
+          if (!(await readsAsStems(to))) { report.failed += 1; continue; }
+          const stale = await deleteDir(to);
+          report.freedBytes += stale.freedBytes;
+          if (!stale.gone) { report.failed += 1; continue; }
+        }
         try {
-          await rm(from, { recursive: true, force: true });
-          await writeNameSidecar(to, names?.get(name), now);
-          report.quarantined += 1;
-        } catch { report.failed += 1; }
-        continue;
+          await rename(from, to);
+        } catch { report.failed += 1; continue; }
+        try {
+          await stampQuarantine(to, now);
+        } catch {
+          // Unstamped, the quarantine would have no age to keep it 7 days: undo
+          // the move and leave the dir in the cache for the next pass.
+          await rename(to, from).catch(() => {});
+          report.failed += 1;
+          continue;
+        }
+        await writeNameSidecar(to, names?.get(name), now);
+        report.quarantined += 1;
       }
-      try {
-        await rename(from, to);
-      } catch { report.failed += 1; continue; }
-      try {
-        await stampQuarantine(to, now);
-      } catch {
-        // Unstamped, the quarantine would have no age to keep it 7 days: undo
-        // the move and leave the dir in the cache for the next pass.
-        await rename(to, from).catch(() => {});
-        report.failed += 1;
-        continue;
-      }
-      await writeNameSidecar(to, names?.get(name), now);
-      report.quarantined += 1;
     }
-    if (report.quarantined || report.deletedCount || report.released.length) {
-      // The usage snapshot cached the pre-purge totals; drop it so the next
+    if (report.quarantined || report.deletedCount || report.released.length || report.freedBytes) {
+      // The usage snapshot cached the pre-purge totals; mark it so the next
       // sweep walks again instead of trusting bytes that no longer exist.
-      await rm(path.join(config.stateDir, 'stem-cache-usage.json'), { force: true }).catch(() => {});
+      await stemCache.markUsageStale();
     }
   } else {
     // Dry run: every count, zero mutations.
     report.quarantined = plan.quarantine.length;
-    report.deletedCount = qplan.deleted.length;
+    report.released = toRelease;
+    report.deletedCount = toDelete.length;
   }
   return report;
+}
+
+// A released track's row is a new one with no stems_at, so a complete set would
+// otherwise read as owed a separation. Best-effort: a stamp that cannot land
+// costs a backfill run, nothing worse.
+async function stampReleasedStems(id: string): Promise<void> {
+  try {
+    const complete = (await stemCache.hasWindow(id, 'head')) && (await stemCache.hasWindow(id, 'tail'));
+    if (complete) db.stampStemsCached(id);
+  } catch { /* library closed */ }
 }
 
 // Throws when the stamp cannot be written: the move is then undone.
@@ -359,9 +469,4 @@ export async function runScheduledOrphanPurge(knownIds: readonly string[], now?:
     resolveNames: ids => resolveOrphanNames(ids),
     ...(now !== undefined ? { now } : {}),
   });
-}
-
-/** Dry-run convenience for the doctor and the admin route. */
-export async function orphanPurgeReport(knownIds: readonly string[]): Promise<PurgeReport> {
-  return runOrphanPurge({ knownIds, confirm: false });
 }

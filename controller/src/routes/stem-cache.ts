@@ -1,4 +1,4 @@
-// A5 — GET /stem-cache/usage: the stem cache's STORED size beside the budget
+// GET /stem-cache/usage: the stem cache's STORED size beside the budget
 // in force, for the Settings budget field's "cache used" line and its warning
 // when a new budget would make the next sweep delete stems.
 //
