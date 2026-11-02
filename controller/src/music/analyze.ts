@@ -24,7 +24,7 @@ import {
 } from './analyze-capability.js';
 import { probeListenerCount } from '../broadcast/listeners.js';
 import { planAcoustics, type AcousticsPlan, type WorkRequest } from './acoustics-plan.js';
-import { leadIds, regularRunFacets, regularRunPlan } from './regular-run-plan.js';
+import { leadIds, planRegularRun, regularRunFacets } from './regular-run-plan.js';
 
 // Status events for the panel, mirrored to the `[analyze] …` console line.
 const logEvent = makeEventLogger('analyze');
@@ -317,19 +317,13 @@ async function runPlannedRegularPass(opts: AnalyzeOptions): Promise<AnalyzeStats
     tailVocal: analyzer.tailVocalAvailable(),
     wholeFile: true,
   };
-  let plan = regularRunPlan({ ids, state, wants, capabilities, limit: opts.limit });
   // Stems-only work is ordered and budgeted (stem-priority.ts); sizing the
-  // budget walks the cache, so only when there is such work.
-  if (plan.items.some(i => i.facets.length === 1 && i.facets[0] === 'stems')) {
-    plan = regularRunPlan({
-      ids, state, wants, capabilities, limit: opts.limit,
-      stems: {
-        priority: db.needsStemsIds(undefined, stemCacheStore.likeSignals()),
-        headroom: await stemCacheStore.headroomTracks(),
-        existing: await stemCacheStore.cachedTrackIdSet(),
-      },
-    });
-  }
+  // budget walks the cache, so the planner loads it only when there is such work.
+  const plan = await planRegularRun({ ids, state, wants, capabilities, limit: opts.limit }, async () => ({
+    priority: db.needsStemsIds(undefined, stemCacheStore.likeSignals()),
+    headroom: await stemCacheStore.headroomTracks(),
+    existing: await stemCacheStore.cachedTrackIdSet(),
+  }));
   for (const c of plan.byFacet) {
     if (c.matched === 0) continue;
     const skipped = Object.entries(c.skipped).map(([k, v]) => `${k} ${v}`).join(', ');
