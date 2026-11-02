@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { FACET_VERSIONS, type Facet, type FacetCell } from '../src/music/library-db/facets.js';
-import { leadIds, regularRunFacets, regularRunPlan } from '../src/music/regular-run-plan.js';
+import { leadIds, planRegularRun, regularRunFacets, regularRunPlan } from '../src/music/regular-run-plan.js';
 
 const ok = (f: Facet, version = FACET_VERSIONS[f]): [Facet, FacetCell] => [f, { status: 'ok', version, attempts: 0, reason: null }];
 const unm = (f: Facet, reason: string, version = FACET_VERSIONS[f]): [Facet, FacetCell] =>
@@ -62,10 +62,11 @@ test('stems-only work goes last, in stem-priority order, within the budget', () 
   const plan = regularRunPlan({ ...base, stems: { priority: ['s3', 's1', 's2'], headroom: 3, existing: new Set() } });
   assert.deepEqual(plan.items.map(i => i.id), ['new', 's3', 's1']);
   const stems = plan.byFacet.find(c => c.facet === 'stems')!;
-  assert.deepEqual([stems.matched, stems.planned, stems.skipped.limit], [4, 3, 1]);
+  assert.deepEqual([stems.matched, stems.planned, stems.skipped['stem-budget'], stems.skipped.limit], [4, 3, 1, undefined]);
   // A track not in the priority scan (excluded there) gets no stems-only item.
   const off = regularRunPlan({ ...base, stems: { priority: ['s2'], headroom: 10, existing: new Set() } });
   assert.deepEqual(off.items.map(i => i.id), ['new', 's2']);
+  assert.equal(off.byFacet.find(c => c.facet === 'stems')!.skipped['stem-scan'], 2);
   // An existing stem dir costs the new item no slot.
   const rewrite = regularRunPlan({ ...base, stems: { priority: ['s3', 's1', 's2'], headroom: 1, existing: new Set(['new']) } });
   assert.deepEqual(rewrite.items.map(i => i.id), ['new', 's3']);
@@ -76,4 +77,50 @@ test('the run\'s limit caps the plan after the stem ordering', () => {
   const plan = regularRunPlan({ ids: ['a', 'b', 'c'], state, wants: none, capabilities: caps, limit: 2 });
   assert.deepEqual(plan.items.map(i => i.id), ['a', 'b']);
   assert.equal(plan.byFacet.find(c => c.facet === 'head')!.skipped.limit, 1);
+});
+
+// The path analyze.ts takes (B29). It once planned without the stem input,
+// which drops every stems-only item, then asked THAT plan whether there was
+// stems-only work: never, so the budget was never loaded and a failed
+// separation was never planned again from the GUI.
+const withModels = (f = done()) => { f.set('clap', ok('clap')[1]); f.set('vocal', ok('vocal')[1]); return f; };
+const failedStems = (): Map<Facet, FacetCell> => {
+  const f = withModels();
+  f.set('stems', { status: 'failed', version: FACET_VERSIONS.stems, attempts: 1, reason: 'stems: separation failed' });
+  return f;
+};
+const stemWants = { clap: true, vocal: true, stems: true };
+const allDone = (): Map<Facet, FacetCell> => { const f = withModels(); f.set('stems', ok('stems')[1]); return f; };
+
+test('a run whose only work is stems-only loads the stem budget and plans it', async () => {
+  const state = new Map<string, Map<Facet, FacetCell>>([['f1', failedStems()], ['f2', failedStems()], ['done', allDone()]]);
+  let loads = 0;
+  const plan = await planRegularRun({ ids: ['f1', 'f2', 'done'], state, wants: stemWants, capabilities: caps }, async () => {
+    loads += 1;
+    return { priority: ['f2', 'f1', 'done'], headroom: 11849, existing: new Set() };
+  });
+  assert.equal(loads, 1);
+  assert.deepEqual(plan.items.map(i => [i.id, i.facets]), [['f2', ['stems']], ['f1', ['stems']]]);
+  const stems = plan.byFacet.find(c => c.facet === 'stems')!;
+  assert.deepEqual([stems.matched, stems.planned, stems.skipped], [2, 2, {}]);
+});
+
+test('stems-only work beside new tracks is planned after them, within the budget', async () => {
+  const state = new Map<string, Map<Facet, FacetCell>>([['new', new Map()], ['f1', failedStems()], ['f2', failedStems()]]);
+  const plan = await planRegularRun({ ids: ['new', 'f1', 'f2'], state, wants: stemWants, capabilities: caps }, async () =>
+    ({ priority: ['f1', 'f2'], headroom: 2, existing: new Set() }));
+  // The new track's stems take one of the two free slots.
+  assert.deepEqual(plan.items.map(i => i.id), ['new', 'f1']);
+  assert.equal(plan.byFacet.find(c => c.facet === 'stems')!.skipped['stem-budget'], 1);
+});
+
+test('no stems-only work: the stem budget is never loaded (sizing it walks the cache)', async () => {
+  const state = new Map<string, Map<Facet, FacetCell>>([['new', new Map()], ['done', allDone()]]);
+  let loads = 0;
+  const plan = await planRegularRun({ ids: ['new', 'done'], state, wants: stemWants, capabilities: caps }, async () => {
+    loads += 1;
+    return { priority: [], headroom: 0, existing: new Set() };
+  });
+  assert.equal(loads, 0);
+  assert.deepEqual(plan.items.map(i => i.id), ['new']);
 });

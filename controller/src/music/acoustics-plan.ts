@@ -98,7 +98,9 @@ export interface WorkItem {
 // 'year-off': MusicBrainz lookups are switched off in the settings.
 // 'no-edges': a regular run's stored tail whose edges are not measured yet
 // (placeTail): re-reading it could not place it.
-export type SkipReason = 'no-clap' | 'no-demucs' | 'no-tail-vocal' | 'no-whole-file' | 'no-curve' | 'no-edges' | 'year-known' | 'year-off' | 'limit';
+// 'stem-scan' / 'stem-budget': a regular run's stems-only item left outside the
+// stem priority scan, or past the stem budget's free slots (regular-run-plan.ts).
+export type SkipReason = 'no-clap' | 'no-demucs' | 'no-tail-vocal' | 'no-whole-file' | 'no-curve' | 'no-edges' | 'year-known' | 'year-off' | 'limit' | 'stem-scan' | 'stem-budget';
 
 export interface FacetPlanCount {
   facet: Facet;

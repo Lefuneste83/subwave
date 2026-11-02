@@ -1,7 +1,8 @@
 // What a regular run (the tagger, Analyze audio: no --facets) measures, decided
 // from the facet table like the CLI planner, so a GUI run converges to the same
 // end state as `npm run analyze -- --facets … --where needs` (B24). Pure; the
-// caller loads the state, the stem priority and budget. Pinned by
+// caller loads the state and hands planRegularRun a loader for the stem
+// priority and budget, called only when there is stems-only work. Pinned by
 // scripts/regular-run-plan.test.ts, and end to end in tail-placement.test.ts.
 //
 // Two lanes, in this order (analyze.ts runPlannedRegularPass):
@@ -28,7 +29,7 @@
 // protocol (both fork-side). Every other station keeps the legacy pass,
 // byte-identical.
 
-import { planAcoustics, type AcousticsPlan, type FacetPlanCount, type PlanCapabilities, type TrackFacets } from './acoustics-plan.js';
+import { planAcoustics, type AcousticsPlan, type FacetPlanCount, type PlanCapabilities, type SkipReason, type TrackFacets } from './acoustics-plan.js';
 import type { Facet } from './library-db/facets.js';
 
 export interface RegularRunWants {
@@ -71,8 +72,12 @@ export interface RegularRunInput {
   stems?: { priority: readonly string[]; headroom: number; existing: ReadonlySet<string> };
 }
 
-export function regularRunPlan(input: RegularRunInput): AcousticsPlan {
-  const base = planAcoustics({
+export type StemsInput = NonNullable<RegularRunInput['stems']>;
+
+const stemsOnly = (i: { facets: Facet[] }) => i.facets.length === 1 && i.facets[0] === 'stems';
+
+function basePlan(input: Omit<RegularRunInput, 'stems' | 'limit'>): AcousticsPlan {
+  return planAcoustics({
     ids: input.ids,
     facets: regularRunFacets(input.wants),
     where: { kind: 'needs' },
@@ -80,19 +85,50 @@ export function regularRunPlan(input: RegularRunInput): AcousticsPlan {
     capabilities: input.capabilities,
     placeTail: true,
   });
-  const stemsOnly = (i: { facets: Facet[] }) => i.facets.length === 1 && i.facets[0] === 'stems';
+}
+
+/**
+ * The regular run's plan, loading the stem priority and budget only when the
+ * run has stems-only work. That decision reads the UNBUDGETED plan: one that
+ * ran without the stem input has already dropped every stems-only item, so
+ * deciding from it never loaded the budget, and a failed separation or an
+ * evicted stem set was never planned again from the GUI (B29).
+ */
+export async function planRegularRun(
+  input: Omit<RegularRunInput, 'stems'>,
+  loadStems: () => Promise<StemsInput>,
+): Promise<AcousticsPlan> {
+  const base = basePlan(input);
+  const stems = base.items.some(stemsOnly) ? await loadStems() : undefined;
+  return finishPlan(base, { ...input, stems });
+}
+
+export function regularRunPlan(input: RegularRunInput): AcousticsPlan {
+  return finishPlan(basePlan(input), input);
+}
+
+function finishPlan(base: AcousticsPlan, input: RegularRunInput): AcousticsPlan {
   const rest = base.items.filter(i => !stemsOnly(i));
   const wanted = base.items.filter(stemsOnly);
+  // Why each stems-only item was left out, when it was: outside the priority
+  // scan (excluded there), or past the budget's free slots.
+  const stemDrop = new Map<string, SkipReason>();
   let stemItems = wanted;
   if (wanted.length > 0) {
     const s = input.stems;
     const order = new Map((s?.priority ?? []).map((id, i) => [id, i] as const));
     const reserved = rest.filter(i => i.request.stems && !s?.existing.has(i.id)).length;
     const room = Math.max(0, (s?.headroom ?? 0) - reserved);
-    stemItems = wanted
-      .filter(i => order.has(i.id))
-      .sort((a, b) => order.get(a.id)! - order.get(b.id)!)
-      .slice(0, room);
+    const ranked: typeof wanted = [];
+    for (const i of wanted) {
+      // Without a stem input there is no budget to plan against.
+      if (!s) stemDrop.set(i.id, 'stem-budget');
+      else if (order.has(i.id)) ranked.push(i);
+      else stemDrop.set(i.id, 'stem-scan');
+    }
+    ranked.sort((a, b) => order.get(a.id)! - order.get(b.id)!);
+    stemItems = ranked.slice(0, room);
+    for (const i of ranked.slice(room)) stemDrop.set(i.id, 'stem-budget');
   }
   const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : Infinity;
   const items = [...rest, ...stemItems].slice(0, limit);
@@ -104,9 +140,10 @@ export function regularRunPlan(input: RegularRunInput): AcousticsPlan {
   for (const i of items) for (const f of i.facets) count.get(f)!.planned += 1;
   for (const i of base.items) {
     if (kept.has(i.id)) continue;
+    const why = stemDrop.get(i.id) ?? 'limit';
     for (const f of i.facets) {
       const c = count.get(f)!;
-      c.skipped.limit = (c.skipped.limit ?? 0) + 1;
+      c.skipped[why] = (c.skipped[why] ?? 0) + 1;
     }
   }
   return { ...base, items, byFacet };
