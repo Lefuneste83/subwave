@@ -2,16 +2,16 @@
 // The write path every ingest pass (tagger, analyzer, enricher) goes through.
 
 import { ANALYSIS_VERSION, AUDIO_EMBEDDING_DIM, SQL_HAS_MOODS, TAGGER_VERSION, getEmbeddingDim, requireDb } from './handle.js';
-import { FACETS, clearFacetFailures, clearFacetRows, syncTrackFacets, type Facet, type FacetSource } from './facets.js';
+import { FACETS, clearFacetFailures, clearFacetRows, restampFacetRows, syncTrackFacets, type Facet, type FacetSource } from './facets.js';
 import type { OriginalYearOutcome, YearSource } from '../original-year-policy.js';
-import type { TagWrite, TrackEnrichment, TrackKeyRange, TrackMeta, TrackOutro, TrackPaceSpan, TrackRecord, TrackRow, TrackSection } from './types.js';
+import type { FileInfo, TagWrite, TrackEnrichment, TrackKeyRange, TrackMeta, TrackOutro, TrackPaceSpan, TrackRecord, TrackRow, TrackSection } from './types.js';
 import { normaliseYear, rowToTrack, safeParseArray } from './rows.js';
 import { runDdl } from './schema.js';
 import { touchGenreInputs } from './genre-inputs.js';
 import { resolveEraYear } from '../era-year.js';
 import { eraSuspectSql, storedYearUntrusted } from '../era-suspect.js';
 import { MAX_ANALYSIS_FAILURES, analysisFailureExclusion } from '../analyze-capability.js';
-import { fileReplaced } from '../replaced-file-policy.js';
+import { acceptedAt, fileReplaced } from '../replaced-file-policy.js';
 import type { WholeLoudnessCurve } from '../whole-loudness-curve.js';
 
 export { MAX_ANALYSIS_FAILURES, analysisFailureExclusion } from '../analyze-capability.js';
@@ -186,21 +186,35 @@ export function textVectorDirtyIds(): string[] {
     .all() as Array<{ id: string }>).map(r => r.id);
 }
 
+// Rounds before it checks, so the test is on the value that gets stored: a stored
+// 0 is not NULL, and it would overwrite a good value through the COALESCE.
 function positiveInt(v: unknown): number | null {
-  const n = Number(v);
-  return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-// When the track's audio was last measured: the newest analysis facet row (the
-// year row is not a measurement). NULL = never measured.
-// Caveat: `at` moves on any rewrite of a facet row, the seed and a version
-// re-derive (resyncAllFacets after an ANALYSIS_VERSION bump) included, not only
-// a measurement. A file replaced before such a re-derive and not walked since
-// then reads as measured after its change and is missed by the change-time
-// signal (the size signal still sees it unless the size held).
+// The one cleaning rule for a track's file facts. Anything it nulls counts as not
+// reported, so COALESCE keeps what is stored. Running it twice changes nothing.
+export function cleanFileInfo(raw: { [K in keyof FileInfo]?: unknown }): FileInfo {
+  const text = (v: unknown) => (typeof v === 'string' && v.trim() !== '' ? v : null);
+  return {
+    filePath: text(raw.filePath),
+    fileSuffix: text(raw.fileSuffix)?.toLowerCase() ?? null,
+    fileSize: positiveInt(raw.fileSize),
+    bitRate: positiveInt(raw.bitRate),
+  };
+}
+
+// When the whole track was last measured: its OLDEST analysis facet row, the
+// time every answer has stood since. NULL = never measured. Not the newest
+// row: a write of one facet (the CLAP-only fast path, a facet plan) re-measures
+// that facet alone, and would pass the rest off as measured after a replacement.
+// Caveat: the seed dates every row of a track from when the facet table was
+// created, so a file replaced before that reads as measured after its change
+// and is left to the size signal. The year row is not a measurement.
 export function lastMeasuredAt(id: string): string | null {
   const r = requireDb()
-    .prepare(`SELECT MAX(at) AS at FROM track_facet_status WHERE track_id = ? AND facet <> 'year'`)
+    .prepare(`SELECT MIN(at) AS at FROM track_facet_status WHERE track_id = ? AND facet <> 'year'`)
     .get(id) as { at: string | null } | undefined;
   return r?.at ?? null;
 }
@@ -253,6 +267,27 @@ export function clearTrackAudio(id: string, fileSize?: number | null): void {
   })();
 }
 
+// The operator's other answer to a replaced file: the audio did not change (a
+// tag editor's "save all", a restore that reset file dates), so nothing is
+// cleared and every measurement stands for the file as it is now. `files` is
+// the walk's candidates: id -> the walked size, or null from the change-time
+// signal. `changedAt` is what Navidrome dated each, where it said (acceptedAt).
+// One transaction, so a walk that dies here asks again in full.
+export function acceptReplacedFiles(
+  files: ReadonlyMap<string, number | null>,
+  changedAt: ReadonlyMap<string, string> = new Map(),
+): void {
+  const d = requireDb();
+  const setSize = d.prepare('UPDATE tracks SET file_size = ? WHERE id = ?');
+  d.transaction(() => {
+    for (const [id, fileSize] of files) {
+      const size = positiveInt(fileSize);
+      if (size != null) setSize.run(size, id);
+      restampFacetRows(id, acceptedAt(changedAt.get(id)));
+    }
+  })();
+}
+
 // Returns true when the walk found the file replaced (replaced-file-policy
 // fileReplaced: its size changed). Nothing is cleared here: the walk gathers
 // every candidate and clears them at its end, behind a mass hold
@@ -260,7 +295,8 @@ export function clearTrackAudio(id: string, fileSize?: number | null): void {
 // Until then the stored size is kept, so a held candidate is found again.
 export function upsertTrackMeta(id: string, meta: TrackMeta): boolean {
   const eraBefore = storedEra(id);
-  const walkedSize = positiveInt(meta.fileSize);
+  const file = cleanFileInfo(meta);
+  const walkedSize = file.fileSize;
   const storedSize = walkedSize == null ? null
     : (requireDb().prepare('SELECT file_size AS s FROM tracks WHERE id = ?').get(id) as { s: number | null } | undefined)?.s ?? null;
   const replaced = fileReplaced(storedSize, walkedSize);
@@ -317,7 +353,7 @@ export function upsertTrackMeta(id: string, meta: TrackMeta): boolean {
         album_artist   = COALESCE(excluded.album_artist, tracks.album_artist),
         genres       = COALESCE(excluded.genres, tracks.genres),
         duration_sec = COALESCE(excluded.duration_sec, tracks.duration_sec),
-        -- File facts: only the walk has them; any other writer passes NULL.
+        -- File facts: only the library walks pass them; any other writer passes NULL.
         file_path    = COALESCE(excluded.file_path, tracks.file_path),
         file_suffix  = COALESCE(excluded.file_suffix, tracks.file_suffix),
         file_size    = COALESCE(excluded.file_size, tracks.file_size),
@@ -341,10 +377,10 @@ export function upsertTrackMeta(id: string, meta: TrackMeta): boolean {
       meta.albumArtist ?? null,
       meta.genres?.length ? JSON.stringify(meta.genres) : null,
       Number.isFinite(meta.duration as number) ? (meta.duration as number) : null,
-      typeof meta.filePath === 'string' && meta.filePath !== '' ? meta.filePath : null,
-      typeof meta.fileSuffix === 'string' && meta.fileSuffix !== '' ? meta.fileSuffix.toLowerCase() : null,
+      file.filePath,
+      file.fileSuffix,
       replaced ? storedSize : walkedSize,
-      positiveInt(meta.bitRate),
+      file.bitRate,
     );
   markTextVectorDirtyIfEraChanged(id, eraBefore);
   syncYearIfEraChanged(id, eraBefore);

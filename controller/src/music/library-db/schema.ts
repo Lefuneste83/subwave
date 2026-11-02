@@ -497,7 +497,6 @@ export async function migrate(embeddingDim: number, reseed = false, adoptStoredD
     if (add.length) runDdl(d, add.map(([c, t]) => `ALTER TABLE tracks ADD COLUMN ${c} ${t};`).join('\n'));
     d.pragma('user_version = 30');
   }
-  ensureFileInfoColumns(d);
   ensureLoudnessCurveColumn(d);
 
   if (userVersion < 31) {
@@ -610,6 +609,8 @@ export async function migrate(embeddingDim: number, reseed = false, adoptStoredD
   // its next open here. Never throws either.
   if (ensureSearchKeys(d) && (userVersion < 29 || searchKeysAddedLate)) fillSearchKeys();
   ensureSearchIndex(d);
+
+  ensureFileInfoColumns(d);
 
   // Reconcile the requested embedding dim against what physically exists. The
   // vec0 table's FLOAT[N] schema is the authority for what inserts accept, not
@@ -731,10 +732,6 @@ function vecCount(d: Database.Database): number {
   return (d.prepare('SELECT COUNT(*) AS n FROM track_vectors').get() as { n: number }).n;
 }
 
-// The file as Navidrome reports it, kept by the library walk: path, format,
-// size in bytes and bitrate in kbps. Added by name when missing rather than as
-// a numbered migration, so it can't collide with a user_version a parallel
-// change claims; idempotent, and a few MB on a 76k-track library.
 // The whole-file pass's loudness curve (upstream #2041 adds it to its step
 // 32). This fork ran its whole-file step long before the curve existed, so the
 // column is added by name here, idempotent, like the file facts below.
@@ -743,13 +740,27 @@ function ensureLoudnessCurveColumn(d: Database.Database): void {
   if (!have.has('loudness_curve_json')) d.exec('ALTER TABLE tracks ADD COLUMN loudness_curve_json TEXT');
 }
 
+// The file as Navidrome reports it, kept by the library walks: path, format,
+// size in bytes and bitrate in kbps. Added by name when missing rather than as
+// a numbered migration, so it can't collide with a user_version a parallel
+// change claims; idempotent, and a few MB on a 76k-track library.
+//
+// Several processes open this DB, and two can both find a column missing on the
+// first open after an upgrade, so the ALTERs re-read under the write lock. The
+// read before it keeps every later open off that lock. Unlike the never-throws
+// helpers in migrate(), a failure here throws: upsertTrackMeta names these
+// columns on every write, so swallowing it would only move the error there.
 function ensureFileInfoColumns(d: Database.Database): void {
-  const have = new Set((d.pragma('table_info(tracks)') as Array<{ name: string }>).map((c) => c.name));
   const wanted: Array<[string, string]> = [
     ['file_path', 'TEXT'], ['file_suffix', 'TEXT'], ['file_size', 'INTEGER'], ['bit_rate', 'INTEGER'],
   ];
-  for (const [name, type] of wanted) {
-    if (!have.has(name)) d.exec(`ALTER TABLE tracks ADD COLUMN ${name} ${type}`);
-  }
+  const missing = () => {
+    const have = new Set((d.pragma('table_info(tracks)') as Array<{ name: string }>).map((c) => c.name));
+    return wanted.filter(([name]) => !have.has(name));
+  };
+  if (missing().length === 0) return;
+  d.transaction(() => {
+    for (const [name, type] of missing()) runDdl(d, `ALTER TABLE tracks ADD COLUMN ${name} ${type}`);
+  }).immediate();
 }
 

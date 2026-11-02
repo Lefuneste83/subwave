@@ -5,14 +5,12 @@
 // replaced-file-policy.changedAfterMeasure.
 //
 // Navidrome-only and best-effort, like navidrome-players.ts: another server, a
-// refused login or a timeout returns null and the walk carries on with the
-// size check alone. Nothing here throws or holds up the walk.
+// refused or unsent login or a timeout returns null and the walk carries on with
+// the size check alone. Nothing here throws or holds up the walk.
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { config } from '../config.js';
-import { login, nativeFetch } from './navidrome-players.js';
-import { serverKind } from './navidrome-players-policy.js';
-import { pingWith } from './subsonic.js';
+import { login, nativeFetch, nativeServer } from './navidrome-players.js';
 import { capMark, changesFloor, futureDated } from './replaced-file-policy.js';
 import { writeFileAtomic } from '../util/atomic-file.js';
 
@@ -53,9 +51,13 @@ export async function saveMark(newest: string | null): Promise<void> {
  * time seen. The first walk (no mark) stops at the oldest measurement SUB/WAVE
  * holds: a file changed before it cannot postdate any track's measure, and
  * `updatedAt` is the file's own date, decades back on an old library.
- * `complete` is false when a page failed part-way (Navidrome 0.5x answers 500,
+ * `complete` is false when a page failed part-way (Navidrome answers 500,
  * "ambiguous column name", past ~51k rows of this sort): the changes read so
  * far are the newest and still acted on, but the mark is not moved past them.
+ * The limit this sets: every walk reads from the top of the list again,
+ * and re-measuring a track does not move it down, so a change older than the
+ * newest ~51k rows is never reached. A size change still finds it; a same-size
+ * one is missed. A read that runs out of MAX_PAGES is partial in the same way.
  * Null when the server is not Navidrome or its API is unavailable.
  *
  * `_sort=updated_at` is not a column Navidrome's song resource maps: it works
@@ -71,10 +73,8 @@ export async function changedFiles(
   earliestMeasured: string | null,
   now: number = Date.now(),
 ): Promise<ChangedFiles | null> {
-  if (!config.navidrome.url || !config.navidrome.user || !config.navidrome.password) return null;
   try {
-    const ping = await pingWith({ url: config.navidrome.url, user: config.navidrome.user, pass: config.navidrome.password });
-    if (ping.ok && serverKind(ping.serverType) === 'other') return null;
+    if (!(await nativeServer()).usable) return null;
     const token = await login();
     const mark = await readMark();
     const firstFloor = earliestMeasured ? Date.parse(earliestMeasured) : NaN;
@@ -82,7 +82,8 @@ export async function changedFiles(
     // Nothing measured yet: nothing can be stale.
     if (floor == null) return { changes: [], newest: capMark(mark, now), complete: true, since: null, futureDated: 0 };
     const changes: FileChange[] = [];
-    let complete = true;
+    // True only once the read reaches its floor or the end of the list.
+    let complete = false;
     let future = 0;
     for (let page = 0; page < MAX_PAGES; page++) {
       let rows: Array<{ id?: unknown; updatedAt?: unknown }> | null;
@@ -95,7 +96,6 @@ export async function changedFiles(
       }
       if (!Array.isArray(rows)) {
         if (page === 0) return null;
-        complete = false;
         break;
       }
       let older = false;
@@ -107,7 +107,7 @@ export async function changedFiles(
         if (t < floor) { older = true; break; }
         changes.push({ id: r.id, updatedAt: r.updatedAt });
       }
-      if (older || rows.length < PAGE) break;
+      if (older || rows.length < PAGE) { complete = true; break; }
     }
     return {
       changes,

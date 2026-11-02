@@ -12,6 +12,7 @@ import { config } from '../config.js';
 import {
   normalizePlayerRow,
   ownPlayers,
+  passwordRefusal,
   serverKind,
   stateOf,
   type NavidromePlayerRow,
@@ -25,7 +26,7 @@ const TIMEOUT_MS = 5_000;
 const PAGE = 500;
 
 class NativeApiError extends Error {
-  constructor(message: string, readonly status: number | null) {
+  constructor(message: string, readonly status: number | null, readonly notSent = false) {
     super(message);
   }
 }
@@ -61,8 +62,12 @@ export async function nativeFetch(path: string, init: RequestInit & { token?: st
 }
 
 export async function login(): Promise<string> {
+  const refusal = passwordRefusal(baseUrl());
+  if (refusal) throw new NativeApiError(refusal, null, true);
   const res = await nativeFetch('/auth/login', {
     method: 'POST',
+    // Followed, a 307 would carry the password on, past the check above.
+    redirect: 'manual',
     body: JSON.stringify({ username: config.navidrome.user, password: config.navidrome.password }),
   });
   const body = (await res.json().catch(() => null)) as { token?: unknown } | null;
@@ -91,8 +96,34 @@ async function switchOn(token: string, id: string): Promise<void> {
   });
 }
 
+function accessProblem(err: unknown): RealPathStatus['access'] {
+  if (!(err instanceof NativeApiError)) return undefined;
+  if (err.notSent) return 'not-sent';
+  return err.status === 401 || err.status === 403 ? 'refused' : undefined;
+}
+
 function ownership() {
   return { clientName: config.navidrome.clientName, user: config.navidrome.user };
+}
+
+export type NativeServer =
+  | { usable: true; server?: ServerIdentity }
+  | { usable: false; reason: 'not-configured' }
+  | { usable: false; reason: 'not-navidrome'; server?: ServerIdentity };
+
+/** May Navidrome's own API be asked? The one check before any native call. */
+export async function nativeServer(): Promise<NativeServer> {
+  if (!config.navidrome.url || !config.navidrome.user || !config.navidrome.password) {
+    return { usable: false, reason: 'not-configured' };
+  }
+  // Ask the Subsonic API which server this is before touching Navidrome's own.
+  // A failed ping is not a verdict: the native login that follows reports the outage.
+  const ping = await pingWith({ url: config.navidrome.url, user: config.navidrome.user, pass: config.navidrome.password });
+  const server: ServerIdentity | undefined = ping.ok
+    ? { type: ping.serverType && ping.serverType !== 'unknown' ? ping.serverType : '', version: ping.serverSoftwareVersion ?? null }
+    : undefined;
+  if (serverKind(server?.type) === 'other') return { usable: false, reason: 'not-navidrome', server };
+  return { usable: true, server };
 }
 
 /**
@@ -100,25 +131,28 @@ function ownership() {
  * A row refused mid-way leaves the others switched and reports `refused`.
  */
 export async function realPathStatus({ enable = false }: { enable?: boolean } = {}): Promise<RealPathStatus> {
-  if (!config.navidrome.url || !config.navidrome.user || !config.navidrome.password) {
-    return { state: 'unavailable', players: [], switched: [], reason: 'the music server is not configured' };
+  const native = await nativeServer();
+  if (!native.usable) {
+    return native.reason === 'not-configured'
+      ? { state: 'unavailable', players: [], switched: [], reason: 'the music server is not configured' }
+      : { state: 'not-navidrome', players: [], switched: [], server: native.server };
   }
-  // Ask the Subsonic API which server this is before touching Navidrome's own.
-  // A failed ping is not a verdict: the native login below reports the outage.
-  const ping = await pingWith({ url: config.navidrome.url, user: config.navidrome.user, pass: config.navidrome.password });
-  const server: ServerIdentity | undefined = ping.ok
-    ? { type: ping.serverType && ping.serverType !== 'unknown' ? ping.serverType : '', version: ping.serverSoftwareVersion ?? null }
-    : undefined;
-  if (serverKind(server?.type) === 'other') {
-    return { state: 'not-navidrome', players: [], switched: [], server };
-  }
+  const { server } = native;
   let token: string;
   let players: NavidromePlayerRow[];
   try {
     token = await login();
     players = ownPlayers(await listPlayers(token), ownership());
   } catch (err) {
-    return { state: 'unavailable', players: [], switched: [], server, reason: errMessage(err, 'unreachable') };
+    const access = accessProblem(err);
+    return {
+      state: 'unavailable',
+      players: [],
+      switched: [],
+      server,
+      reason: errMessage(err, 'unreachable'),
+      ...(access ? { access } : {}),
+    };
   }
 
   const switched: string[] = [];

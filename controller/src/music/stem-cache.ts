@@ -391,7 +391,7 @@ async function writeSnapshot(snap: UsageSnapshot): Promise<boolean> {
   }
 }
 
-// For a writer outside the pass and the sweep (the orphan purge): the stored
+// For a writer outside the pass and the sweep (the orphan purge, forgetStems): the stored
 // totals no longer match the disk, so the next read walks instead of trusting
 // them. The file stays, because the budget field reads it (storedUsage) and an
 // operator about to lower the budget is better served by a flagged figure than

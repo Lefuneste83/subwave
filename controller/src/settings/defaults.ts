@@ -849,7 +849,6 @@ export const DEFAULTS = {
     // length to lrclib.net (or LRCLIB_URL), and acts only while the panel is on.
     lrclib: true,
   },
-
   // The Navidrome connection itself is in setup-config.json; this block is the
   // station's behaviour toward it. `reportRealPath`: keep Navidrome's "Report
   // Real Path" ticked on SUB/WAVE's own player rows (hourly + at boot), so

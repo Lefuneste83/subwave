@@ -2688,6 +2688,11 @@ export async function prepareUpdate(patch, { themeIds }: { themeIds?: ReadonlySe
     if (ms.reportRealPath !== undefined) next.musicSource.reportRealPath = ms.reportRealPath as boolean;
   }
 
+  if ('musicSource' in patch) {
+    const ms = parseSettingsPatchKey<Record<string, unknown>>('musicSource', patch.musicSource);
+    if (ms.reportRealPath !== undefined) next.musicSource.reportRealPath = ms.reportRealPath as boolean;
+  }
+
   // Post-patch integrity sweep — a personas/shows change in this patch may
   // have orphaned a show owner, a schedule slot, or the active persona.
   {
