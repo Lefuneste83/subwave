@@ -4239,6 +4239,7 @@ html:has(.admin-booth) [data-sidebar="sidebar"][data-mobile="true"],
     text-align: left; cursor: help; background: transparent; color: var(--ink);
 }
 .admin-root .lib-count.lib-count-link { cursor: pointer; }
+.admin-root a.lib-count { text-decoration: none; }
 .admin-root .lib-count.lib-count-link:hover, .admin-root .lib-count:focus-visible { background: color-mix(in oklab, var(--c) 8%, transparent); outline: none; }
 .admin-root .lib-count--library { --c: var(--ink); }
 .admin-root .lib-count--air { --c: var(--accent); }
