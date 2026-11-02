@@ -46,7 +46,7 @@ function limitsLabel(l: NonNullable<LibraryOverview['lengthLimits']>): string {
   return parts.join(', ');
 }
 
-function Tile({ tone, icon, label, value, sub, tip, onOpen, openLabel }: {
+function Tile({ tone, icon, label, value, sub, tip, onOpen, openLabel, href }: {
   tone: 'library' | 'air' | 'never' | 'aired' | 'needs' | 'needs-clear' | 'server';
   icon: ReactNode;
   label: string;
@@ -55,6 +55,8 @@ function Tile({ tone, icon, label, value, sub, tip, onOpen, openLabel }: {
   tip: ReactNode;
   onOpen?: () => void;
   openLabel?: string;
+  // An outside page, opened in a new tab (the music server's own UI).
+  href?: string | null;
 }) {
   const body = (
     <>
@@ -66,7 +68,11 @@ function Tile({ tone, icon, label, value, sub, tip, onOpen, openLabel }: {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        {onOpen ? (
+        {href ? (
+          <a href={href} target="_blank" rel="noopener noreferrer" className={cn('lib-count', `lib-count--${tone}`, 'lib-count-link')} aria-label={openLabel}>
+            {body}
+          </a>
+        ) : onOpen ? (
           <button type="button" className={cn('lib-count', `lib-count--${tone}`, 'lib-count-link')} onClick={onOpen} aria-label={openLabel}>
             {body}
           </button>
@@ -83,12 +89,14 @@ function Tile({ tone, icon, label, value, sub, tip, onOpen, openLabel }: {
   );
 }
 
-export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, onOpenTab }: {
+export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, onOpenTab, musicServerUrl }: {
   overview: LibraryOverview | null;
   serverTotal: number | null;
   countedAt: string | null;
   scanning: boolean;
   onOpenTab?: (tab: Tab) => void;
+  // Already checked by music-server-link.ts: an http(s) address or null.
+  musicServerUrl?: string | null;
 }) {
   const { adminFetch } = useLibrary();
   const [downloading, setDownloading] = useState(false);
@@ -154,11 +162,14 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
           label="Library"
           value={num(o?.library)}
           sub="tracks mirrored from your music server"
+          onOpen={onOpenTab ? () => onOpenTab('browse') : undefined}
+          openLabel="Open the Browse tab"
           tip={<>
             Every track SUB/WAVE has mirrored from your music server into its own library, blocked
             ones included. It grows when a tagging run walks the server, and Reconcile removes
             tracks that left it.
             <br /><b>Library = Can air + Never play.</b>
+            <br />Click to open the Browse tab.
           </>}
         />
         <Tile
@@ -170,12 +181,15 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
             {share(o.djReady, o.canAir)} DJ-ready
             {o.lengthLimits && <> · {o.lengthLimits.show ?? 'now'} ({limitsLabel(o.lengthLimits)}): {num(o.lengthLimits.within)}</>}
           </> : '…'}
+          onOpen={onOpenTab ? () => onOpenTab('browse') : undefined}
+          openLabel="Open the Browse tab"
           tip={<>
             The tracks the DJ may pick: the library minus the never-play list.
             <br /><b>DJ-ready</b> = mood &amp; energy tagged, BPM &amp; key measured, loudness measured
             over the whole file. A track missing one still airs, but the DJ and the mixer know less about it.
             {o?.lengthLimits && <><br />Length limits are set per show: the second figure is what
               {o.lengthLimits.show ? ` ${o.lengthLimits.show}` : ' the show on air'} can pick from.</>}
+            <br />Click to open the Browse tab.
           </>}
         />
         <Tile
@@ -237,11 +251,14 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
           sub={countedAt
             ? <>counted {relTime(countedAt)} ago</>
             : scanning ? 'counting…' : 'not counted yet'}
+          href={musicServerUrl}
+          openLabel="Open your music server in a new tab"
           tip={<>
             Your music server&apos;s own track count, from the last full count (one request per album,
             so it is not live). Never-play tracks are on the server too, so they are counted; only
             the station archive is left out. It should match Library.
             <br />The Recount button next to &ldquo;Your library&rdquo; refreshes it.
+            {musicServerUrl && <><br />Click to open your music server ({musicServerUrl}) in a new tab.</>}
           </>}
         />
       </div>

@@ -195,8 +195,10 @@ interface TaggingPanelProps {
   onReconcile: () => void;
   // Count the library — the only expensive read on this page, and the operator asks for it (#1570).
   onCountLibrary: () => void;
-  // Opens a Library tab from a counts tile (Blocked, History, Era).
+  // Opens a Library tab from a counts tile (Browse, Blocked, History, Era).
   onOpenTab?: (tab: Tab) => void;
+  // The music server's own web UI (Settings → Navidrome), for the Music server tile.
+  musicServerUrl?: string | null;
   countingLibrary: boolean;
   // Wipes ALL tagging data and starts fresh, behind a typed confirmation.
   onReset: () => void;
@@ -624,6 +626,7 @@ export default function TaggingPanel(p: TaggingPanelProps) {
             countedAt={countedAt}
             scanning={scanning}
             onOpenTab={p.onOpenTab}
+            musicServerUrl={p.musicServerUrl}
           />
           <div className="mt-2.5 text-[11px] text-muted">
             {remaining != null && remaining > 0 ? (
