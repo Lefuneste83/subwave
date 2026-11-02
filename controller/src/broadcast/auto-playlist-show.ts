@@ -16,6 +16,7 @@ export interface AutoPlaylistShow {
   playlistExhaust?: unknown;
   excludedPlaylistIds?: unknown;
   excludedAlbumKinds?: unknown;
+  excludeExplicit?: unknown;
   maxTrackSeconds?: unknown;
   minTrackLengthSeconds?: unknown;
 }
@@ -52,6 +53,7 @@ export function autoPlaylistShowKey(show: AutoPlaylistShow | null | undefined): 
     excludedPlaylistIds: strings(show.excludedPlaylistIds),
     // Drops whole album kinds from the coast too, so it rebuilds.
     excludedAlbumKinds: strings(show.excludedAlbumKinds),
+    excludeExplicit: show.excludeExplicit === true,
     maxTrackSeconds: typeof show.maxTrackSeconds === 'number' ? show.maxTrackSeconds : null,
     // Changes WHICH tracks the fallback may contain (#1573), so it rebuilds.
     minTrackLengthSeconds:

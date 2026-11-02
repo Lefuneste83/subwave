@@ -31,6 +31,7 @@ const WALK_OWNED = [
   // The file as Navidrome reports it (walkFileInfo): the new id's own walk
   // writes them, and an old id's path may name a file that moved.
   'file_path', 'file_suffix', 'file_size', 'bit_rate',
+  'explicit_status',
   ...SEARCH_KEY_DDL.columns,
   // The file as Navidrome reports it (walkFileInfo): the new id's own walk
   // writes them, and an old id's path may name a file that moved.
@@ -41,7 +42,9 @@ const WALK_OWNED = [
 // failure counters follow analysis_version so successful new analysis does not inherit old
 // failures.
 const GROUPS: Array<{ anchor: string; cols: string[] }> = [
-  { anchor: 'enriched_at', cols: ['lastfm_tags', 'lyric_excerpt', 'enriched_at'] },
+  // lastfm_track_tags_at describes lastfm_tags, so the two move together: a
+  // stamp carried onto a new row's own artist-only list would falsely mark it done.
+  { anchor: 'enriched_at', cols: ['lastfm_tags', 'lastfm_track_tags_at', 'lyric_excerpt', 'enriched_at'] },
   { anchor: 'moods', cols: ['moods', 'energy', 'source', 'confidence', 'tagger_version', 'prompt_hash', 'model', 'tagged_at'] },
   {
     anchor: 'analysis_version',
@@ -58,6 +61,7 @@ const GROUPS: Array<{ anchor: string; cols: string[] }> = [
   // (outro_json itself is carried new ?? old, so this takes the same side).
   { anchor: 'outro_json', cols: ['tail_version'] },
   { anchor: 'audio_moods', cols: ['audio_moods', 'audio_mood_scores_json'] },
+  { anchor: 'audio_descriptors', cols: ['audio_descriptors', 'audio_descriptor_scores_json'] },
   { anchor: 'map_x', cols: ['map_x', 'map_y'] },
 ];
 

@@ -98,6 +98,7 @@ router.post('/shows/community/:slug/install', requireAdmin, async (req, res) => 
     playlistInOrder: false,
     excludedPlaylistIds: [],
     excludedAlbumKinds: [],
+    excludeExplicit: false,
   };
 
   try {

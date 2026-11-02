@@ -300,6 +300,7 @@ export function settingsForm(v: NonNullable<SettingsData['values']>): FormState 
       batchSize: String(v.embedding?.batchSize ?? 25),
       enrichment: {
         lastfmTags: v.embedding?.enrichment?.lastfmTags ?? false,
+        lastfmTrackTags: v.embedding?.enrichment?.lastfmTrackTags ?? false,
         lyrics: v.embedding?.enrichment?.lyrics ?? true,
       },
     },

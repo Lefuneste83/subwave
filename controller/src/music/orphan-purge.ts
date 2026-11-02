@@ -19,6 +19,10 @@
 //   the slot the quarantine is superseded and simply ages out — never merged
 //   over the new copy. A release brings blends back, it does not save the
 //   separation (orphan-purge-pure.ts says why).
+// - Only the SAME AUDIO is released: the stems' tail-meta.json duration must
+//   match the returning row's (sameAudio), or the id may have come back as a
+//   different recording at the same path (#2224). No evidence on either side,
+//   a head-only set included, holds the release, and the entry ages out.
 // - Quarantine age comes from an `.orphaned-at` sidecar written at move time
 //   (the move itself only touches ctime, but writing the sidecars bumps the
 //   dir's mtime, and the stem-priority lesson is that cache mtimes lie). The
@@ -76,6 +80,8 @@ import {
   planOrphanPurge,
   planQuarantinePurge,
   QUARANTINE_DIR,
+  sameAudio,
+  TAIL_META,
   type QuarantineEntry,
 } from './orphan-purge-pure.js';
 
@@ -100,6 +106,10 @@ export interface PurgeReport {
   agingCount: number;
   /** Quarantines whose id is back in the library while the live slot is taken. */
   supersededCount: number;
+  /** Quarantines whose id is back with the live slot free, held because the
+   *  stems are not proven to be the returning audio: a duration that differs,
+   *  or none to compare (a head-only set). They age out like any other. */
+  mismatchedCount: number;
   /** Cache dirs skipped as in-flight (written within IN_FLIGHT_MS). */
   inFlight: number;
   /** Moves/deletes that failed this pass (permissions, squashed roots). */
@@ -157,6 +167,27 @@ async function readFileSafe(file: string): Promise<string> {
   return readFile(file, 'utf8');
 }
 
+// The decoded duration the stems were cut from, as the analyzer recorded it in
+// tail-meta.json. Unread or absent (a head-only set): undefined, which
+// sameAudio reads as no evidence.
+async function stemsDurationSec(entryDir: string): Promise<unknown> {
+  try {
+    return (JSON.parse(await readFileSafe(path.join(entryDir, TAIL_META))) as { duration_sec?: unknown } | null)?.duration_sec;
+  } catch {
+    return undefined;
+  }
+}
+
+// The returning row's duration. A library that cannot answer gives null, and
+// the release it was asked for is held.
+function storedDurationSec(id: string): number | null {
+  try {
+    return db.getTrack(id)?.durationSec ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function listDirs(dir: string): Promise<string[]> {
   try {
     const entries = await readdir(dir, { withFileTypes: true });
@@ -173,8 +204,8 @@ async function listDirs(dir: string): Promise<string[]> {
 // would keep a stems_at with nothing behind it, and absence alone never brings
 // a track back into the backfill. A journal that cannot be read throws, so the
 // pass stops rather than reading that as "nothing is rotating".
-function libraryIds(knownIds: Iterable<string>): Set<string> {
-  return new Set([...knownIds, ...db.pendingIdRotations().keys()]);
+function libraryIds(knownIds: Iterable<string>, rotating = db.pendingIdRotations()): Set<string> {
+  return new Set([...knownIds, ...rotating.keys()]);
 }
 
 async function readsAsStems(dir: string): Promise<boolean> {
@@ -246,6 +277,9 @@ export async function runOrphanPurge(opts: {
   resolveNames?: (ids: string[]) => Promise<ReadonlyMap<string, OrphanTrackName>>;
   /** The automatic pass: refuse a plan above AUTO_MAX_SHARE of the cache. */
   automatic?: boolean;
+  /** The duration in seconds of the library row with this id, for a release's
+   *  sameAudio check. The library DB by default; tests inject it. */
+  rowDurationSec?: (id: string) => number | null;
 }): Promise<PurgeReport> {
   if (!opts.confirm) return purgePass(opts);
   if (confirmedPassRunning) {
@@ -267,13 +301,14 @@ export function purgeSummary(r: PurgeReport): string {
   return `quarantined ${r.quarantined}, released ${r.released.length}, deleted ${r.deletedCount}`
     + ` (${Math.round(r.freedBytes / 1_000_000)} MB freed)`
     + failed
+    + (r.mismatchedCount ? `, ${r.mismatchedCount} back in the library but held (not proven the same audio)` : '')
     + (r.inFlight ? `, ${r.inFlight} in-flight dir(s) skipped` : '');
 }
 
 function emptyReport(dryRun: boolean): PurgeReport {
   return {
     dryRun, keptCount: 0, quarantined: 0, quarantinedNames: [], released: [],
-    deletedCount: 0, deletedNames: [], agingCount: 0, supersededCount: 0, inFlight: 0, failed: 0,
+    deletedCount: 0, deletedNames: [], agingCount: 0, supersededCount: 0, mismatchedCount: 0, inFlight: 0, failed: 0,
     quarantineEntries: 0, freedBytes: 0,
   };
 }
@@ -297,7 +332,8 @@ async function purgePass(opts: Parameters<typeof runOrphanPurge>[0]): Promise<Pu
   if (opts.knownIds.length === 0) {
     return { ...empty, refused: true, reason: 'empty library id set: refusing (a closed or half-loaded database must never quarantine the cache)' };
   }
-  const known = libraryIds(opts.knownIds);
+  const rotating = db.pendingIdRotations();
+  const known = libraryIds(opts.knownIds, rotating);
   const inFlightMs = opts.inFlightMs ?? IN_FLIGHT_MS;
   const report: PurgeReport = { ...empty };
 
@@ -331,6 +367,7 @@ async function purgePass(opts: Parameters<typeof runOrphanPurge>[0]): Promise<Pu
   // ---- quarantine walk -----------------------------------------------------
   // In parallel like the root walk: a dry run reads every entry on each Stems
   // page open, and a network share holds thousands of them.
+  const rowDurationSec = opts.rowDurationSec ?? storedDurationSec;
   const quEntries: QuarantineEntry[] = await mapPool(await listDirs(qu), stemCache.SCAN_CONCURRENCY, async (name) => {
     const entryDir = path.join(qu, name);
     const liveSlotFree = !(await stat(path.join(root, name)).then(() => true, () => false));
@@ -342,7 +379,15 @@ async function purgePass(opts: Parameters<typeof runOrphanPurge>[0]): Promise<Pu
       if (opts.confirm) await stampQuarantine(entryDir, now).catch(() => {});
       ageMs = 0;
     }
-    return { name, known: known.has(name), ageMs, liveSlotFree };
+    const isKnown = known.has(name);
+    // Only a release asks whether the audio is the same, so only an entry that
+    // could be released reads its evidence. An old id still rotating has no row
+    // of its own: adoption moved it to the new id first, and that row is the
+    // same file.
+    const same = isKnown && liveSlotFree
+      ? sameAudio(await stemsDurationSec(entryDir), rowDurationSec(rotating.get(name) ?? name))
+      : false;
+    return { name, known: isKnown, ageMs, liveSlotFree, sameAudio: same };
   });
   report.quarantineEntries = quEntries.length;
   const qplan = planQuarantinePurge(quEntries, { confirm: opts.confirm, ...(opts.graceMs !== undefined ? { graceMs: opts.graceMs } : {}) });
@@ -356,6 +401,7 @@ async function purgePass(opts: Parameters<typeof runOrphanPurge>[0]): Promise<Pu
   report.deletedNames = held ? [] : toDelete.map(d => d.name).slice(0, 10);
   report.agingCount = qplan.aging.length;
   report.supersededCount = qplan.superseded.length;
+  report.mismatchedCount = qplan.mismatched.length;
 
   if (opts.confirm) {
     // What the moves add to or take off the cache total, measured the way its
