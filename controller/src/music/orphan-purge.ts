@@ -420,7 +420,7 @@ async function purgePass(opts: Parameters<typeof runOrphanPurge>[0]): Promise<Pu
       // Back in the cache it is not quarantined: a stale stamp must not ride
       // along into a later quarantine.
       await rm(path.join(root, name, ORPHANED_AT), { force: true }).catch(() => {});
-      const back = await stemCache.trackDirBytes(path.join(root, name));
+      const back = await stemCache.measuredDirBytes(path.join(root, name));
       if (back === null) movesExact = false;
       else { movedBytes += back; movedDirs += 1; }
       await stampReleasedStems(name);
@@ -461,7 +461,7 @@ async function purgePass(opts: Parameters<typeof runOrphanPurge>[0]): Promise<Pu
           report.freedBytes += stale.freedBytes;
           if (!stale.gone) { report.failed += 1; continue; }
         }
-        const leaving = await stemCache.trackDirBytes(from);
+        const leaving = await stemCache.measuredDirBytes(from);
         try {
           await rename(from, to);
         } catch { report.failed += 1; continue; }

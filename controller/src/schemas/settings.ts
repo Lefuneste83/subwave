@@ -730,6 +730,7 @@ export const transitionsPatchSchema = settingsBlockOf({
   // save-time refusal. Do not add one here.
   pairDrain: settingsBoolLike(),
   stemBlends: settingsBoolLike(),
+  pickTimeStems: settingsBoolLike(),
   equalPowerCrossfade: settingsBoolLike(),
   // New keys, so no stored leniency to preserve: refused unless a real
   // boolean / a real number in range (load() repairs a hand edit instead).

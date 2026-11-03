@@ -1250,6 +1250,7 @@ export async function load() {
     transitions: {
       pairDrain: typeof stored.transitions?.pairDrain === 'boolean' ? stored.transitions.pairDrain : DEFAULTS.transitions.pairDrain,
       stemBlends: typeof stored.transitions?.stemBlends === 'boolean' ? stored.transitions.stemBlends : DEFAULTS.transitions.stemBlends,
+      pickTimeStems: typeof stored.transitions?.pickTimeStems === 'boolean' ? stored.transitions.pickTimeStems : DEFAULTS.transitions.pickTimeStems,
       equalPowerCrossfade: typeof stored.transitions?.equalPowerCrossfade === 'boolean' ? stored.transitions.equalPowerCrossfade : DEFAULTS.transitions.equalPowerCrossfade,
       fadeAudibleEnd: typeof stored.transitions?.fadeAudibleEnd === 'boolean' ? stored.transitions.fadeAudibleEnd : DEFAULTS.transitions.fadeAudibleEnd,
       // A hand edit out of range (or not a number) repairs to the default.
@@ -2413,8 +2414,11 @@ export async function prepareUpdate(patch, { themeIds }: { themeIds?: ReadonlySe
     }
     if (e.enrichment !== undefined) {
       const en = e.enrichment || {};
+      // Tri-state, like the default: null is auto (on when a Last.fm key is set)
+      // and stays null. Coercing it with !! stored false, so a save that kept
+      // auto switched enrichment off (#2233).
       if (en.lastfmTags !== undefined) {
-        next.embedding.enrichment.lastfmTags = !!en.lastfmTags;
+        next.embedding.enrichment.lastfmTags = en.lastfmTags === null ? null : !!en.lastfmTags;
       }
       if (en.lastfmTrackTags !== undefined) {
         next.embedding.enrichment.lastfmTrackTags = !!en.lastfmTrackTags;
@@ -2486,7 +2490,7 @@ export async function prepareUpdate(patch, { themeIds }: { themeIds?: ReadonlySe
     // fadeAudibleEnd(Db) are controller-side cue points read per queued track
     // (music/silence-trim.ts), and tailFromCurve picks which measurement the
     // queue reads (music/tail-levels.ts), so they need no mixer restart.
-    for (const k of ['pairDrain', 'stemBlends', 'fadeAudibleEnd', 'fadeAudibleEndDb', 'tailFromCurve'] as const) {
+    for (const k of ['pairDrain', 'stemBlends', 'pickTimeStems', 'fadeAudibleEnd', 'fadeAudibleEndDb', 'tailFromCurve'] as const) {
       if (tr[k] !== undefined) (next.transitions as Record<string, unknown>)[k] = tr[k];
     }
     // Read once by the mixer at startup (liquidsoap_equal_power_crossfade.txt),

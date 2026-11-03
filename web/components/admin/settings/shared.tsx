@@ -197,7 +197,8 @@ export interface SearchForm {
 }
 
 export interface EmbeddingEnrichmentForm {
-  lastfmTags: boolean;
+  /** null is auto: on when a Last.fm key is set (lastfm.lastfmEnrichEnabled). */
+  lastfmTags: boolean | null;
   lastfmTrackTags: boolean;
   lyrics: boolean;
 }
@@ -306,6 +307,7 @@ export interface LoudnessForm {
 export interface TransitionsForm {
   pairDrain: boolean;   // hold picks until the successor is known (#749 fix)
   stemBlends: boolean;  // pre-rendered stem-blend seams (needs pairDrain + stem cache)
+  pickTimeStems: boolean;  // separate a held pick's missing stems while it waits (#2197)
   equalPowerCrossfade: boolean;  // plain crossfade curve: false = linear, true = equal-power (mixer restart)
   fadeAudibleEnd: boolean;  // cut a fade ending at its audible end (controller cue point, no restart)
   fadeAudibleEndDb: string; // dB under the track's loudness where a fade stops being audible (15..35)
@@ -446,13 +448,20 @@ export interface SettingsData {
     transitions?: {
       pairDrain?: boolean;
       stemBlends?: boolean;
+      pickTimeStems?: boolean;
       equalPowerCrossfade?: boolean;
       fadeAudibleEnd?: boolean;
       fadeAudibleEndDb?: number;
       tailFromCurve?: boolean;
       effects?: Partial<Record<TransitionEffect, boolean>>;
     };
-    audio?: { embeddings?: boolean; vocalActivity?: boolean; stemCache?: boolean; stemCacheGb?: number };
+    audio?: {
+      embeddings?: boolean;
+      vocalActivity?: boolean;
+      stemCache?: boolean;
+      stemCacheGb?: number;
+      analyzeQuietOnly?: boolean;
+    };
     stream?: {
       opusEnabled?: boolean;
       opusBitrate?: number;

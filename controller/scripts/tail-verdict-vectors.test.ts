@@ -72,9 +72,9 @@ beforeEach(() => {
 
 const version = () => db.requireDb().pragma('user_version', { simple: true });
 // Every migration after 32 runs on the same open, so a full open ends at the newest one.
-// Fork: upstream's steps 32-35 run here as 35-38 (library-db/schema.ts), so the
-// latest version is 38 and a wind-back stops at the fork's own step before it.
-const LATEST = 38;
+// Fork: upstream's steps 32-36 run here as 35-39 (library-db/schema.ts), so the
+// latest version is 39 and a wind-back stops at the fork's own step before it.
+const LATEST = 39;
 const sung = (ms: number) => [{ startMs: 200_000, endMs: 200_000 + ms }];
 const outro = (vocalRanges?: unknown) => JSON.stringify({
   startMs: 180_000, ending: 'fade', ...(vocalRanges === undefined ? {} : { vocalRanges }),

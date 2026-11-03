@@ -49,6 +49,7 @@ export function settingsForm(v: NonNullable<SettingsData['values']>): FormState 
     transitions: {
       pairDrain: v.transitions?.pairDrain ?? true,
       stemBlends: v.transitions?.stemBlends ?? false,
+      pickTimeStems: v.transitions?.pickTimeStems === true,
       equalPowerCrossfade: v.transitions?.equalPowerCrossfade === true,
       fadeAudibleEnd: v.transitions?.fadeAudibleEnd === true,
       fadeAudibleEndDb: String(v.transitions?.fadeAudibleEndDb ?? 20),
@@ -299,7 +300,9 @@ export function settingsForm(v: NonNullable<SettingsData['values']>): FormState 
       audioFusionWeight: String(v.embedding?.audioFusionWeight ?? 0.5),
       batchSize: String(v.embedding?.batchSize ?? 25),
       enrichment: {
-        lastfmTags: v.embedding?.enrichment?.lastfmTags ?? false,
+        // Unset is auto, never off: loading it as false wrote false on the next
+        // Library save and stopped Last.fm enrichment on a keyed install (#2233).
+        lastfmTags: v.embedding?.enrichment?.lastfmTags ?? null,
         lastfmTrackTags: v.embedding?.enrichment?.lastfmTrackTags ?? false,
         lyrics: v.embedding?.enrichment?.lyrics ?? true,
       },

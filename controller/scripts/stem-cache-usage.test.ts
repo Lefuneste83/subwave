@@ -104,6 +104,34 @@ test('GET /stem-cache/usage: the stored size and the budget in force', async () 
   await s.close();
 });
 
+test('GET /stem-cache/usage: with pick-time stems on, how far over its budget the cache may run', async () => {
+  const settings = await import('../src/settings.js');
+  const policy = await import('../src/broadcast/pick-stems-policy.js');
+  writeSnap({ bytes: 16 * GB, dirs: 1000 });
+  const app = express();
+  app.use(router);
+  const s = await listen(app);
+  s.server.unref();
+  type Body = { usage: { bytes: number; estTrackBytes: number } | null; budgetBytes: number; pickTimeOvershootBytes?: number };
+  const read = async () => (await (await fetch(`${s.url}/stem-cache/usage`)).json()) as Body;
+  try {
+    const off = await read();
+    assert.equal('pickTimeOvershootBytes' in off, false, 'off: the answer is unchanged');
+    await settings.update({ transitions: { pickTimeStems: true } });
+    const on = await read();
+    assert.equal(on.pickTimeOvershootBytes,
+      policy.designedOvershootBytes(on.budgetBytes, on.usage!.estTrackBytes),
+      'the allowance plus the one separation admitted under it');
+    assert.ok(on.pickTimeOvershootBytes! > 0);
+    rmSync(snapFile, { force: true });
+    assert.equal('pickTimeOvershootBytes' in (await read()), false, 'nothing measured: nothing to size it by');
+  } finally {
+    await settings.update({ transitions: { pickTimeStems: false } });
+    rmSync(snapFile, { force: true });
+    await s.close();
+  }
+});
+
 test('stems dropped for a replaced file come off the stored size, and the next read needs no walk', async () => {
   // Marked stale instead, one replaced file (an MP3 swapped for a FLAC) cost the
   // next read a walk of every stem dir: minutes on a share, holding an import.
