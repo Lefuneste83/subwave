@@ -114,6 +114,24 @@ export function placedTailVersion(outro: { loudnessCurve?: unknown } | null | un
 // The facets read off one whole-file decode rather than the analysis windows.
 export const WHOLE_FILE_FACETS: readonly Facet[] = ['loudness', 'edges'];
 
+// THE rule for "are this track's loudness figures the whole-file measurement",
+// which nothing measuring less may overwrite. From this loudness_version up,
+// loudness_lufs/peak_db are integrated loudness and true peak over the whole
+// file, stored with the extras below; NULL or 1 is the analysis window's
+// figure. SQL_WHOLE_FILE_LOUDNESS asks a stored row (a figure must be there),
+// isWholeFileLoudnessVersion an answer's or a row's version. A threshold, the
+// FIRST whole-file version: it stays 2 when FACET_VERSIONS.loudness (the
+// version the analyzer stamps today) moves past it.
+export const MIN_WHOLE_FILE_LOUDNESS_VERSION = 2;
+export const SQL_WHOLE_FILE_LOUDNESS =
+  `(loudness_lufs IS NOT NULL AND COALESCE(loudness_version, 1) >= ${MIN_WHOLE_FILE_LOUDNESS_VERSION})`;
+export function isWholeFileLoudnessVersion(version: number | null | undefined): version is number {
+  return (version ?? 1) >= MIN_WHOLE_FILE_LOUDNESS_VERSION;
+}
+// Written only with a whole-file figure, and dropped with it: a window figure
+// (or none) in its place leaves all four NULL.
+export const WHOLE_FILE_LOUDNESS_EXTRAS = ['loudness_version', 'sample_peak_db', 'loudness_range_lu', 'loudness_curve_json'] as const;
+
 export const FACET_MAX_ATTEMPTS = MAX_ANALYSIS_FAILURES;
 
 // Where the analysed audio came from, as far as the controller knows.
@@ -130,7 +148,7 @@ export interface FacetSourceRow {
   has_vocal: number;         // vocal_ranges_json IS NOT NULL ('[]' is measured, counts)
   has_stems: number;         // stems_at IS NOT NULL
   loudness_version: number;  // COALESCE(loudness_version, 1): which measurement loudness_lufs is
-  has_loudness_curve?: number; // loudness_curve_json IS NOT NULL (the whole-file pass's curve)
+  has_loudness_curve?: number; // loudness_curve_json IS NOT NULL (the whole-file pass's curve, or its unavailable marker)
   has_edges: number;         // decoded_duration_ms IS NOT NULL
   edge_tail_ms: number | null;
   tail_version: number | null; // 2 = a tail window the analyzer placed from the edges, 3 = with the loudness curve
@@ -221,9 +239,11 @@ export function deriveFacetRows(
   if (row.has_loudness) {
     // A whole-file figure stored without its curve (an analyzer that predates
     // it) stays one version below: re-planned for the curve, but only on an
-    // analyzer that reports one (acoustics-plan, `no-curve`).
+    // analyzer that reports one (acoustics-plan, `no-curve`). A pass that ran
+    // and had no curve to give stored the unavailable marker instead, which
+    // counts as the curve column set: settled, never re-read for nothing.
     const v = row.loudness_version || 1;
-    if (v >= 2 && !row.has_loudness_curve) ok('loudness', 'no-curve', v - 1);
+    if (isWholeFileLoudnessVersion(v) && !row.has_loudness_curve) ok('loudness', 'no-curve', v - 1);
     else ok('loudness', null, v);
     out[out.length - 1]!.measuredVersion = true;
   }
@@ -614,7 +634,7 @@ export function clearFacetRows(opts: { keepVocal?: boolean; clearStems?: boolean
   d.prepare(
     `DELETE FROM track_facet_status
       WHERE facet = 'loudness' AND track_id NOT IN
-        (SELECT id FROM tracks WHERE loudness_lufs IS NOT NULL AND loudness_version >= 2)`,
+        (SELECT id FROM tracks WHERE ${SQL_WHOLE_FILE_LOUDNESS})`,
   ).run();
   // A placed tail is kept by clearAnalysis, like whole-file loudness.
   d.prepare(

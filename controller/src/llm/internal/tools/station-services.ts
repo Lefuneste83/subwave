@@ -22,11 +22,12 @@ import { fetchOnThisDay, curiositySeen, recordCuriosity } from '../../../skills/
 import { fetchHeadlines, hashHeadline } from '../../../skills/feed.js';
 import { getArtist, getAlbum, searchArtists } from '../../../music/subsonic.js';
 import { getWeatherOutlook } from '../../../context.js';
+import { weatherNews } from '../../../skills/weather-policy.js';
 
 export interface StationServices {
   // Web search via the operator's configured provider (DuckDuckGo / Tavily /
-  // Brave / SearXNG / Keenable / Firecrawl). `searchReady()` is false when no
-  // provider is usable.
+  // Brave / SearXNG / Keenable / Firecrawl / Outcrawl). `searchReady()` is false
+  // when no provider is usable.
   searchWeb: typeof searchWeb;
   searchReady: typeof searchReady;
   // The track currently on air (artist/title/album/year/id), or null.
@@ -49,6 +50,12 @@ export interface StationServices {
   // fetch as ctx.weather): one row per hour plus plain-English notes such as
   // "rain likely in about 3 hours". Empty when no forecast is known.
   weatherOutlook: typeof getWeatherOutlook;
+  // Whether a reading ({ condition, kinds }) is news against the skill's state:
+  // { skyChanged, outlookChanged, withdrawn }, where `withdrawn` holds a note for
+  // rain the last segment promised that is no longer coming. The same helper the
+  // segment gates use (skills/weather-policy.ts), so the tool and the gates
+  // cannot disagree.
+  weatherNews: typeof weatherNews;
 }
 
 let cached: StationServices | null = null;
@@ -70,6 +77,7 @@ export function buildStationServices(): StationServices {
     recall: { seen: (key: string) => curiositySeen(key), remember: (key: string) => recordCuriosity(key) },
     log: (msg: string) => queue.log('scheduler', `[skill] ${msg}`),
     weatherOutlook: getWeatherOutlook,
+    weatherNews,
   };
   return cached;
 }

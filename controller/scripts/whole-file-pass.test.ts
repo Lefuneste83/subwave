@@ -19,17 +19,19 @@
 
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
+import { createTempDir, removeTempDir } from './test-utils/temp-dir.js';
 
 const requests: Array<Record<string, unknown>> = [];
 let streamReads = 0;
 let inflight = 0;
 let maxInflight = 0;
 let wholeFileCapable: boolean | null = true;
+// Drop the sample peak from whole-file loudness answers (an incomplete set).
+let partialLoudness = false;
 
 function handler(req: IncomingMessage, res: ServerResponse) {
   if (req.url?.startsWith('/health')) {
@@ -57,6 +59,7 @@ function handler(req: IncomingMessage, res: ServerResponse) {
         },
         edges: { edge_lead_ms: 800, edge_tail_ms: 3100, decoded_duration_ms: 213_407 },
       };
+      if (partialLoudness) delete (ok.loudness as Record<string, unknown>).sample_peak_db;
       const facets: Record<string, unknown> = {};
       for (const f of r.facets) facets[f] = { status: 'ok', data: ok[f] };
       res.setHeader('Content-Type', 'application/json');
@@ -80,7 +83,7 @@ function handler(req: IncomingMessage, res: ServerResponse) {
 const server = createServer(handler);
 await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
 const port = (server.address() as AddressInfo).port;
-const stateDir = mkdtempSync(join(tmpdir(), 'subwave-whole-pass-'));
+const stateDir = createTempDir(join(tmpdir(), 'subwave-whole-pass-'));
 process.env.STATE_DIR = stateDir;
 process.env.ANALYZE_URL = `http://127.0.0.1:${port}`;
 process.env.NAVIDROME_URL = `http://127.0.0.1:${port}`;
@@ -94,16 +97,17 @@ process.env.ANALYZE_WHOLE_FILE_CONCURRENCY = '3';
 
 const db = await import('../src/music/library-db.js');
 const P = await import('../src/music/acoustics-plan.js');
-const { runAnalysisPass, wholeFileBackfillPlan } = await import('../src/music/analyze.js');
+const { runAnalysisPass, wholeFileBackfillPlan, wholeFileSkipNotice } = await import('../src/music/analyze.js');
 const analyzer = await import('../src/music/analyzer.js');
 const { config } = await import('../src/config.js');
 const setWholeFile = (on: boolean) => { (config.analyzer as { wholeFile: boolean }).wholeFile = on; };
 await db.open({ embeddingDim: 8, adoptStoredDim: true });
 
-after(() => {
+after(async () => {
   analyzer.shutdown();
   server.close();
-  rmSync(stateDir, { recursive: true, force: true });
+  db.close();
+  await removeTempDir(stateDir);
 });
 
 for (const id of ['w1', 'w2', 'w3', 'w4']) {
@@ -206,5 +210,46 @@ test('the backfill is off unless ANALYZE_WHOLE_FILE is set', async () => {
     setWholeFile(false);
     wholeFileCapable = true;
     await analyzer.refreshCapabilities();
+  }
+});
+
+test('a whole-file loudness answer missing a figure is a failure, never a partial row', async () => {
+  partialLoudness = true;
+  try {
+    await runAnalysisPass({ plan: plan('loudness', ['c']) });
+  } finally {
+    partialLoudness = false;
+  }
+  const t = db.getTrack('c')!;
+  assert.equal(t.loudnessLufs, -9, 'the window figure stays');
+  const row = db.requireDb()
+    .prepare(`SELECT loudness_version AS v, sample_peak_db AS sp FROM tracks WHERE id = 'c'`)
+    .get() as { v: number | null; sp: number | null };
+  assert.deepEqual(row, { v: null, sp: null });
+  // The row still describes the kept window figure (v1, due), with the
+  // failed attempt counted and named.
+  const cell = db.loadFacetState(['loudness']).get('c')!.get('loudness')!;
+  assert.deepEqual([cell.status, cell.version, cell.attempts], ['ok', 1, 1]);
+  const err = db.requireDb().prepare(`SELECT analyze_error AS e FROM tracks WHERE id = 'c'`).get() as { e: string };
+  assert.match(err.e, /loudness: incomplete whole-file loudness answer/);
+  assert.ok(db.facetNeedsIds('loudness').includes('c'), 'still due: the next run asks again');
+});
+
+test('the backfill says whether the analyzer lacks the facets or has not said', async () => {
+  // Known to lack them: rebuild. Not said: an old image, or not ready yet.
+  assert.match(wholeFileSkipNotice(false), /reports it cannot run it .*rebuild the analyzer/);
+  assert.match(wholeFileSkipNotice(null), /has not said whether it can run it/);
+  assert.doesNotMatch(wholeFileSkipNotice(null), /reports it cannot/);
+  // A capability that turned up after the first probe is read before planning.
+  setWholeFile(true);
+  wholeFileCapable = null;
+  await analyzer.refreshCapabilities();
+  assert.equal(analyzer.wholeFileAvailable(), null);
+  wholeFileCapable = true; // the pool came up since: the backfill asks again
+  try {
+    assert.ok(((await wholeFileBackfillPlan())?.items.length ?? 0) > 0);
+    assert.equal(analyzer.wholeFileAvailable(), true);
+  } finally {
+    setWholeFile(false);
   }
 });

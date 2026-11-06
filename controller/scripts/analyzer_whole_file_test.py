@@ -128,6 +128,18 @@ def t_summary_reads_silence_as_no_loudness():
     assert got["loudness_lufs"] is None and got["true_peak_db"] is None, got
 
 
+def t_whole_file_loudness_is_four_figures_or_none():
+    # Silence: every figure goes, not just the two the gain reads.
+    silent = SUMMARY.replace("-12.3 LUFS", "-70.0 LUFS").replace("0.3 dBFS", "-inf dBFS")
+    with Patched(measure_whole_file=fake_measure([], loud={**aw.parse_ebur128_summary(silent), "sample_peak_db": -40.0})):
+        out = aw.whole_file_facets("/x.flac", ["loudness"])
+    assert out["loudness"] == {"status": "unmeasurable", "reason": "silent"}, out
+    # An answer always carries all four.
+    with Patched(measure_whole_file=fake_measure([])):
+        data = aw.whole_file_facets("/x.flac", ["loudness"])["loudness"]["data"]
+    assert {"loudness_lufs", "peak_db", "sample_peak_db", "lra_lu"} <= set(data), data
+
+
 def t_output_rate_is_the_output_streams_not_the_inputs():
     assert aw.parse_output_rate(STDERR_HEAD) == 96000
     resampled = STDERR_HEAD.replace("pcm_f32le, 96000 Hz", "pcm_f32le, 48000 Hz")
@@ -135,11 +147,89 @@ def t_output_rate_is_the_output_streams_not_the_inputs():
     assert aw.parse_output_rate("Input #0\n  Stream #0:0: Audio: mp3, 44100 Hz") is None
 
 
+def feed_log(text, src=None):
+    log = aw.FfmpegLog(src)
+    for line in text.splitlines(keepends=True):
+        log.feed(line)
+    return log
+
+
+def t_log_read_a_line_at_a_time_gives_what_the_whole_text_did():
+    frames = frames_text([(i / 10.0, -14.0 - (i % 5) / 10.0) for i in range(1, 120)])
+    text = STDERR_HEAD + frames + "\n" + SUMMARY
+    log = feed_log(text)
+    assert aw.parse_ebur128_summary(log.summary_text()) == aw.parse_ebur128_summary(text)
+    assert aw.parse_output_rate(log.output_text()) == 96000
+    assert dict((i, log.frames[i]) for i in log.frames) == frames_of(text)
+    assert aw.loudness_curve_from_frames(log.frames) == aw.loudness_curve_from_frames(frames_of(text))
+    # The frame lines themselves are not kept: only the short tail of the rest.
+    assert "TARGET" not in log.failure_text(), log.failure_text()
+
+
+def t_log_finds_the_output_rate_past_a_long_tag():
+    # Input tags are copied to the output header; a lyrics tag prints a line
+    # per lyric line before the PCM stream line.
+    lyrics = "".join(f"                    : verse line {i}\n" for i in range(300))
+    head = STDERR_HEAD.replace("Output #0, f32le, to 'pipe:1':\n",
+                               "Output #0, f32le, to 'pipe:1':\n  Metadata:\n    lyrics          : first\n" + lyrics)
+    assert aw.parse_output_rate(feed_log(head).output_text()) == 96000
+
+
+def t_log_failure_text_keeps_the_first_error_and_the_tail():
+    chatter = "".join(f"[mp3 @ 0x1] skipping frame {i}\n" for i in range(500))
+    log = feed_log("http://navi:4533/rest/stream?t=secret: Invalid data found\n" + chatter + "Conversion failed!\n")
+    got = aw.ffmpeg_failure_reason(log.failure_text())
+    assert got.startswith("http://navi:4533/… Invalid data found"), got
+    assert "secret" not in got, got
+
+
+def t_frame_log_reads_like_the_dict():
+    frames = aw.FrameLog()
+    for idx, tenths in ((30, -140), (31, -141), (35, -1000)):
+        frames[idx] = tenths
+    assert len(frames) == 3 and list(frames) == [30, 31, 35] and max(frames) == 35
+    assert 31 in frames and 32 not in frames and -1 not in frames and frames[35] == -1000
+    frames[10 ** 9] = -100  # a corrupt timestamp: dropped, never allocated
+    assert len(frames) == 3 and max(frames) == 35
+
+
 def t_failure_reason_redacts_stream_credentials():
     err = "http://navi:4533/rest/stream?u=dj&t=secret&s=salt: Invalid data found\nConversion failed!"
     got = aw.ffmpeg_failure_reason(err)
     assert "secret" not in got and "salt" not in got, got
     assert got.startswith("http://navi:4533/… Invalid data found"), got
+
+
+def t_redaction_drops_userinfo_too():
+    got = aw.redact_urls("open http://dj:hunter2@navi:4533/rest/stream?t=secret failed")
+    assert got == "open http://navi:4533/… failed", got
+
+
+def t_one_shot_stderr_leaves_redacted_even_split_across_writes():
+    import io
+    sink = io.StringIO()
+    out = aw.RedactingStream(sink)
+    out.write("Traceback: RuntimeError: http://navi:4533/rest/str")
+    out.write("eam?u=dj&t=secret&s=salt went away\nnext line\n")
+    out.write("tail http://dj:pw@navi/x?t=secret")
+    out.flush()
+    got = sink.getvalue()
+    assert "secret" not in got and "salt" not in got and "pw@" not in got, got
+    assert got == "Traceback: RuntimeError: http://navi:4533/… went away\nnext line\ntail http://navi/…", got
+
+
+def t_one_shot_mode_puts_its_stderr_through_the_redaction():
+    import io
+    saved = sys.argv, sys.stdin, sys.stdout, sys.stderr
+    try:
+        sys.argv = ["analyze_worker.py", "--whole-file"]
+        sys.stdin = io.StringIO('{"facets": ["loudness", "head"], "url": "http://navi/stream"}\n')
+        sys.stdout = io.StringIO()
+        aw.main()
+        installed = isinstance(sys.stderr, aw.RedactingStream)
+    finally:
+        sys.argv, sys.stdin, sys.stdout, sys.stderr = saved
+    assert installed
 
 
 # ── edge scanner ────────────────────────────────────────────────────────────
@@ -205,7 +295,7 @@ def t_both_facets_share_one_decode():
     assert calls == [("http://navi/stream", True, True)], calls
     assert out["loudness"] == {"status": "ok", "data": {
         "loudness_lufs": -12.3, "peak_db": 0.3, "sample_peak_db": -0.4, "lra_lu": 6.1,
-        "loudness_version": aw.WHOLE_FILE_LOUDNESS_VERSION}}, out
+        "loudness_curve_unavailable": "no-frames", "loudness_version": aw.WHOLE_FILE_LOUDNESS_VERSION}}, out
     assert out["edges"] == {"status": "ok", "data": {
         "edge_lead_ms": 500, "edge_tail_ms": 1000, "decoded_duration_ms": 200000}}, out
 
@@ -309,10 +399,10 @@ def t_window_loudness_is_kept_without_a_whole_file_source():
 
 # ── end to end (ffmpeg) ─────────────────────────────────────────────────────
 
-def write_wav(path, buf, sr):
+def write_wav(path, buf, sr, channels=2):
     pcm = np.clip(buf, -1.0, 1.0)
     with wave.open(path, "wb") as w:
-        w.setnchannels(2)
+        w.setnchannels(channels)
         w.setsampwidth(2)
         w.setframerate(sr)
         w.writeframes(b"".join(struct.pack("<h", int(round(v * 32767))) for v in pcm))
@@ -336,6 +426,36 @@ def t_real_ffmpeg_decodes_once_and_measures_both():
     assert loud["sample_peak_db"] <= loud["true_peak_db"] + 0.05, loud
 
 
+def t_real_ffmpeg_judges_a_mono_files_edges_as_it_airs():
+    # Liquidsoap 2.4.6 airs a mono file at 0.707 a side (a mono FLAC, MP3 or
+    # WAV peaking at -24.1 dBFS airs at -27.1 on each side), and `-ac 2`
+    # upmixes it the same way: the edges are judged on what a listener hears.
+    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+        print("      (skipped: no ffmpeg/ffprobe on PATH)")
+        return
+    sr = 44100
+    t = np.arange(2 * sr, dtype=np.float64) / sr
+
+    def edges(level_db, channels):
+        tone = amp_db(level_db) * np.sin(2 * np.pi * 441.0 * t)
+        mono = np.concatenate([np.zeros(sr), tone, np.zeros(sr)]).astype(np.float32)
+        buf = mono if channels == 1 else np.stack([mono, mono], axis=1).reshape(-1) * (10 ** (-3.0103 / 20))
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "x.wav")
+            write_wav(path, buf, sr, channels=channels)
+            return aw.measure_whole_file(path, loudness=False, edges_wanted=True, timeout_s=60)["edges"]
+
+    # 1.5 dB over the floor in the file airs 1.5 dB under it: silent on air.
+    assert edges(aw.SILENCE_DBFS + 1.5, 1) == (None, None, 4000), edges(aw.SILENCE_DBFS + 1.5, 1)
+    # 4.5 dB over airs 1.5 dB over: heard, from 1 s to 3 s.
+    lead, tail, dur = edges(aw.SILENCE_DBFS + 4.5, 1)
+    assert dur == 4000 and 1000 <= lead <= 1002 and 999 <= tail <= 1001, (lead, tail, dur)
+    # The same as the stereo file Liquidsoap makes of it (16-bit rounding apart).
+    assert edges(aw.SILENCE_DBFS + 1.5, 2) == (None, None, 4000)
+    upmixed = edges(aw.SILENCE_DBFS + 4.5, 2)
+    assert upmixed[2] == 4000 and abs(upmixed[0] - lead) <= 1 and abs(upmixed[1] - tail) <= 1, (upmixed, lead, tail)
+
+
 # ── the loudness curve (ebur128 per-frame short-term) ──────────────────────
 
 def frame_line(t, s):
@@ -348,18 +468,29 @@ def frames_text(series):
     return "\n".join(frame_line(t - 0.0000227, s) for t, s in series)
 
 
+def frames_of(text):
+    """{index: tenths} of every per-frame line in `text`, through the worker's
+    one parser of a frame line (FfmpegLog applies it a line at a time)."""
+    frames = {}
+    for line in (text or "").splitlines():
+        frame = aw.parse_ebur128_frame(line)
+        if frame is not None:
+            frames[frame[0]] = frame[1]
+    return frames
+
+
 def t_curve_frames_parse_t_and_short_term_and_floor_silence():
     text = frames_text([(0.1, -120.7), (2.9, -120.7), (3.0, -21.8), (3.1, -21.84)])
     text += "\n[Parsed_ebur128_0 @ 0x1] t: 3.2  TARGET:-23 LUFS    M:   nan S:  -inf     I: -21.9 LUFS"
     text += "\n" + SUMMARY  # the summary block is never read as a frame
-    got = aw.parse_ebur128_frames(text)
+    got = frames_of(text)
     assert got == {1: -1000, 29: -1000, 30: -218, 31: -218, 32: -1000}, got
 
 
 def t_curve_whole_head_and_tail_series():
     # 2 s of silence, music to 120 s, then 60 s of silence (a long silent tail).
     series = [(i / 10.0, -120.7 if i < 50 or i > 1200 else -14.0 - (i % 7) / 10.0) for i in range(1, 1801)]
-    curve = aw.loudness_curve_from_frames(aw.parse_ebur128_frames(frames_text(series)))
+    curve = aw.loudness_curve_from_frames(frames_of(frames_text(series)))
     whole, head, tail = curve["whole"], curve["head"], curve["tail"]
     assert (whole["startMs"], whole["stepMs"], len(whole["lufs"])) == (3000, 1000, 178), whole
     assert whole["lufs"][0] == -1000 and whole["lufs"][3] in range(-146, -139), whole["lufs"][:5]
@@ -372,7 +503,7 @@ def t_curve_whole_head_and_tail_series():
 
 
 def t_curve_edge_cases():
-    assert aw.loudness_curve_from_frames({}) is None, "no frame line at all: stays due"
+    assert aw.loudness_curve_from_frames({}) is None, "no frame line at all: no curve"
     short = aw.loudness_curve_from_frames({1: -200, 20: -200})
     assert short == {"whole": {"startMs": 3000, "stepMs": 1000, "lufs": []}}, short
     silent = aw.loudness_curve_from_frames({i: -1000 for i in range(1, 100)})
@@ -387,6 +518,7 @@ def t_curve_rides_the_loudness_answer():
     with Patched(measure_whole_file=fake):
         got = aw.whole_file_facets("http://navi/stream", ["loudness"])
     assert got["loudness"]["data"]["loudness_curve"]["whole"]["lufs"] == [-120], got
+    assert "loudness_curve_unavailable" not in got["loudness"]["data"], got
 
 
 def t_real_ffmpeg_prints_the_curve():
@@ -439,7 +571,7 @@ def t_real_ffmpeg_caps_the_rate_so_ultrasonic_noise_reads_as_silence():
 
 
 def t_probe_failure_measures_the_file_as_it_is():
-    assert aw.probe_audio_format("/nonexistent/file.flac") == (None, None)
+    assert aw.probe_audio_format("/nonexistent/file.flac") == (None, None, None)
 
 
 def t_real_ffmpeg_measures_a_surround_file_as_its_stereo_downmix():
@@ -449,6 +581,11 @@ def t_real_ffmpeg_measures_a_surround_file_as_its_stereo_downmix():
     if not shutil.which("ffmpeg"):
         print("      (skipped: no ffmpeg on PATH)")
         return
+    try:
+        import soundfile as sf  # the analyzer image has it; npm test's shim installs only numpy
+    except ImportError:
+        print("      (skipped: no soundfile)")
+        return
     sr = 96000
     t = np.arange(4 * sr, dtype=np.float64) / sr
     amp = amp_db(-12.0)
@@ -457,14 +594,13 @@ def t_real_ffmpeg_measures_a_surround_file_as_its_stereo_downmix():
         stereo_ref = os.path.join(d, "ref.wav")
         chans = [amp * np.sin(2 * np.pi * f * t) for f in (300.0, 500.0, 700.0, 60.0, 900.0, 1100.0)]
         six = np.stack(chans, axis=1).astype(np.float32)
-        import soundfile as sf  # the analyzer image has it (the worker's tail path reads with it)
         sf.write(src, six, sr, subtype="FLOAT")
         # The air: L = FL + 0.707 FC + 0.707 BL, R = FR + 0.707 FC + 0.707 BR.
         k = 0.7071067811865476
         left = chans[0] + k * chans[2] + k * chans[4]
         right = chans[1] + k * chans[2] + k * chans[5]
         sf.write(stereo_ref, np.stack([left, right], axis=1).astype(np.float32), sr, subtype="FLOAT")
-        assert aw.probe_audio_format(src) == (sr, 6)
+        assert aw.probe_audio_format(src)[:2] == (sr, 6)
         got = aw.measure_whole_file(src, loudness=True, edges_wanted=True, timeout_s=60)
         ref = aw.measure_whole_file(stereo_ref, loudness=True, edges_wanted=True, timeout_s=60)
     assert abs(got["loudness"]["loudness_lufs"] - ref["loudness"]["loudness_lufs"]) < 0.15, (got["loudness"], ref["loudness"])
@@ -506,6 +642,198 @@ def t_window_loudness_measures_a_surround_decode_as_its_stereo_downmix():
     assert aw.stereo_downmix(stereo) is stereo
 
 
+# ── an input that ends early ────────────────────────────────────────────────
+
+def t_probe_reads_the_streams_length_and_distrusts_an_estimate():
+    out = '{"streams": [{"sample_rate": "44100", "channels": 2, "duration": "60.000000"}], "format": {"duration": "61.5"}}'
+    assert aw.parse_probe(out) == (44100, 2, 60000)
+    no_stream_len = '{"streams": [{"sample_rate": "48000", "channels": 1}], "format": {"duration": "61.5"}}'
+    assert aw.parse_probe(no_stream_len) == (48000, 1, 61500), "the container's length stands in"
+    guessed = "[mp3 @ 0x1] Estimating duration from bitrate, this may be inaccurate\n"
+    assert aw.parse_probe(out, guessed) == (44100, 2, None), "a length guessed from the bitrate judges nothing"
+    assert aw.parse_probe("not json") == (None, None, None)
+    assert aw.parse_probe('{"streams": [{"duration": "N/A"}]}') == (None, None, None)
+
+
+def t_a_decode_well_short_of_the_header_is_cut_off():
+    assert aw.decoded_short_of(240_000, 120_000)
+    assert aw.decoded_short_of(60_000, 54_000), "6 s short of a minute"
+    assert not aw.decoded_short_of(60_000, 59_950), "encoder padding is milliseconds"
+    assert not aw.decoded_short_of(60_000, 56_000), "under the 5 s floor"
+    assert aw.decoded_short_of(25_200_000, 24_500_000), "12 min short of a 7 h set"
+    assert not aw.decoded_short_of(25_200_000, 24_800_000), "under 2 % of a 7 h set"
+    assert not aw.decoded_short_of(None, 1000) and not aw.decoded_short_of(60_000, None)
+    assert not aw.decoded_short_of(102_900, 133_600), "a decode LONGER than the tag is the file playing on"
+
+
+NAVI = "http://navi:4533/rest/stream?u=dj&t=secret"
+
+
+def t_log_flags_an_input_that_ended_early():
+    log = feed_log(STDERR_HEAD + "[http @ 0x5] Stream ends prematurely at 469387, should be 938774\n"
+                   f"{NAVI}: Input/output error\n" + SUMMARY, NAVI)
+    assert log.input_error == "[http @ 0x5] Stream ends prematurely at 469387, should be 938774", log.input_error
+    assert not log.length_unknown
+    # ffmpeg 5.1 names the input; 6.1 on prefixes the demuxer like any message.
+    io = feed_log(f"{NAVI}: Input/output error\n", NAVI)
+    assert io.input_error == "http://navi:4533/… Input/output error", io.input_error
+    io6 = feed_log("[in#0/flac @ 0x7] Error during demuxing: Input/output error\n", NAVI)
+    assert io6.input_error == "[in#0/flac @ 0x7] Error during demuxing: Input/output error", io6.input_error
+    assert feed_log(STDERR_HEAD + SUMMARY, NAVI).input_error is None
+    # A server that sent no Content-Length: even a complete read ends this way
+    # (ffmpeg 5.1 expects 2^64 - 1 bytes), so the length check judges it.
+    unknown = feed_log("[http @ 0x5] Stream ends prematurely at 938774, should be 18446744073709551615\n"
+                       f"{NAVI}: Input/output error\n" + SUMMARY, NAVI)
+    assert unknown.input_error is None and unknown.length_unknown, unknown.input_error
+    reset = feed_log("[http @ 0x5] Stream ends prematurely at 1, should be 18446744073709551615\n"
+                     "[tcp @ 0x6] Connection reset by peer\n", NAVI)
+    assert reset.input_error == "[tcp @ 0x6] Connection reset by peer", reset.input_error
+
+
+def tagged_head(src, tags):
+    """STDERR_HEAD for `src` with `tags` [(key, value)] printed as ffmpeg 5.1
+    dumps them: in the input's Metadata block, then copied to the output's,
+    a multi-line value continued on indented lines."""
+    def block(indent):
+        out = f"{indent}Metadata:\n"
+        for key, value in tags:
+            first, *rest = value.split("\n")
+            out += f"{indent}  {key:<16}: {first}\n"
+            out += "".join(f"{indent}  {'':<16}: {more}\n" for more in rest)
+        return out
+    head = STDERR_HEAD.replace("Input #0, flac, from 'x.flac':\n", f"Input #0, flac, from '{src}':\n" + block("  "))
+    return head.replace("Output #0, f32le, to 'pipe:1':\n", "Output #0, f32le, to 'pipe:1':\n" + block("  "))
+
+
+def t_log_reads_no_read_error_out_of_the_files_tags():
+    # A tag's text is the file's, not news about the read: these failed both
+    # facets on every run, then dropped the track out of every analysis scope.
+    src = "/music/Input/Output Error/01.flac"
+    tags = [("title", "Connection Reset By Peer"), ("comment", "live at the Input/Output Error club"),
+            ("lyrics", "first line\nwhen the connection timed out\nlast line"),
+            ("description", f"{src}: Input/output error")]
+    log = feed_log(tagged_head(src, tags) + SUMMARY, src)
+    assert log.input_error is None, log.input_error
+    assert not log.length_unknown
+    # The same file's real read error is still one.
+    log = feed_log(tagged_head(src, tags) + f"{src}: Input/output error\n" + SUMMARY, src)
+    assert log.input_error == f"{src}: Input/output error", log.input_error
+
+
+def t_log_reads_only_ebur128s_own_summary():
+    # A "Summary:" tag started the capture early: its 40 lines ran out before
+    # the real block, and a non-silent track was stored as silent.
+    filler = [(f"custom_{i}", f"value {i}") for i in range(25)]
+    tags = [("comment", "Summary: a live set"), ("synopsis", "[Parsed_ebur128_0 @ 0x1] Summary:")] + filler
+    frames = frames_text([(i / 10.0, -14.0) for i in range(1, 60)])
+    log = feed_log(tagged_head("x.flac", tags) + frames + "\n" + SUMMARY)
+    got = aw.parse_ebur128_summary(log.summary_text())
+    assert got == {"loudness_lufs": -12.3, "lra_lu": 6.1, "sample_peak_db": -0.4, "true_peak_db": 0.3}, got
+    assert log.summary_text().startswith("[Parsed_ebur128_0 @ 0x55d] Summary:"), log.summary_text()[:80]
+    assert feed_log(tagged_head("x.flac", tags)).summary_text() == "", "a tag alone is no summary"
+
+
+class _Server:
+    """A local music server for one file: /full serves it whole, /cut sends a
+    Content-Length for all of it and drops the connection halfway; /nolen and
+    /nolen-cut send all of it or half, with no length, and close (the two
+    read the same to ffmpeg's log)."""
+
+    def __init__(self, path):
+        import http.server
+        import threading
+        data = open(path, "rb").read()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 — http.server's name
+                mode = self.path.split("?")[0].strip("/")
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                if not mode.startswith("nolen"):
+                    self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data if mode in ("full", "nolen") else data[: len(data) // 2])
+                self.close_connection = True
+
+            def log_message(self, *_a):
+                pass
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def t_real_ffmpeg_fails_a_cut_off_stream_instead_of_measuring_it():
+    # ffmpeg exits 0 on a dropped connection with what it decoded. Stored, half
+    # a track became a whole-file loudness and a decoded length that ended the
+    # track early on air, protected from every later measurement.
+    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+        print("      (skipped: no ffmpeg/ffprobe on PATH)")
+        return
+    sr = 22050
+    with tempfile.TemporaryDirectory() as d:
+        wav = os.path.join(d, "x.wav")
+        write_wav(wav, stereo(0.5, 11.0, 0.5, sr, amp=amp_db(-6.0)), sr)
+        # FLAC: its header carries the length even over a stream with no
+        # Content-Length (a WAV's does not, so ffprobe gives it none there).
+        path = os.path.join(d, "x.flac")
+        import subprocess
+        subprocess.run(["ffmpeg", "-v", "error", "-i", wav, path], check=True)
+        server = _Server(path)
+        try:
+            for mode in ("full", "nolen"):
+                whole = aw.whole_file_facets(f"{server.base}/{mode}?u=dj&t=secret", ["loudness", "edges"])
+                assert whole["edges"]["status"] == "ok" and whole["loudness"]["status"] == "ok", (mode, whole)
+                assert abs(whole["edges"]["data"]["decoded_duration_ms"] - 12000) <= 25, (mode, whole)
+            for mode, says in (("cut", "prematurely"), ("nolen-cut", "decoded")):
+                got = aw.whole_file_facets(f"{server.base}/{mode}?u=dj&t=secret", ["loudness", "edges"])
+                for facet in ("loudness", "edges"):
+                    assert got[facet]["status"] == "failed", (mode, got)
+                    reason = got[facet]["reason"]
+                    assert "ended early" in reason and says in reason, (mode, reason)
+                    assert "secret" not in reason, (mode, reason)
+        finally:
+            server.close()
+
+
+def t_real_ffmpeg_measures_a_file_whose_tags_read_like_its_log():
+    # On the analyzer image's ffmpeg 5.1 the first two failed both facets
+    # ("the input ended early: title : Connection Reset By Peer"), and the
+    # third stored the tone as a silent file.
+    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+        print("      (skipped: no ffmpeg/ffprobe on PATH)")
+        return
+    import subprocess
+    sr = 44100
+    cases = {
+        "reset": [("title", "Connection Reset By Peer")],
+        "io": [("comment", "live at the Input/Output Error club")],
+        "summary": [("comment", "Summary: a live set")] + [(f"custom_{i}", f"value {i}") for i in range(25)],
+    }
+    with tempfile.TemporaryDirectory() as d:
+        wav = os.path.join(d, "x.wav")
+        write_wav(wav, stereo(0.5, 3.0, 0.5, sr, amp=amp_db(-12.0)), sr)
+        plain = os.path.join(d, "plain.flac")
+        subprocess.run(["ffmpeg", "-v", "error", "-i", wav, plain], check=True)
+        want = aw.whole_file_facets(plain, ["loudness", "edges"])
+        assert want["loudness"]["status"] == "ok" and want["edges"]["status"] == "ok", want
+        for name, tags in cases.items():
+            path = os.path.join(d, f"{name}.flac")
+            cmd = ["ffmpeg", "-v", "error", "-i", wav]
+            for key, value in tags:
+                cmd += ["-metadata", f"{key}={value}"]
+            subprocess.run(cmd + [path], check=True)
+            got = aw.whole_file_facets(path, ["loudness", "edges"])
+            assert got["loudness"]["status"] == "ok" and got["edges"]["status"] == "ok", (name, got)
+            for k in ("loudness_lufs", "peak_db", "sample_peak_db", "lra_lu"):
+                assert got["loudness"]["data"][k] == want["loudness"]["data"][k], (name, k, got)
+            assert got["edges"]["data"] == want["edges"]["data"], (name, got)
+
+
 def t_real_ffmpeg_failure_raises_with_the_reason():
     if not shutil.which("ffmpeg"):
         print("      (skipped: no ffmpeg on PATH)")
@@ -520,6 +848,41 @@ def t_real_ffmpeg_failure_raises_with_the_reason():
             assert "ffmpeg exited" in str(e), e
             return
     raise AssertionError("garbage decoded")
+
+
+def t_real_ffmpeg_measures_a_file_short_of_its_own_header():
+    # A FLAC cut short on disk keeps its header's length. Its decode is the
+    # file, and what airs: failed as "ended early", it was re-read every run,
+    # then dropped out of every analysis scope. Read locally or with a
+    # Content-Length, every byte arrived, so it is measured; only a read of
+    # unknown length cannot tell it from a cut stream.
+    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+        print("      (skipped: no ffmpeg/ffprobe on PATH)")
+        return
+    import subprocess
+    sr = 22050
+    with tempfile.TemporaryDirectory() as d:
+        wav = os.path.join(d, "x.wav")
+        write_wav(wav, stereo(0.5, 11.0, 0.5, sr, amp=amp_db(-6.0)), sr)
+        full = os.path.join(d, "full.flac")
+        subprocess.run(["ffmpeg", "-v", "error", "-i", wav, full], check=True)
+        data = open(full, "rb").read()
+        short = os.path.join(d, "short.flac")
+        with open(short, "wb") as f:
+            f.write(data[: len(data) // 2])
+        local = aw.whole_file_facets(short, ["loudness", "edges"])
+        assert local["edges"]["status"] == "ok" and local["loudness"]["status"] == "ok", local
+        decoded = local["edges"]["data"]["decoded_duration_ms"]
+        assert 4000 < decoded < 8000, decoded
+        server = _Server(short)
+        try:
+            known = aw.whole_file_facets(f"{server.base}/full?u=dj&t=secret", ["loudness", "edges"])
+            assert known["edges"]["status"] == "ok" and known["loudness"]["status"] == "ok", known
+            assert known["edges"]["data"]["decoded_duration_ms"] == decoded, known
+            unknown = aw.whole_file_facets(f"{server.base}/nolen?u=dj&t=secret", ["loudness", "edges"])
+            assert unknown["edges"]["status"] == "failed" and "decoded" in unknown["edges"]["reason"], unknown
+        finally:
+            server.close()
 
 
 # ── one-shot mode (the sidecar's whole-file lane) ───────────────────────────

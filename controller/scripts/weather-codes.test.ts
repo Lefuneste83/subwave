@@ -11,9 +11,37 @@ import {
   buildOutlook,
   outlookEvents,
   outlookNotes,
+  withdrawnNote,
+  isWeatherCondition,
+  OUTLOOK_HOURS,
+  WEATHER_CONDITIONS,
   type HourlyForecast,
   type OutlookHour,
 } from '../src/weather-codes.js';
+
+describe('the outlook window and the six conditions', () => {
+  it('buildOutlook defaults to OUTLOOK_HOURS, the one six-hour window', () => {
+    assert.equal(OUTLOOK_HOURS, 6);
+    const hourly: HourlyForecast = {
+      time: Array.from({ length: 12 }, (_, i) => `2026-11-01T${String(10 + i).padStart(2, '0')}:00`),
+      weather_code: Array(12).fill(3),
+    };
+    assert.equal(Math.max(...buildOutlook(hourly, '2026-11-01T10:00').map(r => r.inHours)), OUTLOOK_HOURS);
+  });
+
+  it('isWeatherCondition accepts the six conditions and nothing else', () => {
+    for (const c of WEATHER_CONDITIONS) assert.equal(isWeatherCondition(c), true, c);
+    for (const v of ['unknown', 'windy', '', null, undefined, 3]) assert.equal(isWeatherCondition(v), false, String(v));
+  });
+});
+
+describe('withdrawnNote', () => {
+  it('names what is no longer coming, over the one outlook window', () => {
+    assert.deepEqual(withdrawnNote('rain'), { kind: 'rain-withdrawn', text: 'rain no longer expected in the next 6 hours' });
+    assert.deepEqual(withdrawnNote('snow'), { kind: 'snow-withdrawn', text: 'snow no longer expected in the next 6 hours' });
+    assert.deepEqual(withdrawnNote('storm'), { kind: 'storm-withdrawn', text: 'thunderstorms no longer expected in the next 6 hours' });
+  });
+});
 
 describe('conditionForCode', () => {
   it('maps known WMO codes', () => {
@@ -187,6 +215,30 @@ describe('outlookNotes', () => {
     assert.deepEqual(outlookNotes({ condition: 'cloudy', temp: 12 }, at(50)), ['rain likely in about 2 hours (50% chance)']);
   });
 
+  // A low-chance drizzle row first must not hide a likely downpour behind it:
+  // the note names the first likely row, and falls back to the first wet one.
+  it('names the first likely row before the first merely wet one', () => {
+    const rows: OutlookHour[] = [
+      { inHours: 1, condition: 'rainy', conditions: 'light drizzle', temp: 12, rainChancePct: 10 },
+      { inHours: 2, condition: 'cloudy', conditions: 'overcast', temp: 12, rainChancePct: 30 },
+      { inHours: 3, condition: 'rainy', conditions: 'heavy rain', temp: 12, rainChancePct: 90 },
+    ];
+    assert.deepEqual(outlookEvents({ condition: 'cloudy', temp: 12 }, rows), [
+      { kind: 'rain-likely', text: 'rain likely in about 3 hours (90% chance)' },
+    ]);
+    // A likely thunderstorm behind a possible shower is the thunderstorm.
+    assert.deepEqual(outlookNotes({ condition: 'clear', temp: 20 }, [
+      { inHours: 1, condition: 'rainy', conditions: 'light rain showers', temp: 20, rainChancePct: 20 },
+      { inHours: 4, condition: 'stormy', conditions: 'thunderstorm', temp: 20, rainChancePct: 70 },
+    ]), ['thunderstorms likely in about 4 hours (70% chance)']);
+    // Nothing likely anywhere: the first wet row, as a possibility.
+    assert.deepEqual(outlookNotes({ condition: 'cloudy', temp: 12 }, [
+      { inHours: 1, condition: 'cloudy', conditions: 'overcast', temp: 12, rainChancePct: 40 },
+      { inHours: 2, condition: 'rainy', conditions: 'light drizzle', temp: 12, rainChancePct: 10 },
+      { inHours: 5, condition: 'rainy', conditions: 'rain', temp: 12, rainChancePct: 45 },
+    ]), ['light drizzle possible in about 2 hours']);
+  });
+
   it('names a likely snow row snow, and is silent about snow while it snows', () => {
     const rows: OutlookHour[] = [
       { inHours: 2, condition: 'snowy', conditions: 'light snow', temp: -1, rainChancePct: 80 },
@@ -271,5 +323,79 @@ describe('outlookNotes', () => {
 
   it('returns [] for empty outlook', () => {
     assert.deepEqual(outlookNotes({ condition: 'clear', temp: 20 }, []), []);
+  });
+});
+
+describe('outlookEvents: rows the code calls dry, and snow', () => {
+  const row = (r: Partial<OutlookHour>): OutlookHour =>
+    ({ inHours: 1, condition: 'cloudy', conditions: 'overcast', temp: 8, rainChancePct: 0, ...r });
+
+  it('never calls a row rain when its code is dry: it keeps its own wording', () => {
+    // The review's probe: clear sky at 60% used to read "rain likely in about 1 hour (60% chance)".
+    const clear = outlookEvents({ condition: 'cloudy', temp: 5 },
+      [row({ condition: 'clear', conditions: 'clear sky', temp: 5, rainChancePct: 60 })]);
+    assert.deepEqual(clear, [{ kind: 'precip-likely', text: 'clear sky in about 1 hour, with a 60% chance of precipitation' }]);
+    const overcast = outlookEvents({ condition: 'clear', temp: 8 }, [row({ rainChancePct: 55 })]);
+    assert.deepEqual(overcast, [{ kind: 'precip-likely', text: 'overcast in about 1 hour, with a 55% chance of precipitation' }]);
+    for (const note of [...clear, ...overcast]) assert.doesNotMatch(note.text, /rain/);
+  });
+
+  it('calls that precipitation snow at or below freezing, in the reading\'s unit', () => {
+    // The review's second probe: -2 °C used to read "rain likely … (70% chance)".
+    const at = (temp: number, tempUnit?: string) =>
+      outlookEvents({ condition: 'cloudy', temp, tempUnit }, [row({ temp, rainChancePct: 70 })]).map(n => n.text);
+    assert.deepEqual(at(-2), ['overcast in about 1 hour, with a 70% chance of snow']);
+    assert.deepEqual(at(0), ['overcast in about 1 hour, with a 70% chance of snow']);
+    assert.deepEqual(at(1), ['overcast in about 1 hour, with a 70% chance of precipitation']);
+    assert.deepEqual(at(32, 'F'), ['overcast in about 1 hour, with a 70% chance of snow']);
+    assert.deepEqual(at(33, 'F'), ['overcast in about 1 hour, with a 70% chance of precipitation']);
+    assert.equal(outlookEvents({ condition: 'cloudy', temp: -2 }, [row({ temp: -2, rainChancePct: 70 })])[0].kind, 'snow-likely');
+  });
+
+  it('gives a snow row with a low or unknown chance a "possible" note, as drizzle gets one', () => {
+    assert.deepEqual(
+      outlookEvents({ condition: 'cloudy', temp: 0 }, [row({ condition: 'snowy', conditions: 'snow', temp: 0, rainChancePct: 30 })]),
+      [{ kind: 'snow-possible', text: 'snow possible in about 1 hour' }],
+    );
+    assert.deepEqual(
+      outlookEvents({ condition: 'cloudy', temp: 0 }, [row({ condition: 'snowy', conditions: 'light snow', temp: 0, rainChancePct: null })]),
+      [{ kind: 'snow-possible', text: 'light snow possible in about 1 hour' }],
+    );
+  });
+
+  it('says rain turning to snow, never "drying out"', () => {
+    // The review's probe: rain now, light snow next with no chance data read "drying out in about 1 hour".
+    const snowNext = [1, 2, 3].map(h => row({ inHours: h, condition: 'snowy', conditions: 'light snow', temp: 1, rainChancePct: null }));
+    const notes = outlookEvents({ condition: 'rainy', temp: 1 }, snowNext);
+    assert.deepEqual(notes, [{ kind: 'turning-snow', text: 'possibly turning to snow in about 1 hour' }]);
+    assert.ok(notes.every(n => !/drying/.test(n.text)));
+    assert.deepEqual(
+      outlookNotes({ condition: 'rainy', temp: 1 }, [row({ condition: 'snowy', conditions: 'snow', temp: 0, rainChancePct: 80 })]),
+      ['turning to snow in about 1 hour (80% chance)'],
+    );
+  });
+
+  it('while it snows: rain on the way is a turn, a dry spell is the snow stopping', () => {
+    assert.deepEqual(
+      outlookEvents({ condition: 'snowy', temp: 1 }, [row({ condition: 'rainy', conditions: 'light rain', temp: 2, rainChancePct: 65 })]),
+      [{ kind: 'turning-rain', text: 'turning to rain in about 1 hour (65% chance)' }],
+    );
+    assert.deepEqual(
+      outlookEvents({ condition: 'snowy', temp: -1 }, [
+        row({ inHours: 1, condition: 'snowy', conditions: 'snow', temp: -1, rainChancePct: 90 }),
+        row({ inHours: 2, condition: 'cloudy', conditions: 'overcast', temp: -1, rainChancePct: 10 }),
+      ]),
+      [{ kind: 'drying', text: 'the snow stopping in about 2 hours' }],
+    );
+  });
+
+  it('keeps rain and thunderstorms one kind of wet: no turn between them', () => {
+    assert.deepEqual(
+      outlookNotes({ condition: 'stormy', temp: 20 }, [
+        row({ inHours: 1, condition: 'rainy', conditions: 'rain', temp: 20, rainChancePct: 80 }),
+        row({ inHours: 2, condition: 'cloudy', conditions: 'overcast', temp: 20, rainChancePct: 10 }),
+      ]),
+      ['drying out in about 2 hours'],
+    );
   });
 });

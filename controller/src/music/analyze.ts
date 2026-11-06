@@ -220,6 +220,9 @@ export async function wholeFileBackfillPlan(limit?: number, ids?: readonly strin
   if (!config.analyzer.wholeFile) return null;
   const facets = [...db.WHOLE_FILE_FACETS];
   const available = await analyzer.isAvailable().catch(() => false);
+  // An unknown answer can be a probe that reached the sidecar while its pool
+  // was still starting (remembered until restart): ask once more first.
+  if (available && analyzer.wholeFileAvailable() == null) await analyzer.refreshCapabilities().catch(() => {});
   // An automatic widening needs POSITIVE support, like the tail-vocal one: an
   // analyzer that predates the facets never says so, and sending them anyway
   // fails every request. An explicit `--facets` run still plans on unknown.
@@ -238,6 +241,17 @@ export async function wholeFileBackfillPlan(limit?: number, ids?: readonly strin
 // it came from.
 function hasMeasuredTail(t: { outro?: unknown; tailSilenceMs?: number | null } | null): boolean {
   return !!t && (t.outro != null || t.tailSilenceMs != null);
+}
+
+// Why the opt-in backfill planned nothing for tracks that need it. Only an
+// analyzer that SAYS it cannot run the facets is known to lack them; one that
+// has not said is either an image that predates them or one whose workers had
+// not started when it was asked, and is asked again next run.
+export function wholeFileSkipNotice(capability: boolean | null): string {
+  return capability === false
+    ? 'Whole-file analysis is on, but the analyzer reports it cannot run it (no ffmpeg in its image) — rebuild the analyzer'
+    : 'Whole-file analysis is on, but the analyzer has not said whether it can run it — an image that predates it ' +
+      '(rebuild the analyzer), or one whose workers were still starting; skipped this run, asked again next run';
 }
 
 export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<AnalyzeStats> {
@@ -371,7 +385,7 @@ async function runWholeFileBackfillOnce(
   if (!plan) return null;
   const skipped = plan.byFacet.reduce((n, c) => n + (c.skipped['no-whole-file'] ?? 0), 0);
   if (skipped > 0 && plan.items.length === 0) {
-    logEvent('warning', 'Whole-file analysis is on, but the analyzer does not offer it (no ffmpeg, or an image that predates it) — rebuild the analyzer');
+    logEvent('warning', wholeFileSkipNotice(analyzer.wholeFileAvailable()));
     return null;
   }
   if (plan.items.length === 0) return null;
@@ -806,10 +820,18 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
           leadSilenceMs: r.leadSilenceMs,
         };
       } else if (f === 'loudness') {
+        // A whole-file answer is one measurement: integrated loudness, true
+        // peak, sample peak and LRA are stored together or not at all.
+        if (db.isWholeFileLoudnessVersion(r.loudnessVersion) &&
+          [r.loudnessLufs, r.peakDb, r.samplePeakDb, r.loudnessRangeLu].some((v) => v == null)) {
+          failures.push(db.facetFailure(f, 'incomplete whole-file loudness answer'));
+          continue;
+        }
         w.loudness = {
           loudnessLufs: r.loudnessLufs, peakDb: r.peakDb,
           samplePeakDb: r.samplePeakDb ?? null, loudnessRangeLu: r.loudnessRangeLu ?? null,
           version: r.loudnessVersion ?? null, curve: r.wholeLoudnessCurve ?? null,
+          curveUnavailable: r.loudnessCurveUnavailable ?? null,
         };
       } else if (f === 'edges') {
         if (r.edgeLeadMs == null || r.edgeTailMs == null || r.decodedDurationMs == null) {

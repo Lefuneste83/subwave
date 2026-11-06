@@ -89,6 +89,10 @@ export interface AnalysisResult {
   loudnessRangeLu?: number | null;
   // The same pass's short-term loudness curve (whole-loudness-curve.ts).
   wholeLoudnessCurve?: WholeLoudnessCurve | null;
+  // Why a whole-file answer has no curve, when the analyzer ran and had none
+  // to give: its own reason, or 'rejected' for one this controller's parser
+  // refuses. null for an analyzer that predates the curve (it says nothing).
+  loudnessCurveUnavailable?: string | null;
   edgeLeadMs?: number | null;
   edgeTailMs?: number | null;
   decodedDurationMs?: number | null;
@@ -263,6 +267,7 @@ interface WorkerMessage {
   // that predate it.
   loudness_curve_capable?: boolean;
   loudness_curve?: unknown;
+  loudness_curve_unavailable?: unknown;
   loudness_version?: unknown;
   sample_peak_db?: unknown;
   lra_lu?: unknown;
@@ -454,6 +459,7 @@ export function flatTailOpts(songId: string, tw: TailWindow | null): Pick<Analyz
 // The flat field names (worker message, sidecar body, facet `data`) mapped to
 // an AnalysisResult; absent fields read null.
 function toAnalysisResult(msg: WorkerMessage): AnalysisResult {
+  const curve = msg.loudness_curve == null ? null : parseWholeLoudnessCurve(msg.loudness_curve);
   return {
           bpm: msg.bpm ?? null,
           musicalKey: msg.key ?? null,
@@ -476,7 +482,10 @@ function toAnalysisResult(msg: WorkerMessage): AnalysisResult {
           loudnessVersion: parseFinite(msg.loudness_version),
           samplePeakDb: parseFinite(msg.sample_peak_db),
           loudnessRangeLu: parseFinite(msg.lra_lu),
-          wholeLoudnessCurve: msg.loudness_curve == null ? null : parseWholeLoudnessCurve(msg.loudness_curve),
+          wholeLoudnessCurve: curve,
+          loudnessCurveUnavailable: curve ? null
+            : msg.loudness_curve != null ? 'rejected'
+            : typeof msg.loudness_curve_unavailable === 'string' ? msg.loudness_curve_unavailable : null,
           edgeLeadMs: parseSilenceMs(msg.edge_lead_ms),
           edgeTailMs: parseSilenceMs(msg.edge_tail_ms),
           decodedDurationMs: parseSilenceMs(msg.decoded_duration_ms),
@@ -1303,12 +1312,14 @@ async function facetRequest(
 ): Promise<FacetAnalysis> {
   const backend = await resolveBackend();
   if (!backend) throw new Error('no analysis backend available');
-  // Fork: a request that reads the whole file gets the whole-file deadline, and
-  // a caller's own deadline (a pick-time separation's) only ever lengthens it.
-  const base = readsStream(body)
-    ? Math.max(config.analyzer.requestTimeoutMs, config.analyzer.wholeFileTimeoutMs)
-    : config.analyzer.requestTimeoutMs;
-  const timeoutMs = Math.max(base, deadlineMs ?? 0);
+  // A request that reads the whole file (or, on the fork, streams a ranged tail
+  // window) gets the whole-file deadline, which a caller's own deadline can only
+  // lengthen. Any other request keeps the caller's deadline as given, shorter
+  // than the pass's included (a pick-time separation's own budget, and the tests
+  // that shorten it), else the pass's.
+  const timeoutMs = readsStream(body)
+    ? Math.max(config.analyzer.requestTimeoutMs, config.analyzer.wholeFileTimeoutMs, deadlineMs ?? 0)
+    : deadlineMs ?? config.analyzer.requestTimeoutMs;
   let msg: WorkerMessage;
   if (backend === 'sidecar') {
     const res = await fetchWithTimeout(`${_sidecarBase}/analyze`, {

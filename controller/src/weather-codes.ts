@@ -5,7 +5,16 @@
 // stays the six-word vocabulary settings.weatherMoods keys on; `describeCode`
 // gives the forecast's own wording for what is spoken.
 
-export type WeatherCondition = 'clear' | 'cloudy' | 'foggy' | 'rainy' | 'snowy' | 'stormy';
+export const WEATHER_CONDITIONS = ['clear', 'cloudy', 'foggy', 'rainy', 'snowy', 'stormy'] as const;
+export type WeatherCondition = typeof WEATHER_CONDITIONS[number];
+
+export function isWeatherCondition(v: unknown): v is WeatherCondition {
+  return typeof v === 'string' && (WEATHER_CONDITIONS as readonly string[]).includes(v);
+}
+
+// How far ahead the weather skill looks: the one number the fetch's row count
+// (context.ts), buildOutlook's window and the "no longer expected" note share.
+export const OUTLOOK_HOURS = 6;
 
 const DESCRIPTIONS: Record<number, string> = {
   0: 'clear sky', 1: 'mainly clear', 2: 'partly cloudy', 3: 'overcast',
@@ -82,7 +91,7 @@ const HOUR_MS = 3_600_000;
 export function buildOutlook(
   hourly: HourlyForecast | null | undefined,
   currentTime: string,
-  hours = 6,
+  hours = OUTLOOK_HOURS,
   elapsedMs = 0,
 ): OutlookHour[] {
   if (!hourly || !Array.isArray(hourly.time)) return [];
@@ -120,8 +129,22 @@ export function buildOutlook(
   return result;
 }
 
-function isWet(cond: string): boolean {
-  return cond === 'rainy' || cond === 'stormy';
+// Falling weather, snow included: a snowy row is neither dry nor "drying out".
+export function isWet(cond: string): boolean {
+  return cond === 'rainy' || cond === 'stormy' || cond === 'snowy';
+}
+
+// Rain and thunderstorms are one kind of wet, snow the other; a change between
+// them is news, a change within one is not.
+function wetKind(cond: string): 'rain' | 'snow' {
+  return cond === 'snowy' ? 'snow' : 'rain';
+}
+
+// Cold enough that precipitation would fall as snow: at or below freezing, in
+// the reading's own unit. Used only for a row whose code names no
+// precipitation, since a wet code already says which it is.
+function isFreezing(temp: number | null, unit: 'C' | 'F'): boolean {
+  return temp !== null && temp <= (unit === 'F' ? 32 : 0);
 }
 
 // At or above this chance of precipitation a row is "likely", and only then is
@@ -142,17 +165,35 @@ function swingThreshold(unit: 'C' | 'F'): number {
   return unit === 'F' ? 5 : 3;
 }
 
+// What precipitation an outlook said was on the way, as weather-policy.ts
+// remembers it: rain (drizzle, showers, or a high chance on a dry-code row
+// above freezing), snow, or thunderstorms.
+export type ComingPrecip = 'rain' | 'snow' | 'storm';
+
 export type OutlookNoteKind =
   | 'rain-likely' | 'rain-possible'
-  | 'snow-likely'
+  | 'snow-likely' | 'snow-possible'
   | 'storm-likely' | 'storm-possible'
-  | 'drying' | 'clearing' | 'clouding' | 'warmer' | 'cooler';
+  | 'precip-likely'
+  | 'turning-rain' | 'turning-snow'
+  | 'drying' | 'clearing' | 'clouding' | 'warmer' | 'cooler'
+  // Never from outlookEvents: weather-policy.ts adds one (withdrawnNote) when
+  // precipitation an aired outlook promised is no longer in the forecast.
+  | `${ComingPrecip}-withdrawn`;
 
 export interface OutlookNote {
   // What the note is about, without its timing: an unchanged list of kinds is
   // nothing new to say, however many hours away the rain has moved.
   kind: OutlookNoteKind;
   text: string;
+}
+
+// The note for precipitation an aired outlook promised and the forecast no
+// longer holds anywhere in the window, so the tool never reports a changed
+// outlook with nothing in it to say.
+export function withdrawnNote(what: ComingPrecip): OutlookNote {
+  const word = what === 'storm' ? 'thunderstorms' : what;
+  return { kind: `${what}-withdrawn`, text: `${word} no longer expected in the next ${OUTLOOK_HOURS} hours` };
 }
 
 export interface OutlookCurrent {
@@ -167,13 +208,12 @@ export function outlookEvents(current: OutlookCurrent, outlook: OutlookHour[]): 
   const notes: OutlookNote[] = [];
   const unit: 'C' | 'F' = current.tempUnit === 'F' ? 'F' : 'C';
 
-  // 1. Precipitation coming (current not wet). A row qualifies when its code is
-  //    wet, or its chance clears LIKELY_PCT (Open-Meteo's chance covers snow too,
-  //    so such a row is named by its own condition, never called rain). Snow
-  //    while it is already snowing is not news.
+  // 1. Precipitation coming (current not wet). The first row whose chance
+  //    clears LIKELY_PCT, whatever its code, so a 10% drizzle row in an hour
+  //    cannot hide a 90% downpour in three; failing that, the first row that is
+  //    wet by its code, as a possibility.
   if (!isWet(current.condition)) {
-    const row = outlook.find(r => (isWet(r.condition) || isLikely(r))
-      && !(r.condition === 'snowy' && current.condition === 'snowy'));
+    const row = outlook.find(isLikely) ?? outlook.find(r => isWet(r.condition));
     if (row) {
       const likely = isLikely(row);
       const chance = likely ? ` (${row.rainChancePct}% chance)` : '';
@@ -182,29 +222,46 @@ export function outlookEvents(current: OutlookCurrent, outlook: OutlookHour[]): 
           kind: likely ? 'storm-likely' : 'storm-possible',
           text: `thunderstorms ${likely ? 'likely' : 'possible'} ${when(row.inHours)}${chance}`,
         });
-      } else if (likely) {
-        const snow = row.condition === 'snowy';
-        notes.push({
-          kind: snow ? 'snow-likely' : 'rain-likely',
-          text: `${snow ? 'snow' : 'rain'} likely ${when(row.inHours)}${chance}`,
-        });
+      } else if (isWet(row.condition)) {
+        const kind = wetKind(row.condition);
+        notes.push(likely
+          ? { kind: `${kind}-likely`, text: `${kind} likely ${when(row.inHours)}${chance}` }
+          // Wet by code with a low or unknown chance: the forecast's own
+          // wording, as a possibility, with no percentage.
+          : { kind: `${kind}-possible`, text: `${row.conditions ?? kind} possible ${when(row.inHours)}` });
       } else {
-        // Wet by code with a low or unknown chance: the forecast's own wording,
-        // as a possibility, with no percentage.
+        // A high chance on a row whose code names no precipitation (clear,
+        // cloudy, fog). Open-Meteo's chance covers rain and snow alike, so the
+        // row keeps its own wording and is never called rain: snow when it is
+        // cold enough, else just precipitation.
+        const what = isFreezing(row.temp, unit) ? 'snow' : 'precipitation';
         notes.push({
-          kind: 'rain-possible',
-          text: `${row.conditions ?? 'rain'} possible ${when(row.inHours)}`,
+          kind: what === 'snow' ? 'snow-likely' : 'precip-likely',
+          text: `${row.conditions ?? row.condition} ${when(row.inHours)}, with a ${row.rainChancePct}% chance of ${what}`,
         });
       }
     }
   }
 
-  // 2. Drying out (current wet)
+  // 2. Wet now: when it stops, or when rain turns to snow (or back), whichever
+  //    comes first. A dry row needs a low chance as well as a dry code.
   if (isWet(current.condition)) {
-    const dryRow = outlook.find(
-      r => !isWet(r.condition) && (r.rainChancePct === null || r.rainChancePct < 30),
-    );
-    if (dryRow) notes.push({ kind: 'drying', text: `drying out ${when(dryRow.inHours)}` });
+    const now = wetKind(current.condition);
+    const row = outlook.find(r => isWet(r.condition)
+      ? wetKind(r.condition) !== now
+      : r.rainChancePct === null || r.rainChancePct < 30);
+    if (row && isWet(row.condition)) {
+      const to = wetKind(row.condition);
+      const likely = isLikely(row);
+      notes.push({
+        kind: `turning-${to}`,
+        text: likely
+          ? `turning to ${to} ${when(row.inHours)} (${row.rainChancePct}% chance)`
+          : `possibly turning to ${to} ${when(row.inHours)}`,
+      });
+    } else if (row) {
+      notes.push({ kind: 'drying', text: `${now === 'snow' ? 'the snow stopping' : 'drying out'} ${when(row.inHours)}` });
+    }
   }
 
   // 3. Sky change (current not wet AND no precipitation note produced)
