@@ -384,6 +384,37 @@ test('exportEraCsv: RFC4180 header, quoting, and year_state values', () => {
   assert.equal(era.exportEraCsv(d()).split('\r\n').some(l => l.includes('Normal Album')), false);
 });
 
+test('exportEraCsv: a cell a spreadsheet would run as a formula is prefixed with \'', () => {
+  d().exec(`
+    INSERT INTO tracks (id, title, artist, album, album_artist, era_untrusted, era_reason, year, file_path)
+    VALUES
+      ('fx1', '=HYPERLINK("http://x","y")', 'QA', 'Formula LP', 'QA Artist', 1, 'compilation-flag', 2020, '/m/x/01.flac'),
+      ('fx2', '+1', '-dash', 'Formula LP', 'QA Artist', 1, 'compilation-flag', 2020, '@/m/x/02.flac'),
+      ('fx3', 'Safe = fine', 'QA', 'Formula LP', 'QA Artist', 1, 'compilation-flag', 2020, '/m/x/03.flac');
+  `);
+  const lines = era.exportEraCsv(d()).trimEnd().split('\r\n');
+  const x1 = lines.find(l => l.startsWith('fx1,'))!;
+  const x2 = lines.find(l => l.startsWith('fx2,'))!;
+  const x3 = lines.find(l => l.startsWith('fx3,'))!;
+  assert.ok(x1.includes(`,"'=HYPERLINK(""http://x"",""y"")",`), x1);
+  assert.ok(x2.startsWith(`fx2,'-dash,'+1,`), x2);
+  assert.ok(x2.includes(`,'@/m/x/02.flac,`), x2);
+  assert.ok(x3.includes(',Safe = fine,'), 'only a leading sign is a formula');
+  d().exec(`DELETE FROM tracks WHERE id IN ('fx1','fx2','fx3')`);
+});
+
+test('a walk reads each album record as it reaches it: a decision removed mid-run is not applied', () => {
+  const key = era.albumEraKey('Band M', 'Midrun LP');
+  d().prepare(`INSERT INTO era_override (album_key, verdict, forced_year, set_at) VALUES (?, 'year', 1977, 'now')`).run(key);
+  const lookup = era.liveEraOverrides(d());   // taken when the run starts
+  assert.deepEqual(lookup.get(key), { verdict: 'year', forcedYear: 1977, kind: null });
+  d().prepare(`DELETE FROM era_override WHERE album_key = ?`).run(key);   // the operator's click, mid-run
+  assert.equal(lookup.get(key), null, 'the run sees the removal');
+  const song = { album: 'Midrun LP', albumArtist: 'Band M', artist: 'Band M', isCompilation: false, year: 2012 } as any;
+  const f = era.eraWalkFields(song, lookup);
+  assert.equal(f.forcedYear ?? null, null, 'no year is forced from a removed decision');
+});
+
 // ── (i) one stored verdict for every era reader ──────────────────────────────
 
 
@@ -510,6 +541,17 @@ test('POST /library/era/override trusts, suspects and removes; respond carries {
   assert.equal(res.status, 400);
   res = await post({ albumArtist: 'Band L', verdict: 'trusted' });
   assert.equal(res.status, 400, 'album is required');
+  // One year window for every typed year (schemas/library.ts originalYearMax).
+  const next = new Date().getUTCFullYear() + 1;
+  for (const year of [1899, next + 1, 1977.5, '1977', undefined]) {
+    res = await post({ album: 'Lounging 1970-1975', albumArtist: 'Band L', verdict: 'year', year });
+    assert.equal(res.status, 400, String(year));
+    assert.match(((await res.json()) as any).error, /year must be a whole year between 1900 and /);
+  }
+  res = await post({ album: 'Lounging 1970-1975', albumArtist: 'Band L', verdict: 'year', year: next });
+  assert.equal(res.status, 200, 'next year (a pre-release) is in the window, as for a per-track year');
+  res = await post({ album: 'Lounging 1970-1975', albumArtist: 'Band L', verdict: null });
+  assert.equal(res.status, 200);
 
   // An album no scan has judged since the update has no stored album artist,
   // so an override would key on the wrong pair: refused, nothing written.
