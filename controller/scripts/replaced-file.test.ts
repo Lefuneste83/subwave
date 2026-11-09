@@ -118,6 +118,24 @@ test('a held candidate keeps its old size, so the next walk finds it again', () 
   consistent();
 });
 
+test('a failed year lookup outlives a replaced file: its attempt count is not an audio fact', () => {
+  db.upsertTrackMeta('lookup', { ...meta(1_000), isCompilation: true });
+  db.recordOriginalYearOutcome('lookup', { kind: 'error', reason: 'MusicBrainz HTTP 503' });
+  const year = () => sql(`SELECT status, attempts, at FROM track_facet_status WHERE track_id = 'lookup' AND facet = 'year'`).get() as
+    { status: string; attempts: number; at: string } | undefined;
+  assert.deepEqual([year()?.status, year()?.attempts], ['failed', 1]);
+  sql(`UPDATE track_facet_status SET at = '2026-09-01T00:00:00Z' WHERE track_id = 'lookup' AND facet = 'year'`).run();
+  // Nor is it a measurement: a track with only its year row was never measured.
+  assert.equal(db.lastMeasuredAt('lookup'), null);
+  db.clearTrackAudio('lookup', 2_000);
+  assert.deepEqual([year()?.status, year()?.attempts], ['failed', 1], 'the retry schedule is kept');
+  // Accepting the file restamps its measurements, never the lookup's clock,
+  // which the retry delays count from.
+  db.acceptReplacedFiles(new Map<string, number | null>([['lookup', 2_000]]));
+  assert.equal(year()?.at, '2026-09-01T00:00:00Z');
+  consistent();
+});
+
 test('lastMeasuredAt reads the oldest analysis row: one fresh facet says nothing about the rest', () => {
   measured('when');
   sql(`UPDATE track_facet_status SET at = '2026-10-01T00:00:00Z' WHERE track_id = 'when'`).run();

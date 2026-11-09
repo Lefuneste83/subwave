@@ -6,9 +6,9 @@ import {
   FACETS, SQL_WHOLE_FILE_LOUDNESS, WHOLE_FILE_LOUDNESS_EXTRAS, clearFacetFailures, clearFacetRows,
   isWholeFileLoudnessVersion, restampFacetRows, syncTrackFacets, tailPlacementMoved, type Facet, type FacetSource,
 } from './facets.js';
-import type { OriginalYearOutcome, YearSource } from '../original-year-policy.js';
 import type { FileInfo, TagWrite, TrackEnrichment, TrackKeyRange, TrackMeta, TrackOutro, TrackPaceSpan, TrackRecord, TrackRow, TrackSection } from './types.js';
 import { normaliseExplicitStatus, normaliseYear, rowToTrack, safeParseArray } from './rows.js';
+import { SQL_KEPT_YEAR_SOURCES, type OriginalYearOutcome, type YearSource } from '../original-year-policy.js';
 import { runDdl } from './schema.js';
 import { touchGenreInputs } from './genre-inputs.js';
 import { resolveEraYear } from '../era-year.js';
@@ -416,11 +416,12 @@ export function upsertTrackMeta(id: string, meta: TrackMeta): boolean {
         album_id     = COALESCE(excluded.album_id, tracks.album_id),
         artist_id    = COALESCE(excluded.artist_id, tracks.artist_id),
         year         = COALESCE(excluded.year, tracks.year),
-        -- Walk-time 'album-tag' years never clobber 'musicbrainz' or 'manual'.
+        -- Walk-time 'album-tag' years never clobber a looked-up or typed one
+        -- (original-year-policy.KEPT_YEAR_SOURCES: musicbrainz, discogs, manual).
         -- When an album turns era-suspect, discard an earlier album-tag answer:
         -- left in place it looks resolved and blocks the MB backfill.
         original_year = CASE
-          WHEN tracks.original_year_source IN ('musicbrainz', 'manual')
+          WHEN tracks.original_year_source IN ${SQL_KEPT_YEAR_SOURCES}
             THEN tracks.original_year
           WHEN excluded.era_untrusted = 1
             AND excluded.original_year IS NULL
@@ -429,7 +430,7 @@ export function upsertTrackMeta(id: string, meta: TrackMeta): boolean {
           ELSE COALESCE(excluded.original_year, tracks.original_year)
         END,
         original_year_source = CASE
-          WHEN tracks.original_year_source IN ('musicbrainz', 'manual')
+          WHEN tracks.original_year_source IN ${SQL_KEPT_YEAR_SOURCES}
             THEN tracks.original_year_source
           WHEN excluded.era_untrusted = 1
             AND excluded.original_year IS NULL
