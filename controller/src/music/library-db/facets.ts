@@ -95,8 +95,12 @@ export const TAIL_PLACEMENT_TOLERANCE_MS = 3000;
 // 3 with the loudness curve), else v2 when the edges show the end-of-file
 // window already ended at the music (that window carries no curve stamp, so
 // it is re-read once for v3), else v1.
+// A stamp of 1 is a tail placed for an end the re-measured edges have
+// since moved (tailPlacementMoved): v1, due again, whatever the edges say now,
+// because the stored window is neither the old placement nor the file's end.
 export function tailVersionOf(row: Pick<FacetSourceRow, 'tail_version' | 'has_edges' | 'edge_tail_ms'>): number {
   if (row.tail_version != null && row.tail_version >= 2) return row.tail_version;
+  if (row.tail_version === 1) return 1;
   if (row.has_edges && row.edge_tail_ms != null && row.edge_tail_ms <= TAIL_PLACEMENT_TOLERANCE_MS) return 2;
   return 1;
 }
@@ -109,6 +113,21 @@ export function tailVersionOf(row: Pick<FacetSourceRow, 'tail_version' | 'has_ed
 export function placedTailVersion(outro: { loudnessCurve?: unknown } | null | undefined): number {
   if (outro == null) return 3;
   return parseLoudnessCurve(outro.loudnessCurve) ? 3 : 2;
+}
+
+// Did re-measured edges move where the music stops by more than the
+// placement tolerance? Compared on the end (decoded length minus trailing
+// silence), which is what a placed tail window ends at. Unknown on either side
+// is no move: there is nothing to compare.
+export function tailPlacementMoved(
+  before: { edge_tail_ms: number | null; decoded_duration_ms: number | null },
+  after: { edge_tail_ms: number | null; decoded_duration_ms: number | null },
+): boolean {
+  const end = (e: typeof before) =>
+    e.edge_tail_ms != null && e.decoded_duration_ms != null ? e.decoded_duration_ms - e.edge_tail_ms : null;
+  const a = end(before);
+  const b = end(after);
+  return a != null && b != null && Math.abs(a - b) > TAIL_PLACEMENT_TOLERANCE_MS;
 }
 
 // The facets read off one whole-file decode rather than the analysis windows.
@@ -151,7 +170,7 @@ export interface FacetSourceRow {
   has_loudness_curve?: number; // loudness_curve_json IS NOT NULL (the whole-file pass's curve, or its unavailable marker)
   has_edges: number;         // decoded_duration_ms IS NOT NULL
   edge_tail_ms: number | null;
-  tail_version: number | null; // 2 = a tail window the analyzer placed from the edges, 3 = with the loudness curve
+  tail_version: number | null; // 2 = a tail window the analyzer placed from the edges, 3 = with the loudness curve; 1 = placed for an end that has moved
   analyze_fail_count: number | null;
   analyze_error: string | null;
   year_suspect: number;      // era-suspect.eraSuspectSql
