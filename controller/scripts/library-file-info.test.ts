@@ -85,7 +85,7 @@ async function openWithRival(moves: Array<(opener: Database.Database, rival: Dat
     const result = realPragma.call(this, sql, options);
     // Only the file-facts helper's reads: this fork's migrate() reads the table
     // elsewhere too (ensureLoudnessCurveColumn), which would shift the moves.
-    if (this !== rival && sql === 'table_info(tracks)' && new Error().stack?.includes('ensureFileInfoColumns')) {
+    if (this !== rival && sql === 'table_info(tracks)' && new Error().stack?.includes('ensureNamedColumns')) {
       rival ??= new Database(this.name, { timeout: 0 });
       moves[reads++]?.(this, rival);
     }

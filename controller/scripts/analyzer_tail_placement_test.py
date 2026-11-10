@@ -232,7 +232,7 @@ def t_tail_only_vocals_use_the_placed_window():
     src = PlacedSource(tone(20.0))
     with Patched(get_vocal_detector=lambda force=False: Detector(calls), measure_loudness=fixed_loudness,
                  log=lambda *_a: None):
-        out = aw.analyze_facets(FakeLibrosa, src, ["tail"], tail_vocals=True,
+        out = aw.analyze_facets(FakeLibrosa, src, ["tail"], want_tail_vocals=True,
                                 tail_window={"end_ms": 180_000, "duration_ms": 200_000})
     shift = int((180.0 - aw.OUTRO_SECONDS) * 1000)
     assert out["tail"]["data"]["outro"]["vocalRanges"] == [{"startMs": shift + 1000, "endMs": shift + 3000}], out

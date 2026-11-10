@@ -16,6 +16,8 @@ import type { AddressInfo } from 'node:net';
 import test, { after, before } from 'node:test';
 import {
   STALE_SOCKET_ATTEMPTS,
+  STALE_SOCKET_RETRY_MS,
+  _resetStaleSocketWarningsForTests,
   describeFetchError,
   fetchWithTimeout,
   isStaleSocketError,
@@ -33,6 +35,12 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
   req.on('end', () => {
     if (path.startsWith('/slow')) {
       setTimeout(() => { if (!res.destroyed) res.end('late'); }, 1_000);
+      return;
+    }
+    if (path.startsWith('/late-drop')) {
+      // The server took the request and was working on it when the connection
+      // went: a resend would run it a second time.
+      setTimeout(() => req.socket.destroy(), STALE_SOCKET_RETRY_MS + 200);
       return;
     }
     if (path.startsWith('/error')) {
@@ -124,6 +132,11 @@ test('a refused connection is a different failure, never resent', async () => {
   assert.equal(calls, 1);
 });
 
+test('a connection that drops after the stale-socket window is never resent', async () => {
+  await assert.rejects(post('/late-drop', { retryStaleSocket: true }), (err: unknown) => isStaleSocketError(err));
+  assert.equal(seen.get('/late-drop'), 1);
+});
+
 test('a timeout is never resent', async () => {
   await assert.rejects(post('/slow', { retryStaleSocket: true, timeoutMs: 150 }), (err: unknown) => {
     assert.equal(isStaleSocketError(err), false);
@@ -140,4 +153,34 @@ test('the warning names the real cause', () => {
   assert.equal(describeFetchError(abort), 'This operation was aborted (timed out or aborted)');
   assert.equal(isStaleSocketError(abort), false);
   assert.equal(isStaleSocketError(new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } })), false);
+});
+
+test('a resend logs one line per window, naming the origin and the socket error, never the path', async (t) => {
+  _resetStaleSocketWarningsForTests();
+  const lines: string[] = [];
+  t.mock.method(console, 'warn', (msg: string) => { lines.push(msg); });
+  dropFirst.set('/log-once?key=tok_secret', 1);
+  assert.equal(await (await post('/log-once?key=tok_secret', { retryStaleSocket: true })).text(), 'ok 2');
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^\[fetch\] resending a request to http:\/\/127\.0\.0\.1:\d+ that died on a stale keep-alive socket: /);
+  assert.match(lines[0], /UND_ERR_SOCKET|ECONNRESET|EPIPE/);
+  assert.doesNotMatch(lines[0], /log-once|tok_secret/);
+  // A second resend in the same window is counted, not printed.
+  dropFirst.set('/log-again', 1);
+  assert.equal(await (await post('/log-again', { retryStaleSocket: true })).text(), 'ok 2');
+  assert.equal(lines.length, 1);
+  _resetStaleSocketWarningsForTests();
+});
+
+test('a request that is not resent logs no resend line', async (t) => {
+  _resetStaleSocketWarningsForTests();
+  const lines: string[] = [];
+  t.mock.method(console, 'warn', (msg: string) => { lines.push(msg); });
+  dropFirst.set('/quiet-optout', 1);
+  await assert.rejects(post('/quiet-optout'));
+  const res = await post('/error-quiet', { retryStaleSocket: true });
+  assert.equal(res.status, 500);
+  await res.text();
+  assert.deepEqual(lines, []);
+  _resetStaleSocketWarningsForTests();
 });
