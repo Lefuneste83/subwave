@@ -20,21 +20,39 @@
 // asked first; Discogs only when MusicBrainz has no year and a token is set.
 export type YearSource = 'musicbrainz' | 'discogs';
 
+// Per-track years the library walk never overwrites with its album-tag year:
+// one a lookup found (either source) or one the operator typed. The walk's
+// upsert (library-db/tracks.ts) and an id adoption (id-adoption.ts) both keep
+// them; the SQL form is the same list, for the upsert's CASE.
+export const KEPT_YEAR_SOURCES: readonly string[] = ['musicbrainz', 'discogs', 'manual'];
+export const SQL_KEPT_YEAR_SOURCES = `(${KEPT_YEAR_SOURCES.map((s) => `'${s}'`).join(', ')})`;
+export function yearSourceKept(source: string | null | undefined): boolean {
+  return source != null && KEPT_YEAR_SOURCES.includes(source);
+}
+
+// `source` is the source that gave this answer (for not-found and error, the
+// last host asked; Discogs is asked only after a MusicBrainz miss, so
+// `discogs` on a miss means both missed). A Discogs that took no part (no
+// token, a refused one) answers not-found with no source, and the combined
+// lookup keeps MusicBrainz's answer. The year row records it
+// (track_facet_status.source), so a failure names the host that failed.
 export type OriginalYearOutcome =
   | { kind: 'found'; year: number; source?: YearSource }
-  | { kind: 'not-found' }
-  | { kind: 'error'; reason: string };
+  | { kind: 'not-found'; source?: YearSource }
+  | { kind: 'error'; reason: string; source?: YearSource };
 
 // A failed lookup is retried after these delays, measured from the failed
 // attempt: the first retry an hour later (a blip), then a day (an outage),
-// then a week (a long one). After YEAR_MAX_ATTEMPTS failures the track waits
-// for an explicit `--facets year --where failed` run.
+// then a week (a long one). YEAR_MAX_ATTEMPTS counts the first failure plus
+// one per delay, so the week-long retry does run; after that many failures the
+// automatic passes stop asking and the track waits for an explicit run
+// (`--facets year --where failed`, `--where all`, or `--re-enrich` over it).
 export const YEAR_RETRY_DELAYS_MS: readonly number[] = [
   60 * 60_000,
   24 * 60 * 60_000,
   7 * 24 * 60 * 60_000,
 ];
-export const YEAR_MAX_ATTEMPTS = YEAR_RETRY_DELAYS_MS.length;
+export const YEAR_MAX_ATTEMPTS = YEAR_RETRY_DELAYS_MS.length + 1;
 
 // May a track whose lookup failed `attempts` times, the last at `lastAt`, be
 // asked again automatically at `now`? An unreadable timestamp is not a reason

@@ -25,6 +25,7 @@ import { requireAdmin } from '../middleware/auth.js';
 import * as jingles from '../broadcast/jingles.js';
 import * as sfx from '../broadcast/sfx.js';
 import * as blocklist from '../music/blocklist.js';
+import { clearWalk } from '../music/library-walk.js';
 import {
   SKILL_BUNDLE_MAX_BYTES,
   restoreSkillMembers,
@@ -205,6 +206,7 @@ async function applyBackupZip(body: Buffer): Promise<RestoreOutcome> {
   const restored: string[] = [];
   let requiresRestart = false;
   let tmpDir: string | null = null;
+  let blocklistRestored = false;
   try {
     // 1) Media — must run BEFORE settings.update(): settings validation resolves
     //    theme.active / shows[].themeId against themes read from state/themes/,
@@ -236,6 +238,7 @@ async function applyBackupZip(body: Buffer): Promise<RestoreOutcome> {
       const { dropped } = await blocklist.restore(blocklistDoc);
       if (dropped) skipped.push(`blocklist.json: ${dropped} unusable record(s)`);
       restored.push('blocklist.json');
+      blocklistRestored = true;
     }
 
     // 1c) Skills through the import's guards: any tool.mjs not already live
@@ -262,6 +265,10 @@ async function applyBackupZip(body: Buffer): Promise<RestoreOutcome> {
       tmpDir = await mkdtemp(join(tmpdir(), 'subwave-restore-'));
       const dbTmp = join(tmpDir, 'library.db');
       zip.extractEntryTo(dbEntry, tmpDir, false, true);
+      // The restored table is not the walk the stamp describes: hearts wait for
+      // the next clean walk (music/library-walk.ts). Cleared before the swap, so
+      // a swap that fails half-way still reads as unsettled.
+      clearWalk();
       await libraryDb.restoreFromFile(dbTmp);
       await library.reload();
       restored.push('library.db');
@@ -269,6 +276,15 @@ async function applyBackupZip(body: Buffer): Promise<RestoreOutcome> {
 
     return { ok: true, status: 200, restored, requiresRestart, skipped, skillsAwaitingReview, managed };
   } finally {
+    // As after any list edit, the queue and the coast playlist drop what the
+    // restored list blocks. Last, so the coast rebuilds with the restored
+    // settings and library.db, and in `finally`, so a later step that throws
+    // cannot leave a restored list live with its blocked tracks still queued.
+    // Loaded here, not at the top: blocklist-effects reaches the queue and the
+    // scheduler, whose settings watcher rebuilds the coast on every policy
+    // change, and a process that only loads this route must not start it
+    // (scripts/backup-route-imports.test.ts). Boot loads both anyway.
+    if (blocklistRestored) (await import('../broadcast/blocklist-effects.js')).applyBlocklistChange();
     if (tmpDir) await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
 }

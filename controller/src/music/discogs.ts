@@ -74,7 +74,28 @@ export function earliestDiscogsYear(results: DiscogsResult[], artist: string, ma
 }
 
 // found / not-found / error, like musicbrainz.lookupOriginalYear. Without a
-// token nothing is asked and the answer is not-found. Never throws.
+// token nothing is asked and the answer is not-found. A token Discogs refuses
+// (401 or 403: mistyped, revoked) also answers not-found, i.e. "Discogs took
+// no part": it is the operator's setting, not a question left unanswered, so
+// it must not turn MusicBrainz's settled misses into failures that use up
+// their retries. Never throws.
+//
+// A refused token is remembered for the rest of the process, so every later
+// lookup skips Discogs without a request or its 1.1 s throttle gap (a re-ask
+// of thousands of misses would otherwise spend an hour on refusals). Lookups
+// already queued on the throttle when the refusal lands send nothing either,
+// but each still waits out its slot (a one-off few seconds). It is
+// keyed on the token's value: a different token is asked again, and saving
+// one from the settings clears it (forgetDiscogsRefusal, routes/settings/core).
+// The refusal is logged once per refused token.
+const REFUSED = new Set([401, 403]);
+let refusedToken: string | null = null;
+export function forgetDiscogsRefusal(): void { refusedToken = null; }
+// The configured token is the one Discogs refused: lookups skip Discogs.
+export function discogsRefused(): boolean {
+  const token = discogsToken();
+  return token !== '' && token === refusedToken;
+}
 export async function lookupDiscogsYear(track: {
   title?: string | null;
   artist?: string | null;
@@ -83,7 +104,7 @@ export async function lookupDiscogsYear(track: {
   const token = discogsToken();
   const title = stripTitleNoise((track.title ?? '').trim());
   const artist = (track.artist ?? '').trim();
-  if (!token || !title || !artist) return { kind: 'not-found' };
+  if (!token || !title || !artist || token === refusedToken) return { kind: 'not-found' };
   const url = new URL(API);
   url.searchParams.set('artist', primaryArtist(artist));
   url.searchParams.set('track', title);
@@ -94,18 +115,34 @@ export async function lookupDiscogsYear(track: {
   });
   try {
     const body = await throttled(async () => {
+      // Refused while this lookup waited for its slot: no request.
+      if (token === refusedToken) return { skipped: true as const };
       let res = await get();
       const wait = retryWaitMs(res.status, res.headers.get('retry-after'));
       if (wait != null) {
         await new Promise((r) => setTimeout(r, wait));
+        // The retry is a request too: the next one keeps a full gap from it.
+        lastStart = Date.now();
         res = await get();
       }
+      if (REFUSED.has(res.status)) return { refused: res.status };
       if (!res.ok) throw new Error(`Discogs HTTP ${res.status}`);
       return (await res.json()) as { results?: DiscogsResult[] };
     });
+    if ('skipped' in body) return { kind: 'not-found' };
+    if ('refused' in body) {
+      if (refusedToken !== token) {
+        refusedToken = token;
+        console.warn(
+          `[discogs] the token was refused (HTTP ${body.refused}): Discogs is skipped from now on, ` +
+            'until the token is changed or saved again (Settings → Library → Enrichment)',
+        );
+      }
+      return { kind: 'not-found' };
+    }
     const y = earliestDiscogsYear(Array.isArray(body.results) ? body.results : [], artist, track.year ?? null);
-    return y != null ? { kind: 'found', year: y, source: 'discogs' } : { kind: 'not-found' };
+    return y != null ? { kind: 'found', year: y, source: 'discogs' } : { kind: 'not-found', source: 'discogs' };
   } catch (err) {
-    return { kind: 'error', reason: yearErrorReason(err) };
+    return { kind: 'error', reason: yearErrorReason(err), source: 'discogs' };
   }
 }

@@ -82,7 +82,9 @@ function handler(req: IncomingMessage, res: ServerResponse) {
       // Vocal activity: the Demucs tail pass needs the tail window; the stub
       // answers tail vocal ranges only when it was sent the placement.
       if (r.facets.includes('vocal')) {
-        facets.vocal = { status: 'ok', data: { vocal_ranges: [], ...(tw ? { tail_vocal_ranges: [{ startMs: tw.end_ms - 8000, endMs: tw.end_ms - 6000 }] } : {}) } };
+        // Like the worker, it says which window the tail vocals describe.
+        facets.vocal = { status: 'ok', data: { vocal_ranges: [], ...(tw ? {
+          tail_vocal_ranges: [{ startMs: tw.end_ms - 8000, endMs: tw.end_ms - 6000 }], tail_window: 'edges' } : {}) } };
       }
       // The head window (a regular run's planned new track).
       if (r.facets.includes('head')) facets.head = { status: 'ok', data: { bpm: 120, key: 'Am', intro_ms: 0, confidence: 0.9 } };
@@ -252,6 +254,107 @@ test('tail vocal ranges are carried only onto the same window', () => {
   // ...a newly placed window does not: they were measured on other audio.
   writeTail('tv', 3);
   assert.equal(db.getTrack('tv')!.outro?.vocalRanges ?? null, null);
+  consistent();
+});
+
+test('a flat analysis carries tail vocal ranges only onto the same window', () => {
+  // preserveTailVocal had no same-window check on this path: an end-of-file
+  // flat answer kept the vocals of a placed window it did not replace, and a
+  // placed answer kept the vocals of an end-of-file window.
+  track('flat-tv');
+  writeEdges('flat-tv', 20_000);
+  db.writeFacetResults('flat-tv', { source: 'full', tail: {
+    outro: { ...OUTRO, vocalRanges: [{ startMs: 205_000, endMs: 208_000 }] }, tailSilenceMs: 500, tailStartMs: 213_500 } });
+  assert.equal(tailVersionCol('flat-tv'), null, 'fixture: an end-of-file tail with vocals');
+  db.upsertTrackAnalysis('flat-tv', {
+    bpm: 100, musicalKey: 'C', loudnessLufs: -9, peakDb: -1, source: 'full', preserveTailVocal: true,
+    outro: { ...OUTRO, startMs: 188_000 }, tailSilenceMs: 20_000, tailStartMs: 194_000, tailVersion: 2,
+  });
+  assert.equal(tailVersionCol('flat-tv'), 2);
+  assert.equal(db.getTrack('flat-tv')!.outro?.vocalRanges ?? null, null, 'placed: the end-of-file vocals are not carried');
+  // Same window (placed over placed): carried.
+  db.writeFacetResults('flat-tv', { source: 'full', vocal: { vocalRanges: [], tailVocalRanges: [{ startMs: 189_000, endMs: 190_000 }], tailWindow: 'placed' } });
+  db.upsertTrackAnalysis('flat-tv', {
+    bpm: 100, musicalKey: 'C', loudnessLufs: -9, peakDb: -1, source: 'full', preserveTailVocal: true,
+    outro: { ...OUTRO, startMs: 188_500 }, tailSilenceMs: 20_000, tailStartMs: 194_000, tailVersion: 2,
+  });
+  assert.deepEqual(db.getTrack('flat-tv')!.outro?.vocalRanges, [{ startMs: 189_000, endMs: 190_000 }]);
+  consistent();
+});
+
+test('a vocal answer is merged only into an outro on the window it was measured on', () => {
+  // A `--facets vocal` run merged its tail vocals into whatever outro was
+  // stored, which could still be the end-of-file one.
+  track('merge-eof');
+  writeEdges('merge-eof', 20_000);
+  writeTail('merge-eof');
+  db.writeFacetResults('merge-eof', { source: 'full', vocal: {
+    vocalRanges: [], tailVocalRanges: [{ startMs: 186_000, endMs: 188_000 }], tailWindow: 'placed' } });
+  assert.equal(db.getTrack('merge-eof')!.outro?.vocalRanges ?? null, null, 'placed vocals stay out of an end-of-file outro');
+  const vocal = sql(`SELECT reason FROM track_facet_status WHERE track_id = 'merge-eof' AND facet = 'vocal'`).get() as { reason: string | null };
+  assert.equal(vocal.reason, 'head-only', 'still owed its tail vocals');
+  // The end-of-file answer (an analyzer that did not place) does merge.
+  db.writeFacetResults('merge-eof', { source: 'full', vocal: {
+    vocalRanges: [], tailVocalRanges: [{ startMs: 205_000, endMs: 206_000 }], tailWindow: 'end' } });
+  assert.deepEqual(db.getTrack('merge-eof')!.outro?.vocalRanges, [{ startMs: 205_000, endMs: 206_000 }]);
+  // And a placed answer into a placed outro.
+  writeTail('merge-eof', 2);
+  db.writeFacetResults('merge-eof', { source: 'full', vocal: {
+    vocalRanges: [], tailVocalRanges: [{ startMs: 186_000, endMs: 188_000 }], tailWindow: 'placed' } });
+  assert.deepEqual(db.getTrack('merge-eof')!.outro?.vocalRanges, [{ startMs: 186_000, endMs: 188_000 }]);
+  consistent();
+});
+
+test('a placement whose tail was not measured never stamps v2', () => {
+  // A v2 stamp over the stored end-of-file columns (kept by COALESCE) called
+  // them placed, and the tail was never planned again.
+  track('no-tail');
+  writeEdges('no-tail', 20_000);
+  writeTail('no-tail');
+  db.upsertTrackAnalysis('no-tail', { bpm: 100, musicalKey: 'C', loudnessLufs: -9, peakDb: -1, source: 'full', tailVersion: 2 });
+  assert.equal(tailVersionCol('no-tail'), null);
+  assert.equal(tailRow('no-tail')?.version, 1, 'still due');
+  consistent();
+});
+
+test('a replaced file drops the tail stamp with the tail', () => {
+  track('swapped');
+  writeEdges('swapped', 9_000);
+  writeTail('swapped', 2);
+  db.clearTrackAudio('swapped');
+  assert.equal(tailVersionCol('swapped'), null);
+  // Its first tail on the new file is read on the end-of-file window: not placed.
+  writeTail('swapped');
+  assert.equal(tailVersionCol('swapped'), null);
+  assert.equal(tailRow('swapped')?.version, 1);
+  consistent();
+});
+
+test('re-measured edges that move the end re-plan a placed tail', () => {
+  // This fork stamps a placed tail 3 (with its loudness curve).
+  track('moved');
+  writeEdges('moved', 20_000);
+  writeTail('moved', 3);
+  // Within the tolerance: the placed window still ends at the music.
+  writeEdges('moved', 21_000);
+  assert.equal(tailVersionCol('moved'), 3);
+  assert.ok(!db.facetNeedsIds('tail').includes('moved'));
+  // Past it: the stored window no longer ends where the music stops.
+  writeEdges('moved', 30_000);
+  assert.equal(tailVersionCol('moved'), 1);
+  assert.equal(tailRow('moved')?.version, 1);
+  assert.ok(db.facetNeedsIds('tail').includes('moved'));
+  // Even with short trailing silence now, it is not read as end-of-file.
+  writeEdges('moved', 500);
+  assert.equal(tailRow('moved')?.version, 1);
+  // Placing it again settles it.
+  writeTail('moved', 3);
+  assert.equal(tailVersionCol('moved'), 3);
+  assert.ok(!db.facetNeedsIds('tail').includes('moved'));
+  // A tail placed in the same answer as the edges is not re-planned by them.
+  db.writeFacetResults('moved', { source: 'url', edges: { leadMs: 0, tailMs: 9_000, durationMs: 214_000 },
+    tail: { outro: { ...OUTRO, loudnessCurve: CURVE }, tailSilenceMs: 9_000, tailStartMs: 205_000, version: 3 } });
+  assert.equal(tailVersionCol('moved'), 3);
   consistent();
 });
 

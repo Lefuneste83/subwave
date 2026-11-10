@@ -13,9 +13,12 @@ import * as db from './library-db.js';
 import { reportProgress } from './tagger-progress.js';
 import { mapPool } from '../util/async-pool.js';
 
-// MusicBrainz first; Discogs when MusicBrainz has no year and a token is set.
-// An unanswered source is never read as a miss: the result is an error (retried
-// on the facet's schedule) unless the other source finds the year.
+// MusicBrainz first; Discogs only when MusicBrainz answered that it has no year
+// and a token is set. A MusicBrainz error is the outcome as it stands: Discogs
+// is not asked, because its year would be kept for good (KEPT_YEAR_SOURCES) and
+// one MusicBrainz blip would then lock in the rougher answer where the retry
+// schedule would have reached MusicBrainz again. An unanswered Discogs is never
+// read as a miss either: after a MusicBrainz miss it makes the result an error.
 export async function lookupOriginalYearAnySource(track: {
   title?: string | null;
   artist?: string | null;
@@ -23,10 +26,10 @@ export async function lookupOriginalYearAnySource(track: {
   year?: number | null;
 }): Promise<OriginalYearOutcome> {
   const mb = await musicbrainz.lookupOriginalYear(track);
-  if (mb.kind === 'found') return { ...mb, source: 'musicbrainz' };
+  if (mb.kind !== 'not-found') return { ...mb, source: 'musicbrainz' };
   const dg = await discogs.lookupDiscogsYear(track);
-  if (dg.kind === 'found') return dg;
-  return mb.kind === 'error' ? mb : dg;
+  // A Discogs that took no part (no token, a refused one) leaves MusicBrainz's miss.
+  return dg.kind === 'not-found' && !dg.source ? { kind: 'not-found', source: 'musicbrainz' } : dg;
 }
 
 export interface YearPassStats {
@@ -49,7 +52,7 @@ export async function runYearLookups(
   const stats: YearPassStats = { asked: 0, found: 0, discogs: 0, notFound: 0, errors: 0 };
   if (!ids.length) return stats;
   const label = opts.label ?? '[tag]';
-  const sources = discogs.discogsToken() ? 'MusicBrainz, then Discogs' : 'MusicBrainz';
+  const sources = discogs.discogsToken() && !discogs.discogsRefused() ? 'MusicBrainz, then Discogs' : 'MusicBrainz';
   console.log(`${label} original years: ${ids.length} era-suspect tracks to resolve via ${sources} (~1/s)`);
   reportProgress({ phase: 'enrich', label: 'Resolving original years', done: 0, total: ids.length });
   await mapPool([...ids], Math.max(1, Math.min(opts.concurrency ?? 4, 4)), async (id) => {

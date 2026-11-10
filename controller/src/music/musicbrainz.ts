@@ -102,8 +102,9 @@ export function earliestOriginalYear(
 //
 // The gate is era SUSPICION, not Navidrome's compilation flag (#1418) — the
 // reissue anthologies it exists for arrive as `isCompilation: false`.
-// `yearUntrusted` is composed once in the row mapper (flag OR derived
-// judgement); passing the raw flag would silently reopen the gap.
+// `yearUntrusted` is composed once in the row mapper (era-suspect
+// storedYearUntrusted: the walk's stored verdict once it has one, the raw flag
+// only before); passing the raw flag would silently reopen the gap.
 //
 // Any resolved year means there is nothing to ask. A checked-but-missed stamp
 // skips the track unless the operator asked for a re-enrich; a MANUAL answer is
@@ -133,11 +134,13 @@ async function searchRecordings(query: string): Promise<MbRecording[]> {
     headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
   });
   let res = await get();
-  // A busy MusicBrainz answers 503: asked once more after its Retry-After.
-  // Still inside the caller's throttle slot, so the 1 req/s spacing holds.
+  // A busy MusicBrainz answers 503: asked once more after its Retry-After,
+  // still inside the caller's throttle slot. The retry is a request too, so
+  // the throttle's clock moves to it and the next request keeps the 1 req/s gap.
   const wait = retryWaitMs(res.status, res.headers.get('retry-after'));
   if (wait != null) {
     await new Promise((r) => setTimeout(r, wait));
+    lastStart = Date.now();
     res = await get();
   }
   // Any non-2xx is a question MusicBrainz did not answer (a 503 is its rate

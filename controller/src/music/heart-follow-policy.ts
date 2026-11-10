@@ -20,8 +20,42 @@
 //     wrong move hearts a song nobody liked, while a missed one only leaves the
 //     heart where it already was.
 // A snapshot without a title or an artist never matches.
+//
+// A planned move is only a plan: library.db is as new as its last walk, so a
+// heart on a song added since reads as gone from the table while it is still on
+// the server. `oldIdVerdict` asks Navidrome whether the old id has left, and
+// only `gone` lets the heart move. Navidrome (0.55+) keeps a deleted or
+// re-imported file as a *missing* row until an admin purges missing files, and
+// getSong still answers that row ok, with no missing flag. So:
+//   - gone: getSong says not found (Subsonic error 70: a purged row), or it
+//     answers a song whose album, asked with getAlbum, no longer lists the old
+//     id (Navidrome drops missing rows from getAlbum, and leaves out `song`
+//     altogether once every track of the album is missing), or that album is
+//     itself not found;
+//   - present: the album still lists the old id, or getSong answers under
+//     another id (the server still holds the song: not proof it left);
+//   - unknown: any other error, a timeout, or an answer that cannot be read (no
+//     song, no albumId, an album that is not the one asked for). The caller
+//     holds the move, and the rest of its pass, for the next one.
+// Fail closed throughout: a wrong move hearts a song nobody liked, a missed one
+// only waits. At most two calls per planned move.
+//
+// Only a settled catalogue answers that truly: while Navidrome scans a folder
+// move, getSong answers a live song ok while getAlbum briefly leaves it out, so
+// it would read `gone` (seen on stock 0.64.2, a few hundred ms mid-scan). So the
+// pass reads the scan state (subsonic.getScanState) before its lookups and again
+// after them, and its moves stand only when `scanSettled` says so of both reads:
+// each says "not scanning", AND both carry the same `lastScan`, the time
+// Navidrome's last scan ended. "Not scanning" twice is not enough: a watcher
+// scan of a small moved folder is true for under 100 ms and can start and end
+// between the two reads, and only a moved `lastScan` shows it ran. Anything else
+// holds every planned move for the next pass: scanning, a read that failed, a
+// server that reports no `lastScan` (Gonic, plain Subsonic: there hearts never
+// follow), or a `lastScan` that moved. prune-policy.ts holds prunes only on a
+// definite scan, through the boolean getScanStatus.
 
 import { nameKey } from './recency.js';
+import { isMissingSongError } from './id-rotation-recovery.js';
 
 // Seconds. A re-encode of the same master stays within a second or two; an
 // edit or an extended mix of the same title is minutes away.
@@ -32,7 +66,7 @@ export interface HeartSnapshot {
   title?: string | null;
   artist?: string | null;
   album?: string | null;
-  duration?: number | null;
+  durationSec?: number | null;
 }
 
 export interface LibraryNameRow {
@@ -84,11 +118,61 @@ export function planHeartMoves(stale: readonly HeartSnapshot[], library: Iterabl
 
 function pick(h: HeartSnapshot, rows: readonly LibraryNameRow[]): string | null {
   const sameLength = rows.filter((r) =>
-    !known(h.duration) || !known(r.durationSec) || Math.abs(r.durationSec - h.duration) <= DURATION_TOLERANCE_SEC);
+    !known(h.durationSec) || !known(r.durationSec) || Math.abs(r.durationSec - h.durationSec) <= DURATION_TOLERANCE_SEC);
   if (sameLength.length === 1) return sameLength[0].id;
   if (sameLength.length === 0) return null;
   const album = nameKey(h.album);
   if (!album) return null;
   const sameAlbum = sameLength.filter((r) => nameKey(r.album) === album);
   return sameAlbum.length === 1 ? sameAlbum[0].id : null;
+}
+
+/** One scan-state read (subsonic.getScanState); null when it failed. */
+export type ScanRead = { scanning: boolean; lastScan: string | null } | null;
+
+/**
+ * Whether the pass's moves may stand: both reads say "not scanning" and carry
+ * the same, known `lastScan`. With one read (`after` omitted), whether that read
+ * could settle a pass at all, so the pass need not look up anything.
+ */
+export function scanSettled(before: ScanRead, after: ScanRead = before): boolean {
+  if (!before || !after) return false;
+  if (before.scanning !== false || after.scanning !== false) return false;
+  return before.lastScan !== null && before.lastScan === after.lastScan;
+}
+
+export type OldIdVerdict = 'gone' | 'present' | 'unknown';
+
+/** The two Navidrome reads the verdict needs: getSong, and the album exactly as answered (no filters). */
+export interface OldIdLookups {
+  getSong(id: string): Promise<unknown>;
+  getAlbum(id: string): Promise<unknown>;
+}
+
+const isNotFound = (err: unknown) => Number((err as { subsonicCode?: unknown } | null)?.subsonicCode) === 70;
+
+/** Whether a heart's old id has left Navidrome: only `gone` lets it move. */
+export async function oldIdVerdict(oldId: string, lookups: OldIdLookups): Promise<OldIdVerdict> {
+  let song: { id?: unknown; albumId?: unknown } | null;
+  try {
+    song = (await lookups.getSong(oldId)) as typeof song;
+  } catch (err) {
+    return isMissingSongError(err) ? 'gone' : 'unknown';
+  }
+  if (!song || typeof song !== 'object') return 'unknown';
+  if (song.id != null && String(song.id) !== oldId) return 'present';
+  const albumId = typeof song.albumId === 'string' ? song.albumId : '';
+  if (!albumId) return 'unknown';
+
+  let album: { id?: unknown; song?: unknown } | null;
+  try {
+    album = (await lookups.getAlbum(albumId)) as typeof album;
+  } catch (err) {
+    return isNotFound(err) ? 'gone' : 'unknown';
+  }
+  if (!album || typeof album !== 'object' || String(album.id ?? '') !== albumId) return 'unknown';
+  // Every track of the album missing: Navidrome leaves `song` out.
+  const listed = album.song === undefined ? [] : album.song;
+  if (!Array.isArray(listed)) return 'unknown';
+  return listed.some((s) => String((s as { id?: unknown } | null)?.id ?? '') === oldId) ? 'present' : 'gone';
 }
