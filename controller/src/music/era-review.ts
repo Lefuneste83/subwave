@@ -9,7 +9,11 @@
 //   'trusted' — the album year is right: era_untrusted 0 on every track;
 //   'year'    — one year for every track: a MANUAL original year on each, which
 //               no lookup overwrites and the walk re-applies to tracks added
-//               later; the stored verdict goes back to the walk's own;
+//               later; the stored verdict goes back to the walk's own. A year
+//               the operator typed for a track is not the decision's: that
+//               track keeps (and reads as) its own. Each track the decision
+//               writes records what it held before, and removing the decision
+//               puts exactly that back (tracks.setDecisionOriginalYear);
 //   'suspect' — per-track years: era_untrusted 1, each track resolved by the
 //               lookups or by hand.
 // An album leaves "To review" once it is DONE: trusted, one year, or every
@@ -23,16 +27,18 @@
 // a hand-rolled join.
 //
 // Functions take the better-sqlite3 handle explicitly rather than reaching
-// through library-db, so the routes and tests share one code path. The one
-// exception is the year facet re-derive after an override, which goes through
-// facets.syncTrackFacets on the library's own (same) handle.
+// through library-db, so the routes and tests share one code path. The
+// exception is a decision's per-track writes (the stored verdict, a one-year
+// decision's year), which go through library-db/tracks.ts on the library's own
+// (same) handle, so the text vector and the year facet follow them by the
+// rules every other era write uses.
 
 import type Database from 'better-sqlite3';
-import { syncTrackFacets } from './library-db/facets.js';
-import { getTrack, setManualOriginalYear } from './library-db/tracks.js';
+import { restoreDecisionOriginalYear, setDecisionOriginalYear, setStoredEraVerdict } from './library-db/tracks.js';
 import { ORIGINAL_YEAR_MIN, isValidOriginalYear, originalYearMax } from '../schemas/library.js';
 import { isAlbumKind, labelOwner, ownerFolderOf, suggestAlbumKind, suggestedDecision, type AlbumKind, type EraDecision, type OwnerContext, type OwnerInput } from './album-kind.js';
 import { artistParticipantKeys } from './recency.js';
+import { ERA_ALBUM_KEY_SQL, albumEraKey } from './era-album-key.js';
 import { fileNameOf, folderOf, groupCopies, mainFolderOf, type CopyInput } from './era-copies.js';
 
 export type EraVerdict = EraDecision;
@@ -44,24 +50,8 @@ export interface EraOverride {
   kind: AlbumKind | null;
 }
 
-/** SQLite's own fold, reproduced: LOWER() changes only ASCII A-Z and TRIM()
- *  strips only spaces. JS toLowerCase()/trim() fold far more ('À' → 'à', tabs,
- *  NBSP), and a key folded differently on the two sides never matches: the
- *  override is refused as "not scanned" ('Volume 7 L'Homme À La Tête De Chou',
- *  'Erlend Øye'). */
-function sqliteFold(s: string | null | undefined): string {
-  return (s ?? '').replace(/^ +| +$/g, '').replace(/[A-Z]/g, c => c.toLowerCase());
-}
-
-/** The override table's primary key for an (album artist, album) pair. */
-export function albumEraKey(albumArtist: string | null | undefined, album: string | null | undefined): string {
-  return `${sqliteFold(albumArtist)}\u0000${sqliteFold(album)}`;
-}
-
-/** SQL twin of albumEraKey over the tracks columns. Keep the two in step
- *  (albumEraKey folds the way these SQLite built-ins do). */
-export const ERA_ALBUM_KEY_SQL =
-  "LOWER(TRIM(COALESCE(album_artist, ''))) || char(0) || LOWER(TRIM(COALESCE(album, '')))";
+// The album key lives in era-album-key.ts (one string shared with its index).
+export { albumEraKey, ERA_ALBUM_KEY_SQL };
 
 /** The selection both the listing and the CSV export answer over: tracks the
  *  walk marked untrusted, plus every track of an overridden album (a trusted
@@ -75,14 +65,23 @@ const YEAR_STATE_SQL = `CASE
   ELSE 'unchecked'
 END`;
 
-export function loadEraOverrides(d: Database): Map<string, EraOverride> {
-  const rows = d.prepare(`SELECT album_key, verdict, forced_year, kind FROM era_override`).all() as
-    Array<{ album_key: string; verdict: EraVerdict | null; forced_year: number | null; kind: string | null }>;
-  return new Map(rows.map(r => [r.album_key, {
+/** One era_override row as stored. */
+interface EraOverrideRow { verdict: EraVerdict | null; forced_year: number | null; kind: string | null }
+
+// The one reading of a stored row: a year only on a 'year' decision, and a
+// kind only when it is still a known one.
+function toOverride(r: EraOverrideRow): EraOverride {
+  return {
     verdict: r.verdict ?? null,
     forcedYear: r.verdict === 'year' ? r.forced_year ?? null : null,
     kind: isAlbumKind(r.kind) ? r.kind : null,
-  }]));
+  };
+}
+
+export function loadEraOverrides(d: Database): Map<string, EraOverride> {
+  const rows = d.prepare(`SELECT album_key, verdict, forced_year, kind FROM era_override`).all() as
+    Array<EraOverrideRow & { album_key: string }>;
+  return new Map(rows.map(r => [r.album_key, toOverride(r)]));
 }
 
 /** Where a walk reads an album's record: a Map snapshot (tests, the listing)
@@ -103,18 +102,14 @@ export function liveEraOverrides(d: Database): EraOverrideLookup {
   const stmt = d.prepare(`SELECT verdict, forced_year, kind FROM era_override WHERE album_key = ?`);
   return {
     get(albumKey: string) {
-      const r = stmt.get(albumKey) as { verdict: EraVerdict | null; forced_year: number | null; kind: string | null } | undefined;
-      if (!r) return null;
-      return { verdict: r.verdict ?? null, forcedYear: r.verdict === 'year' ? r.forced_year ?? null : null, kind: isAlbumKind(r.kind) ? r.kind : null };
+      const r = stmt.get(albumKey) as EraOverrideRow | undefined;
+      return r ? toOverride(r) : null;
     },
   };
 }
 
 function loadOverrideRow(d: Database, albumKey: string): EraOverride | null {
-  const r = d.prepare(`SELECT verdict, forced_year, kind FROM era_override WHERE album_key = ?`).get(albumKey) as
-    { verdict: EraVerdict | null; forced_year: number | null; kind: string | null } | undefined;
-  if (!r) return null;
-  return { verdict: r.verdict ?? null, forcedYear: r.verdict === 'year' ? r.forced_year ?? null : null, kind: isAlbumKind(r.kind) ? r.kind : null };
+  return liveEraOverrides(d).get(albumKey) ?? null;
 }
 
 // Write the record, or drop the row once it carries nothing.
@@ -135,6 +130,9 @@ export interface EraWalkSong {
   album?: string | null;
   albumEraUntrusted?: boolean | null;
   albumEraReason?: string | null;
+  /** The album record's originalReleaseDate year, and the file's own year. */
+  albumOriginalYear?: number | null;
+  year?: number | null;
   /** The walk's album-level inputs to album-kind.labelOwner(). */
   albumOwner?: OwnerInput | null;
 }
@@ -149,17 +147,41 @@ export interface EraWalkFields {
   /** A 'year' decision's year, for the walk to write as the track's manual
    *  original year when it does not hold one already. */
   forcedYear: number | null;
+  /** The album tag's year to record as the track's original year
+   *  ('album-tag'), or null (albumTagYear). */
+  originalYear: number | null;
 }
 
-/** The walk's half of a one-year decision: a track of that album that does not
- *  hold a manual year yet (added after the decision, or reset by hand) gets the
- *  album's year as its manual year. A track the operator set by hand keeps its
- *  own. Returns whether it wrote. */
+/**
+ * The album tag's year (#842, #1418), but only when it says something, which
+ * needs both:
+ *  - the album is not era-suspect: on a reissue anthology that date is the
+ *    reissue's own, so recording it states the wrong year AND hides the track
+ *    from the MusicBrainz pass, which skips resolved rows. Suspect is the
+ *    detector's flag OR the operator's Suspect decision, which outranks a
+ *    detector that later stops flagging the album (operator curation outranks
+ *    the detector). A Trust decision does not release it: the operator
+ *    confirmed the file's year, which is what a trusted album resolves to with
+ *    no album-tag year;
+ *  - it differs from the file's `year` (equal tells us nothing).
+ * NULL is behaviour-neutral: resolveEraYear falls through to `year` for a
+ * trusted album, and it keeps the track eligible for a lookup.
+ */
+function albumTagYear(song: EraWalkSong, o: EraOverride | null | undefined): number | null {
+  if (song.albumEraUntrusted || o?.verdict === 'suspect') return null;
+  const ord = song.albumOriginalYear ?? null;
+  if (ord == null) return null;
+  return ord === (song.year ?? null) ? null : ord;
+}
+
+/** The walk's half of a one-year decision: a track of that album the
+ *  decision has not written yet (added after the decision, or cleared by hand)
+ *  gets the album's year, recorded as the decision's so removing it gives the
+ *  track back what it had. A track the operator set by hand keeps its own
+ *  (tracks.setDecisionOriginalYear skips it). Returns whether it wrote. */
 export function applyWalkForcedYear(id: string, forcedYear: number | null): boolean {
   if (forcedYear == null) return false;
-  if (getTrack(id)?.originalYearSource === 'manual') return false;
-  setManualOriginalYear(id, forcedYear);
-  return true;
+  return setDecisionOriginalYear(id, forcedYear);
 }
 
 // The stored verdict a decision implies: trusted 0, per-track 1, otherwise
@@ -193,6 +215,7 @@ export function eraWalkFields(
       ? suggestAlbumKind({ album: song.album, reason, label: song.albumOwner ? labelOwner(song.albumOwner, ownerCtx) : null })
       : null),
     forcedYear: o?.forcedYear ?? null,
+    originalYear: albumTagYear(song, o),
   };
 }
 
@@ -263,14 +286,16 @@ function wantSql(verdict: EraVerdict | null): string {
  * it to the existing rows at once — no walk needed for a click to take effect.
  * The album's kind is kept.
  *
- *  - The stored verdict moves only on rows whose value changes, and
- *    text_vector_dirty is set only where the embedding's `Era:` line really
- *    moves (step 22's rule): no resolved original year and a file year. A
- *    resolved track keeps its vector.
- *  - 'year' writes `year` as the MANUAL original year of every track
- *    (tracks.setManualOriginalYear, which re-derives the year facet and the
- *    vector flag itself). Leaving 'year' clears the manual years it wrote
- *    (those still equal to it), so the lookups take those tracks back.
+ *  - The stored verdict moves only on rows whose value changes
+ *    (tracks.setStoredEraVerdict), and the text vector is marked only where
+ *    the embedding's `Era:` line really moves (markTextVectorDirtyIfEraChanged,
+ *    the one rule for it). A resolved track keeps its vector.
+ *  - 'year' writes `year` as the MANUAL original year of every track but one
+ *    the operator set by hand (tracks.setDecisionOriginalYear, which records
+ *    what the track held and sets the vector flag itself). Leaving 'year'
+ *    restores, on exactly the tracks it wrote, what each held before
+ *    (tracks.restoreDecisionOriginalYear); a hand-set track, or one whose own
+ *    year merely equals the decision's, is not the decision's to clear.
  *  - `null` (Reset) restores the walk's own verdict; unscanned rows are left to
  *    the walk.
  *
@@ -294,43 +319,32 @@ export function setEraOverride(
     });
     const changed = new Set<string>();
 
-    // Undo an earlier one-year decision that this one replaces.
-    if (before?.verdict === 'year' && before.forcedYear != null && !(verdict === 'year' && opts.year === before.forcedYear)) {
+    // Leaving a one-year decision gives each track it wrote back what it held.
+    // A change of year needs no undo: the record keeps the track's own year.
+    if (before?.verdict === 'year' && verdict !== 'year') {
       const ids = d.prepare(
-        `SELECT id FROM tracks WHERE ${ERA_ALBUM_KEY_SQL} = ?
-            AND original_year_source = 'manual' AND original_year = ?`,
-      ).all(albumKey, before.forcedYear) as Array<{ id: string }>;
-      for (const { id } of ids) { setManualOriginalYear(id, null); changed.add(id); }
+        `SELECT id FROM tracks WHERE ${ERA_ALBUM_KEY_SQL} = ? AND era_forced_from IS NOT NULL`,
+      ).all(albumKey) as Array<{ id: string }>;
+      for (const { id } of ids) if (restoreDecisionOriginalYear(id)) changed.add(id);
     }
 
     const want = wantSql(verdict);
     const scope = verdict === 'trusted' || verdict === 'suspect' ? '' : `AND ${SCANNED_SQL}`;
-    const ids = (d.prepare(
-      `SELECT id FROM tracks
+    const flips = d.prepare(
+      `SELECT id, ${want} AS want FROM tracks
         WHERE ${ERA_ALBUM_KEY_SQL} = ? ${scope}
           AND era_untrusted IS NOT ${want}`,
-    ).all(albumKey) as Array<{ id: string }>).map(r => r.id);
-    const flip = d.prepare(
-      `UPDATE tracks
-          SET era_untrusted = ${want},
-              text_vector_dirty = CASE WHEN COALESCE(original_year, 0) <= 0 AND year > 0
-                                       THEN 1 ELSE text_vector_dirty END
-        WHERE id = ?`,
-    );
-    for (const id of ids) {
-      flip.run(id);
+    ).all(albumKey) as Array<{ id: string; want: number }>;
+    for (const { id, want: untrusted } of flips) {
       // The year facet reads the verdict (a trusted album needs no lookup), so
       // its row is re-derived like any walk that changes the era columns.
-      syncTrackFacets(id);
+      setStoredEraVerdict(id, untrusted === 1);
       changed.add(id);
     }
 
     if (verdict === 'year') {
-      const all = d.prepare(
-        `SELECT id FROM tracks WHERE ${ERA_ALBUM_KEY_SQL} = ?
-            AND (original_year_source IS NOT 'manual' OR original_year IS NOT ?)`,
-      ).all(albumKey, opts.year) as Array<{ id: string }>;
-      for (const { id } of all) { setManualOriginalYear(id, opts.year as number); changed.add(id); }
+      const all = d.prepare(`SELECT id FROM tracks WHERE ${ERA_ALBUM_KEY_SQL} = ?`).all(albumKey) as Array<{ id: string }>;
+      for (const { id } of all) if (setDecisionOriginalYear(id, opts.year as number)) changed.add(id);
     }
     return changed.size;
   })();

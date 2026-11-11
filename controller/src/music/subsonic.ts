@@ -608,6 +608,11 @@ export async function getScanSummary(): Promise<{ scanning: boolean | null; coun
   }
 }
 
+export async function getRecentlyAddedAlbums({ size = 20, signal }: { size?: number; signal?: AbortSignal } = {}) {
+  const r = await call('getAlbumList2', { type: 'newest', size }, { ...RETRY_FAST_TRANSPORT, signal });
+  return r.albumList2?.album || [];
+}
+
 /** getScanStatus with Navidrome's `lastScan`, the time its last scan ended. */
 export interface ScanState {
   scanning: boolean;
@@ -630,11 +635,6 @@ export async function getScanState(): Promise<ScanState | null> {
   } catch {
     return null;
   }
-}
-
-export async function getRecentlyAddedAlbums({ size = 20, signal }: { size?: number; signal?: AbortSignal } = {}) {
-  const r = await call('getAlbumList2', { type: 'newest', size }, { ...RETRY_FAST_TRANSPORT, signal });
-  return r.albumList2?.album || [];
 }
 
 // Albums by play count. `offset` rotates the window — the top-N list barely
@@ -883,7 +883,7 @@ export async function* iterateAllSongs({ requireComplete = false, includeBlocked
             // iterated is the authoritative fallback.
             albumId: s.albumId ?? r.album?.id ?? album.id ?? null,
             // The album artist the era judgement keyed on, stored per track
-            // (C13) so the era review can key overrides without Navidrome.
+            // so the era review can key overrides without Navidrome.
             albumArtist: r.album?.artist ?? album.artist ?? null,
             albumIsCompilation: isCompilation,
             albumOriginalYear: originalYear,

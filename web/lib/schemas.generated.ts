@@ -354,14 +354,22 @@ export const hostedFlagSchema = z
   .transform((v) => (HOSTED_FLAG_ON as readonly string[]).includes(v));
 
 /**
- * The lowest stream ceiling a plan can have. MP3 is always served and its
+ * The lowest stream ceiling a station can have. MP3 is always served and its
  * lowest bitrate is 64 (SETTINGS_MP3_BITRATES, pinned by hosted-mode.test.ts),
  * so a ceiling under it could not be honoured: the MP3 mount would air above it.
  */
 export const HOSTED_MIN_BITRATE = 64;
 const HOSTED_MAX_BITRATE_LIMIT = 10_000;
 
-/** SUBWAVE_MAX_BITRATE: the plan's stream ceiling, whole kbps. */
+/**
+ * SUBWAVE_MAX_BITRATE: this station's stream ceiling, whole kbps. An
+ * unpublished hosting ceiling the box agent sets to guard the box's shared
+ * port, not a plan limit (plans sell listening hours).
+ *
+ * The box's listener ceiling (SUBWAVE_LISTENER_CAP) has no parser here on
+ * purpose: Icecast enforces it through the ICECAST_MAX_CLIENTS the box agent
+ * sets, and nothing in the controller or the admin reads or shows it.
+ */
 export const hostedMaxBitrateSchema = z
   .string()
   .transform((v) => v.trim())
@@ -372,16 +380,6 @@ export const hostedMaxBitrateSchema = z
     .int()
     .min(HOSTED_MIN_BITRATE, `must be at least ${HOSTED_MIN_BITRATE} kbps, MP3's lowest bitrate`)
     .max(HOSTED_MAX_BITRATE_LIMIT, `must be at most ${HOSTED_MAX_BITRATE_LIMIT} kbps`));
-
-const HOSTED_LISTENER_CAP_LIMIT = 10_000;
-
-/** SUBWAVE_LISTENER_CAP: the plan's concurrent-listener ceiling. */
-export const hostedListenerCapSchema = z
-  .string()
-  .transform((v) => v.trim())
-  .pipe(z.string().regex(/^\d+$/, 'is not a whole number'))
-  .transform(Number)
-  .pipe(z.number().int().min(1, 'must be at least 1').max(HOSTED_LISTENER_CAP_LIMIT, `must be at most ${HOSTED_LISTENER_CAP_LIMIT}`));
 
 /**
  * SUBWAVE_MUSIC_UPLOAD_URL / SUBWAVE_MUSIC_LIBRARY_URL: https only, so a stray
@@ -741,6 +739,8 @@ export interface SceneReference {
 // is named as { album, albumArtist? } and checked by the route (which keys it
 // and refuses an unscanned album); this owns the decision and its year.
 export const ERA_VERDICTS = ['trusted', 'year', 'suspect'] as const;
+/** The three ways out of the Era list (era_override.verdict). */
+export type EraVerdict = (typeof ERA_VERDICTS)[number];
 
 export function eraOverrideSchema() {
   return z.object({
@@ -748,7 +748,7 @@ export function eraOverrideSchema() {
     albumArtist: z.unknown().optional(),
     verdict: z.unknown().transform((raw, c) => {
       if (raw === null || (typeof raw === 'string' && (ERA_VERDICTS as readonly string[]).includes(raw))) {
-        return raw as (typeof ERA_VERDICTS)[number] | null;
+        return raw as EraVerdict | null;
       }
       c.addIssue({ code: 'custom', message: "verdict must be 'trusted', 'year', 'suspect' or null" });
       return z.NEVER;
@@ -3828,6 +3828,7 @@ export const djBehaviourPatchSchema = settingsBlockOf({
   showWelcome: z.boolean({ error: 'djBehaviour.showWelcome must be a boolean' }),
   previewNextShow: z.boolean({ error: 'djBehaviour.previewNextShow must be a boolean' }),
   sameHostAcknowledgement: z.boolean({ error: 'djBehaviour.sameHostAcknowledgement must be a boolean' }),
+  holdDuckBetweenSpeakers: z.boolean({ error: 'djBehaviour.holdDuckBetweenSpeakers must be a boolean' }),
   extendedSleeveNotes: z.boolean({ error: 'djBehaviour.extendedSleeveNotes must be a boolean' }),
   releaseYearMentions: z.enum(['regular', 'occasional', 'rare'], {
     error: 'djBehaviour.releaseYearMentions must be regular, occasional or rare',
@@ -5051,6 +5052,9 @@ function showObjectSchema(ctx: ShowSchemaContext) {
         max: EXCLUDED_PLAYLISTS_PER_SHOW,
         overflowError: `must have at most ${EXCLUDED_PLAYLISTS_PER_SHOW} entries`,
       }),
+      // A clean show: tracks tagged explicit stay off air (music/explicit-policy.ts).
+      // Stands alone, not one of the filters filtersStrict governs.
+      excludeExplicit: showBool(),
       // Album kinds this show never plays (Library → Era sets a kind per album),
       // e.g. 'dj-mix': a track cut out of a continuous mix starts and ends
       // mid-blend. Hard-dropped with the excluded playlists
@@ -5060,9 +5064,6 @@ function showObjectSchema(ctx: ShowSchemaContext) {
         values: ALBUM_KINDS,
         overflowError: `must have at most ${ALBUM_KINDS.length} entries`,
       }),
-      // A clean show: tracks tagged explicit stay off air (music/explicit-policy.ts).
-      // Stands alone, not one of the filters filtersStrict governs.
-      excludeExplicit: showBool(),
       // Organisation only, declared LAST so persisted key order is unchanged.
       // Unlike every other list here a bad entry is REFUSED rather than dropped:
       // a tag is typed by hand and must not vanish on save. The load twin

@@ -2,6 +2,7 @@
 // is the most expensive read in this module.
 
 import { SQL_HAS_MOODS, getDbNonce, requireDb } from './handle.js';
+import { ERA_ALBUM_KEY_SQL } from '../era-album-key.js';
 import type { LibraryStats } from './types.js';
 import { DAMAGED_DECODE_SQL } from './tracks.js';
 
@@ -177,6 +178,13 @@ const STATS_INDEXES: Array<[name: string, sql: string]> = [
   // stops the loop.
   ['idx_tracks_overview', 'CREATE INDEX IF NOT EXISTS idx_tracks_overview ON tracks(id, album_id, artist_id, artist, album, title, genres, moods, audio_moods, lastfm_tags, duration_sec, bpm, musical_key, loudness_lufs, loudness_version)'],
   ['idx_tracks_era_open', 'CREATE INDEX IF NOT EXISTS idx_tracks_era_open ON tracks(era_untrusted, album_artist, album, original_year)'],
+  // The era review (Library → Era). album_kind answers a show's
+  // excludedAlbumKinds on every pick (tracks.albumKindTrackIds); the album key
+  // answers each per-album read and write (era-review.ts). Both scanned the
+  // wide rows on the controller's thread. The key is an EXPRESSION index, so it
+  // is built on the very string every lookup uses (era-album-key.ts).
+  ['idx_tracks_album_kind', 'CREATE INDEX IF NOT EXISTS idx_tracks_album_kind ON tracks(album_kind)'],
+  ['idx_tracks_era_album_key', `CREATE INDEX IF NOT EXISTS idx_tracks_era_album_key ON tracks(${ERA_ALBUM_KEY_SQL})`],
 ];
 // Replaced by one of the above; dropped at open so it stops costing writes.
 const RETIRED_STATS_INDEXES = ['idx_tracks_era_review'];

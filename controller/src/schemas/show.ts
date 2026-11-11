@@ -426,6 +426,9 @@ function showObjectSchema(ctx: ShowSchemaContext) {
         max: EXCLUDED_PLAYLISTS_PER_SHOW,
         overflowError: `must have at most ${EXCLUDED_PLAYLISTS_PER_SHOW} entries`,
       }),
+      // A clean show: tracks tagged explicit stay off air (music/explicit-policy.ts).
+      // Stands alone, not one of the filters filtersStrict governs.
+      excludeExplicit: showBool(),
       // Album kinds this show never plays (Library → Era sets a kind per album),
       // e.g. 'dj-mix': a track cut out of a continuous mix starts and ends
       // mid-blend. Hard-dropped with the excluded playlists
@@ -435,9 +438,6 @@ function showObjectSchema(ctx: ShowSchemaContext) {
         values: ALBUM_KINDS,
         overflowError: `must have at most ${ALBUM_KINDS.length} entries`,
       }),
-      // A clean show: tracks tagged explicit stay off air (music/explicit-policy.ts).
-      // Stands alone, not one of the filters filtersStrict governs.
-      excludeExplicit: showBool(),
       // Organisation only, declared LAST so persisted key order is unchanged.
       // Unlike every other list here a bad entry is REFUSED rather than dropped:
       // a tag is typed by hand and must not vanish on save. The load twin

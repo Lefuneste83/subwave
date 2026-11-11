@@ -170,7 +170,7 @@ export async function backfillLastfmTrackTags(
   return listed;
 }
 
-// Ids still owed a MusicBrainz original-year lookup (#842). Keyless, so default-on;
+// Ids owed a MusicBrainz original-year lookup (#842). Keyless, so default-on;
 // [] when settings.embedding.enrichment.originalYear is false.
 //
 // Always the year facet's due set: tracks never asked, and failed lookups past

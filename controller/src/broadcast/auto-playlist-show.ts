@@ -15,8 +15,8 @@ export interface AutoPlaylistShow {
   playlistStrict?: unknown;
   playlistExhaust?: unknown;
   excludedPlaylistIds?: unknown;
-  excludedAlbumKinds?: unknown;
   excludeExplicit?: unknown;
+  excludedAlbumKinds?: unknown;
   maxTrackSeconds?: unknown;
   minTrackLengthSeconds?: unknown;
 }
@@ -51,9 +51,9 @@ export function autoPlaylistShowKey(show: AutoPlaylistShow | null | undefined): 
     // A full rotation's coast is its longest-waiting tracks, not a sample (#1919).
     playlistExhaust: show.playlistExhaust === true,
     excludedPlaylistIds: strings(show.excludedPlaylistIds),
+    excludeExplicit: show.excludeExplicit === true,
     // Drops whole album kinds from the coast too, so it rebuilds.
     excludedAlbumKinds: strings(show.excludedAlbumKinds),
-    excludeExplicit: show.excludeExplicit === true,
     maxTrackSeconds: typeof show.maxTrackSeconds === 'number' ? show.maxTrackSeconds : null,
     // Changes WHICH tracks the fallback may contain (#1573), so it rebuilds.
     minTrackLengthSeconds:

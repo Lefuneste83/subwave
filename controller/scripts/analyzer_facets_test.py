@@ -335,7 +335,7 @@ def t_vocal_and_stems_share_one_separation_and_shift_tail_ranges():
             calls.append("separate")
             return {"vocals": y}
 
-        def detect(self, y, sr, librosa, min_loud=None, stems=None):
+        def detect(self, y, sr, librosa, *, mix_floor, min_loud=None, stems=None):
             return [{"startMs": 1000, "endMs": 3000}]
 
     written = []
@@ -362,7 +362,7 @@ def t_stems_windows_tail_alone_skips_the_head_separation():
             calls.append("separate")
             return {"vocals": y}
 
-        def detect(self, y, sr, librosa, min_loud=None, stems=None):
+        def detect(self, y, sr, librosa, *, mix_floor, min_loud=None, stems=None):
             return [{"startMs": 1000, "endMs": 3000}]
 
     written = []
@@ -414,7 +414,7 @@ def t_tail_only_request_can_carry_tail_vocals():
             calls.append("separate")
             return {"vocals": y}
 
-        def detect(self, y, sr, librosa, min_loud=None, stems=None):
+        def detect(self, y, sr, librosa, *, mix_floor, min_loud=None, stems=None):
             return [{"startMs": 1000, "endMs": 3000}]
 
     y = np.concatenate([tone(12.0), silence(8.0)])
@@ -582,7 +582,7 @@ def _stems_marker_run(mark, lose_after=None):
                     os.remove(marker)
                 return {"vocals": y}
 
-            def detect(self, y, sr, librosa, min_loud=None, stems=None):
+            def detect(self, y, sr, librosa, *, mix_floor, min_loud=None, stems=None):
                 return [{"startMs": 1000, "endMs": 3000}]
 
         written = []

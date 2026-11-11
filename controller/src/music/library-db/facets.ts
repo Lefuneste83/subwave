@@ -60,7 +60,12 @@ export type FacetStatus = 'ok' | 'unmeasurable' | 'failed';
 
 // Bump ONE entry to re-target exactly that facet. Rows written by an older
 // version keep their version, so facetNeedsIds() picks them up again.
-// vocal v1 = head AND tail vocal ranges; a head-only row is stored at v0.
+// vocal v1 = head AND tail vocal ranges; a head-only row is stored one below
+// current. v2 (#2237) = the head measured with separation that is the same on
+// every run (Demucs shifts=0) and its own mix floor, 0.15 against v1's 0.06,
+// which read Demucs bleed on loud instrumentals as singing. Nothing re-measures
+// a v1 row on its own: `npm run analyze -- --facets vocal` does, one Demucs
+// pass per window per track, and marks the vector where the verdict moves.
 // loudness v2 = measured over the WHOLE file at its native rate (integrated
 // loudness, true peak, sample peak, LRA); v1 = the analysis window's figure,
 // which every head analysis still writes. The stored version is the
@@ -78,7 +83,7 @@ export const FACET_VERSIONS: Readonly<Record<Facet, number>> = {
   loudness: 2,
   tail: 3,
   clap: 1,
-  vocal: 1,
+  vocal: 2,
   stems: 1,
   edges: 1,
   year: 1,
@@ -91,17 +96,40 @@ export const FACET_VERSIONS: Readonly<Record<Facet, number>> = {
 // 21 Oct: re-measure only those).
 export const TAIL_PLACEMENT_TOLERANCE_MS = 3000;
 
+// The placed-tail stamp (`tracks.tail_version`), defined once. Two questions,
+// kept apart on purpose:
+//   - "did the analyzer place these stored columns?" is the raw stamp:
+//     isPlacedTailStamp / SQL_PLACED_TAIL_STAMP. The keep rules read it (an
+//     end-of-file write never replaces a placed tail; a --re-analyze clear
+//     keeps one), and so does the re-plan on moved edges. A NULL stamp the
+//     tolerance covers is still the end-of-file window's columns: an
+//     end-of-file answer may replace it, and a clear drops it as before.
+//   - "which window does the tail sit on?" is tailVersionOf, which adds the
+//     tolerance; the same-window rule for tail vocals reads it
+//     (tailEndsAtMusic), because that window held the same music.
+// A threshold, the FIRST placed version: it stays 2 when FACET_VERSIONS.tail
+// moves past it. What the analyzer's placed answer is stamped with is
+// FACET_VERSIONS.tail (PLACED_TAIL_STAMP).
+// Fork: the stamp a placed answer stores is placedTailVersion (3 when its outro
+// carries the loudness curve, else 2, due again); PLACED_TAIL_STAMP (3) is only
+// the "placed" marker the same-window rule for tail vocals passes along.
+export const MIN_PLACED_TAIL_VERSION = 2;
+export const PLACED_TAIL_STAMP = FACET_VERSIONS.tail;
+export function isPlacedTailStamp(version: number | null | undefined): version is number {
+  return (version ?? 1) >= MIN_PLACED_TAIL_VERSION;
+}
+export const SQL_PLACED_TAIL_STAMP = `(COALESCE(tail_version, 1) >= ${MIN_PLACED_TAIL_VERSION})`;
+
 // Which window a stored tail was measured on: the analyzer's own stamp (2, or
 // 3 with the loudness curve), else v2 when the edges show the end-of-file
 // window already ended at the music (that window carries no curve stamp, so
-// it is re-read once for v3), else v1.
-// A stamp of 1 is a tail placed for an end the re-measured edges have
+// it is re-read once for v3), else v1. A stamp of 1 is a tail placed for an end the re-measured edges have
 // since moved (tailPlacementMoved): v1, due again, whatever the edges say now,
 // because the stored window is neither the old placement nor the file's end.
 export function tailVersionOf(row: Pick<FacetSourceRow, 'tail_version' | 'has_edges' | 'edge_tail_ms'>): number {
-  if (row.tail_version != null && row.tail_version >= 2) return row.tail_version;
+  if (isPlacedTailStamp(row.tail_version)) return row.tail_version;
   if (row.tail_version === 1) return 1;
-  if (row.has_edges && row.edge_tail_ms != null && row.edge_tail_ms <= TAIL_PLACEMENT_TOLERANCE_MS) return 2;
+  if (row.has_edges && row.edge_tail_ms != null && row.edge_tail_ms <= TAIL_PLACEMENT_TOLERANCE_MS) return MIN_PLACED_TAIL_VERSION;
   return 1;
 }
 
@@ -113,6 +141,18 @@ export function tailVersionOf(row: Pick<FacetSourceRow, 'tail_version' | 'has_ed
 export function placedTailVersion(outro: { loudnessCurve?: unknown } | null | undefined): number {
   if (outro == null) return 3;
   return parseLoudnessCurve(outro.loudnessCurve) ? 3 : 2;
+}
+
+// Does a tail with this stamp sit on the window that ends where the music
+// stops? Placed by the analyzer, or an end-of-file window the edges show
+// already ended there (the tolerance). The same-window rule for tail vocals
+// compares the stored tail and the new evidence with this, on the same edges.
+export function tailEndsAtMusic(
+  stamp: number | null | undefined,
+  edges: { has_edges: number | boolean; edge_tail_ms: number | null },
+): boolean {
+  return tailVersionOf({ tail_version: stamp ?? null, has_edges: edges.has_edges ? 1 : 0, edge_tail_ms: edges.edge_tail_ms })
+    >= MIN_PLACED_TAIL_VERSION;
 }
 
 // Did re-measured edges move where the music stops by more than the
@@ -128,6 +168,17 @@ export function tailPlacementMoved(
   const a = end(before);
   const b = end(after);
   return a != null && b != null && Math.abs(a - b) > TAIL_PLACEMENT_TOLERANCE_MS;
+}
+
+// Did re-measured edges move a tail the analyzer placed (the raw stamp) off
+// the music's end? Then the stored window is neither the new placement nor the
+// file's end: the edges write re-plans it (tail_version 1), and the
+// same-window rule for tail vocals reads it that way in the same write.
+export function placedTailMovedBy(
+  row: { tail_version: number | null; edge_tail_ms: number | null; decoded_duration_ms: number | null },
+  edges: { edge_tail_ms: number | null; decoded_duration_ms: number | null },
+): boolean {
+  return isPlacedTailStamp(row.tail_version) && tailPlacementMoved(row, edges);
 }
 
 // The facets read off one whole-file decode rather than the analysis windows.
@@ -662,10 +713,10 @@ export function clearFacetRows(opts: { keepVocal?: boolean; clearStems?: boolean
     d.prepare(`DELETE FROM track_facet_status WHERE facet = 'tail' AND status <> 'ok'`).run();
   } else {
     // Without keepVocal the tail columns go, except a placed tail's
-    // (tail_version >= 2), which clearAnalysis keeps like whole-file loudness.
+    // (SQL_PLACED_TAIL_STAMP), which clearAnalysis keeps like whole-file loudness.
     d.prepare(
       `DELETE FROM track_facet_status
-        WHERE facet = 'tail' AND track_id NOT IN (SELECT id FROM tracks WHERE tail_version >= 2)`,
+        WHERE facet = 'tail' AND track_id NOT IN (SELECT id FROM tracks WHERE ${SQL_PLACED_TAIL_STAMP})`,
     ).run();
   }
   d.prepare(

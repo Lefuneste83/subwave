@@ -49,6 +49,8 @@ let placedMiss = false;
 // The analyzer measures the tail's loudness curve (it has pyloudnorm).
 let curveAnswer = true;
 const CURVE = { startMs: 190_000, stepMs: 500, lufs: [-120, -150, -300] };
+// How long the stub takes over a flat answer (the request deadline tests).
+let flatDelayMs = 0;
 
 function handler(req: IncomingMessage, res: ServerResponse) {
   if (req.url?.startsWith('/health')) {
@@ -69,13 +71,15 @@ function handler(req: IncomingMessage, res: ServerResponse) {
       if (!r.facets) {
         // A regular (flat) analysis: the whole flat answer.
         const end = tw && placedAnswer ? tw.end_ms : 214_000;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({
-          ok: true, bpm: 120, key: 'Am', intro_ms: 0, confidence: 0.9, loudness_lufs: -10, peak_db: -1,
-          outro: { startMs: end - 5000, ending: 'cold', bpm: 120, beats: [end - 1000], ...(curveAnswer ? { loudnessCurve: CURVE } : {}) },
-          ...(tw && placedAnswer ? { tail_window: 'edges', tail_silence_ms: tw.duration_ms - tw.end_ms, tail_start_ms: tw.end_ms }
-            : { tail_silence_ms: 300, tail_start_ms: 213_700 }),
-        }));
+        setTimeout(() => {
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({
+            ok: true, bpm: 120, key: 'Am', intro_ms: 0, confidence: 0.9, loudness_lufs: -10, peak_db: -1,
+            outro: { startMs: end - 5000, ending: 'cold', bpm: 120, beats: [end - 1000], ...(curveAnswer ? { loudnessCurve: CURVE } : {}) },
+            ...(tw && placedAnswer ? { tail_window: 'edges', tail_silence_ms: tw.duration_ms - tw.end_ms, tail_start_ms: tw.end_ms }
+              : { tail_silence_ms: 300, tail_start_ms: 213_700 }),
+          }));
+        }, flatDelayMs);
         return;
       }
       const facets: Record<string, unknown> = {};
@@ -133,6 +137,8 @@ const analyzer = await import('../src/music/analyzer.js');
 const { checkFacets } = await import('../src/music/facet-check.js');
 const { config } = await import('../src/config.js');
 const { MAX_ANALYSIS_FAILURES } = await import('../src/music/analyze-capability.js');
+const LV = await import('../src/music/lyric-vocal.js');
+const mix = await import('../src/music/mix.js');
 await db.open({ embeddingDim: 8, adoptStoredDim: true });
 await analyzer.isAvailable();
 
@@ -146,6 +152,8 @@ const sql = (q: string) => db.requireDb().prepare(q);
 type Row = { status: string; version: number; reason: string | null };
 const tailRow = (id: string) =>
   sql('SELECT status, version, reason FROM track_facet_status WHERE track_id = ? AND facet = ?').get(id, 'tail') as Row | undefined;
+const vocalRowOf = (id: string) =>
+  sql(`SELECT status, version, reason FROM track_facet_status WHERE track_id = ? AND facet = 'vocal'`).get(id) as Row | undefined;
 const tailVersionCol = (id: string) => (sql('SELECT tail_version AS v FROM tracks WHERE id = ?').get(id) as { v: number | null }).v;
 const consistent = () => {
   const r = checkFacets();
@@ -243,7 +251,10 @@ test('an end-of-file answer replaces a placed tail, and drops its stamp', () => 
   assert.equal(tailRow('replaced')?.version, 1);
 });
 
-test('tail vocal ranges are carried only onto the same window', () => {
+test('a tail re-measured without its vocals keeps the stored ones: singing on any window, [] only on its own', () => {
+  // Spans are absolute file times, so singing an end-of-file window heard is
+  // still true of the file once the tail is placed. Dropping it moved the
+  // instrumental verdict toward instrumental with nothing re-measured.
   track('tv');
   writeEdges('tv', 20_000);
   db.writeFacetResults('tv', { source: 'full', tail: {
@@ -251,16 +262,30 @@ test('tail vocal ranges are carried only onto the same window', () => {
   // An end-of-file re-measure without vocals keeps them (same window)...
   writeTail('tv');
   assert.deepEqual(db.getTrack('tv')!.outro?.vocalRanges, [{ startMs: 205_000, endMs: 208_000 }]);
-  // ...a newly placed window does not: they were measured on other audio.
-  writeTail('tv', 3);
-  assert.equal(db.getTrack('tv')!.outro?.vocalRanges ?? null, null);
+  // ...and so does a newly placed window: singing is carried across windows.
+  writeTail('tv', 2);
+  assert.equal(tailVersionCol('tv'), 2);
+  assert.deepEqual(db.getTrack('tv')!.outro?.vocalRanges, [{ startMs: 205_000, endMs: 208_000 }]);
+  // An instrumental reading is carried on its own window only: from another
+  // it says nothing about this one, and absent reads the same in the verdict.
+  track('tv-inst');
+  writeEdges('tv-inst', 20_000);
+  db.writeFacetResults('tv-inst', { source: 'full', vocal: { vocalRanges: [], tailVocalRanges: null } });
+  db.writeFacetResults('tv-inst', { source: 'full', tail: { outro: { ...OUTRO, vocalRanges: [] }, tailSilenceMs: 500, tailStartMs: 213_500 } });
+  writeTail('tv-inst');
+  assert.deepEqual(db.getTrack('tv-inst')!.outro?.vocalRanges, []);
+  const before = LV.isInstrumental(db.getTrack('tv-inst') as never);
+  writeTail('tv-inst', 2);
+  assert.equal(db.getTrack('tv-inst')!.outro?.vocalRanges ?? null, null);
+  assert.equal(LV.isInstrumental(db.getTrack('tv-inst') as never), before, 'the verdict does not move');
+  assert.equal(vocalRowOf('tv-inst')?.reason, 'head-only', 'measured again by the vocal backfill');
   consistent();
 });
 
-test('a flat analysis carries tail vocal ranges only onto the same window', () => {
-  // preserveTailVocal had no same-window check on this path: an end-of-file
-  // flat answer kept the vocals of a placed window it did not replace, and a
-  // placed answer kept the vocals of an end-of-file window.
+test('a flat analysis keeps tail vocal ranges it did not measure: singing on any window, [] only on its own', () => {
+  // The flat write of a pass not measuring vocals (preserveTailVocal), placed
+  // over an end-of-file tail: a vocal-off --re-analyze must keep the tail half
+  // of the instrumental verdict (#2255).
   track('flat-tv');
   writeEdges('flat-tv', 20_000);
   db.writeFacetResults('flat-tv', { source: 'full', tail: {
@@ -271,14 +296,23 @@ test('a flat analysis carries tail vocal ranges only onto the same window', () =
     outro: { ...OUTRO, startMs: 188_000 }, tailSilenceMs: 20_000, tailStartMs: 194_000, tailVersion: 2,
   });
   assert.equal(tailVersionCol('flat-tv'), 2);
-  assert.equal(db.getTrack('flat-tv')!.outro?.vocalRanges ?? null, null, 'placed: the end-of-file vocals are not carried');
-  // Same window (placed over placed): carried.
+  assert.deepEqual(db.getTrack('flat-tv')!.outro?.vocalRanges, [{ startMs: 205_000, endMs: 208_000 }], 'singing is carried');
+  // Same window (placed over placed): carried, whatever it holds.
   db.writeFacetResults('flat-tv', { source: 'full', vocal: { vocalRanges: [], tailVocalRanges: [{ startMs: 189_000, endMs: 190_000 }], tailWindow: 'placed' } });
   db.upsertTrackAnalysis('flat-tv', {
     bpm: 100, musicalKey: 'C', loudnessLufs: -9, peakDb: -1, source: 'full', preserveTailVocal: true,
     outro: { ...OUTRO, startMs: 188_500 }, tailSilenceMs: 20_000, tailStartMs: 194_000, tailVersion: 2,
   });
   assert.deepEqual(db.getTrack('flat-tv')!.outro?.vocalRanges, [{ startMs: 189_000, endMs: 190_000 }]);
+  // An instrumental end-of-file reading is not carried onto a placed tail.
+  track('flat-inst');
+  writeEdges('flat-inst', 20_000);
+  db.writeFacetResults('flat-inst', { source: 'full', tail: { outro: { ...OUTRO, vocalRanges: [] }, tailSilenceMs: 500, tailStartMs: 213_500 } });
+  db.upsertTrackAnalysis('flat-inst', {
+    bpm: 100, musicalKey: 'C', loudnessLufs: -9, peakDb: -1, source: 'full', preserveTailVocal: true,
+    outro: { ...OUTRO, startMs: 188_000 }, tailSilenceMs: 20_000, tailStartMs: 194_000, tailVersion: 2,
+  });
+  assert.equal(db.getTrack('flat-inst')!.outro?.vocalRanges ?? null, null);
   consistent();
 });
 
@@ -719,5 +753,272 @@ test('a vocal-only request sends the tail window too, so the tail vocals come ba
   assert.deepEqual(requests[0].tail_window, { end_ms: 194_000, duration_ms: 214_000 }, JSON.stringify(requests[0]));
   assert.deepEqual(db.getTrack('voc1')!.outro?.vocalRanges, [{ startMs: 186_000, endMs: 188_000 }]);
   assert.deepEqual([vocalRow().status, vocalRow().version, vocalRow().reason], ['ok', db.FACET_VERSIONS.vocal, null]);
+  consistent();
+});
+
+test('placed tail vocals merge into an end-of-file outro the tolerance counts as placed, and settle on the first answer', () => {
+  // An unstamped end-of-file tail whose edges show 1 s of trailing silence is
+  // v2 (tailVersionOf): no tail is ever planned for it. The placed vocal
+  // answer used to be refused against it (the raw stamp said end-of-file), so
+  // the vocal row stayed head-only and every `--facets vocal` run separated
+  // the track again.
+  track('tol-voc');
+  writeEdges('tol-voc', 1_000);
+  writeTail('tol-voc');
+  assert.equal(tailVersionCol('tol-voc'), null);
+  // Fork: v2 is one below the v3 tail (the loudness curve), so this window is
+  // read once more for its curve; the vocal answers below must not change that.
+  assert.deepEqual([tailRow('tol-voc')?.status, tailRow('tol-voc')?.version], ['ok', 2], 'fixture: an end-of-file window the tolerance covers');
+  const tailDueBefore = db.facetNeedsIds('tail').includes('tol-voc');
+  assert.equal(tailDueBefore, db.FACET_VERSIONS.tail > 2, 'fixture: due only for the curve');
+  for (let i = 0; i < 3; i++) {
+    db.writeFacetResults('tol-voc', { source: 'full', vocal: {
+      vocalRanges: [], tailVocalRanges: [{ startMs: 205_000, endMs: 207_000 }], tailWindow: 'placed' } });
+    assert.deepEqual(db.getTrack('tol-voc')!.outro?.vocalRanges, [{ startMs: 205_000, endMs: 207_000 }], `answer ${i}`);
+    const v = vocalRowOf('tol-voc');
+    assert.deepEqual([v?.status, v?.version, v?.reason], ['ok', db.FACET_VERSIONS.vocal, null], `answer ${i}`);
+    assert.ok(!db.facetNeedsIds('vocal').includes('tol-voc'), `vocal due after answer ${i}`);
+    assert.equal(db.facetNeedsIds('tail').includes('tol-voc'), tailDueBefore, `tail due after answer ${i}`);
+  }
+  consistent();
+});
+
+test('past the tolerance, placed tail vocals still stay out of an end-of-file outro', () => {
+  // The other half of the rule: 3.001 s of silence is a different window.
+  track('far-voc');
+  writeEdges('far-voc', 3_001);
+  writeTail('far-voc');
+  db.writeFacetResults('far-voc', { source: 'full', vocal: {
+    vocalRanges: [], tailVocalRanges: [{ startMs: 203_000, endMs: 205_000 }], tailWindow: 'placed' } });
+  assert.equal(db.getTrack('far-voc')!.outro?.vocalRanges ?? null, null);
+  assert.equal(vocalRowOf('far-voc')?.reason, 'head-only');
+  assert.ok(db.facetNeedsIds('tail').includes('far-voc'), 'the tail is due, so placing it measures them');
+  consistent();
+});
+
+test('edges that move a placed tail in the same answer judge it on neither window: [] is not carried, vocals not merged', () => {
+  // The stored tail was placed for music ending at 174 s; this answer's edges
+  // put the end at 213 s, so its placed window (and any vocals measured on it)
+  // is new music. Read by the raw stamp, the old placement counted as "the
+  // same window": its instrumental [] was carried onto the unmeasured new
+  // window, settling the vocal row, and vocals from the new window merged
+  // into the old window's outro.
+  const placedOld = (id: string, vocalRanges: TrackSectionLike[]) => {
+    track(id);
+    db.writeFacetResults(id, { source: 'full', vocal: { vocalRanges: [], tailVocalRanges: null } });
+    writeEdges(id, 40_000);
+    db.writeFacetResults(id, { source: 'full', tail: {
+      outro: { ...OUTRO, startMs: 168_000, vocalRanges }, tailSilenceMs: 40_000, tailStartMs: 174_000, version: 2 } });
+  };
+  const movedEdges = { leadMs: 0, tailMs: 1_000, durationMs: 214_000 };
+  const newTail = { outro: { ...OUTRO, startMs: 207_000 }, tailSilenceMs: 1_000, tailStartMs: 213_000, version: 2 };
+
+  placedOld('mv-inst', []);
+  db.writeFacetResults('mv-inst', { source: 'full', edges: movedEdges, tail: newTail });
+  assert.equal(tailVersionCol('mv-inst'), 2);
+  assert.equal(db.getTrack('mv-inst')!.outro?.vocalRanges ?? null, null, 'the old window\'s [] is not carried');
+  assert.equal(vocalRowOf('mv-inst')?.reason, 'head-only', 'the new window is measured again');
+
+  // Singing is still carried: absolute file times stay true of the file.
+  placedOld('mv-sung', [{ startMs: 160_000, endMs: 167_000 }]);
+  db.writeFacetResults('mv-sung', { source: 'full', edges: movedEdges, tail: newTail });
+  assert.deepEqual(db.getTrack('mv-sung')!.outro?.vocalRanges, [{ startMs: 160_000, endMs: 167_000 }]);
+
+  placedOld('mv-voc', []);
+  db.writeFacetResults('mv-voc', { source: 'full', edges: movedEdges,
+    vocal: { vocalRanges: [], tailVocalRanges: [{ startMs: 205_000, endMs: 211_000 }], tailWindow: 'placed' } });
+  assert.equal(tailVersionCol('mv-voc'), 1, 're-planned');
+  assert.deepEqual(db.getTrack('mv-voc')!.outro?.vocalRanges, [], 'the new window\'s vocals stay out of the old outro');
+  assert.equal(vocalRowOf('mv-voc')?.reason, null, 'its measured [] still stands until the tail is placed');
+  assert.ok(db.facetNeedsIds('tail').includes('mv-voc'));
+
+  // One answer that places the tail from its own new edges and measures its
+  // vocals still merges them: the stored tail is this answer's.
+  placedOld('mv-all', []);
+  db.writeFacetResults('mv-all', { source: 'full', edges: movedEdges, tail: newTail,
+    vocal: { vocalRanges: [], tailVocalRanges: [{ startMs: 205_000, endMs: 211_000 }], tailWindow: 'placed' } });
+  assert.deepEqual(db.getTrack('mv-all')!.outro?.vocalRanges, [{ startMs: 205_000, endMs: 211_000 }]);
+  assert.equal(vocalRowOf('mv-all')?.reason, null);
+  // Edges that move less than the tolerance keep the placement's window.
+  placedOld('mv-near', []);
+  db.writeFacetResults('mv-near', { source: 'full', edges: { leadMs: 0, tailMs: 38_000, durationMs: 214_000 },
+    tail: { ...newTail, outro: { ...OUTRO, startMs: 170_000 } } });
+  assert.deepEqual(db.getTrack('mv-near')!.outro?.vocalRanges, []);
+  consistent();
+});
+type TrackSectionLike = { startMs: number; endMs: number };
+
+test('a --facets vocal run settles a tolerance-covered track, and the next run plans no work for it', async () => {
+  track('tol-run');
+  writeEdges('tol-run', 1_000);
+  writeTail('tol-run');
+  db.writeFacetResults('tol-run', { source: 'full', vocal: { vocalRanges: [], tailVocalRanges: null } });
+  assert.equal(vocalRowOf('tol-run')?.reason, 'head-only', 'fixture: the stuck row');
+  const vocalPlan = () => P.planAcoustics({
+    ids: ['tol-run'], facets: P.parseFacets('vocal'), where: { kind: 'needs' }, state: db.loadFacetState(P.parseFacets('vocal')),
+    capabilities: { clap: false, demucs: true, tailVocal: true, wholeFile: true },
+  });
+  const first = vocalPlan();
+  assert.deepEqual(first.items.map(i => i.facets), [['vocal']]);
+  requests.length = 0;
+  await runAnalysisPass({ plan: first });
+  assert.equal(requests.length, 1);
+  assert.deepEqual(requests[0].tail_window, { end_ms: 213_000, duration_ms: 214_000 });
+  assert.deepEqual(db.getTrack('tol-run')!.outro?.vocalRanges, [{ startMs: 205_000, endMs: 207_000 }]);
+  for (let i = 0; i < 2; i++) {
+    const again = vocalPlan();
+    assert.equal(again.items.length, 0, `run ${i + 2} plans no work: ${JSON.stringify(again.items)}`);
+  }
+  consistent();
+});
+
+test('one deadline rule for every analyze request: a placed window or a whole-file facet gets the long one', () => {
+  const { requestTimeoutMs: pass, wholeFileTimeoutMs: whole } = config.analyzer;
+  const long = Math.max(pass, whole);
+  const tw = { end_ms: 194_000, duration_ms: 214_000 };
+  // Flat requests (the worker and the sidecar alike).
+  assert.equal(analyzer.analyzeRequestTimeoutMs({ path: '/x.flac' }), pass);
+  assert.equal(analyzer.analyzeRequestTimeoutMs({ path: '/x.flac', complete: true, tail_window: tw }), long,
+    'a complete copy read in place can still fall back to a decode from the start');
+  // Facet requests: the caller's deadline stands unless the request may read the stream.
+  assert.equal(analyzer.analyzeRequestTimeoutMs({ facets: ['head'] }), pass);
+  assert.equal(analyzer.analyzeRequestTimeoutMs({ facets: ['head'] }, 5_000), 5_000);
+  assert.equal(analyzer.analyzeRequestTimeoutMs({ facets: ['edges'] }, 5_000), long);
+  assert.equal(analyzer.analyzeRequestTimeoutMs({ facets: ['vocal'], tail_window: tw }, 5_000), long);
+  assert.equal(analyzer.analyzeRequestTimeoutMs({ facets: ['tail'], tail_window: tw }, long + 1), long + 1, 'a longer caller deadline wins');
+});
+
+test('a flat request with a placed window waits for the long deadline; one without keeps the pass deadline', async () => {
+  const cfg = config.analyzer as { requestTimeoutMs: number; wholeFileTimeoutMs: number };
+  const saved = { ...cfg };
+  cfg.requestTimeoutMs = 150;
+  cfg.wholeFileTimeoutMs = 5_000;
+  flatDelayMs = 600;
+  try {
+    const placed = await analyzer.analyze('dl1', { tail_window: { end_ms: 194_000, duration_ms: 214_000 } });
+    assert.equal(placed.tailPlaced, true, 'answered inside the whole-file deadline');
+    await assert.rejects(analyzer.analyze('dl2', {}), 'an unplaced flat request keeps the short pass deadline');
+  } finally {
+    flatDelayMs = 0;
+    cfg.requestTimeoutMs = saved.requestTimeoutMs;
+    cfg.wholeFileTimeoutMs = saved.wholeFileTimeoutMs;
+  }
+});
+
+// ── Tail vocal evidence is never dropped by a write that did not measure it ──
+// The instrumental verdict reads the tail's spans (lyric-vocal.ts: "the tail
+// can only move a verdict toward vocal"), so placing a tail without its vocals
+// (vocal detection off, or a tail-only run that did not ask) must leave a
+// sung track sung.
+
+// The verdict both ways it is read: the JS rule and the SQL scalar's inputs.
+const verdicts = (id: string) => {
+  const row = sql(`SELECT vocal_ranges_json AS head, ${db.SQL_TAIL_VOCAL_RANGES} AS tail FROM tracks WHERE id = ?`)
+    .get(id) as { head: string | null; tail: string | null };
+  return { js: LV.isInstrumental(db.getTrack(id) as never), sql: LV.instrumentalFromJson(row.head, row.tail) };
+};
+// An instrumental head (measured) and a sung end-of-file tail: 7 s of singing,
+// past INSTRUMENTAL_VOCAL_TOLERANCE_MS, inside both the end-of-file window and
+// the placed one.
+const SUNG = [{ startMs: 186_000, endMs: 193_000 }];
+const sungTrack = (id: string) => {
+  track(id);
+  writeEdges(id, 20_000);
+  db.writeFacetResults(id, { source: 'full', vocal: { vocalRanges: [], tailVocalRanges: null } });
+  db.writeFacetResults(id, { source: 'full', tail: { outro: { ...OUTRO, vocalRanges: SUNG }, tailSilenceMs: 500, tailStartMs: 213_500 } });
+  assert.equal(tailVersionCol(id), null, 'fixture: an end-of-file tail');
+  assert.equal(tailRow(id)?.version, 1, 'fixture: due for placement');
+  assert.deepEqual(verdicts(id), { js: false, sql: 0 }, 'fixture: a sung track');
+};
+
+test('a --facets tail run with vocal detection off places the tail and keeps the track sung', async () => {
+  sungTrack('sung-run');
+  const p = plan(['sung-run']);
+  assert.deepEqual(p.items.map(i => i.facets), [['tail']]);
+  requests.length = 0;
+  await runAnalysisPass({ plan: p, vocalBackfill: false });
+  assert.equal(requests.length, 1);
+  assert.deepEqual(requests[0].tail_window, { end_ms: 194_000, duration_ms: 214_000 });
+  assert.notEqual(requests[0].tail_vocals, true, 'no vocal re-measure was asked for');
+  assert.equal(tailVersionCol('sung-run'), 3, 'the tail was placed (v3: the stub answers with the curve)');
+  const outro = db.getTrack('sung-run')!.outro!;
+  assert.deepEqual(outro.vocalRanges, SUNG, 'the sung spans are kept');
+  assert.deepEqual(verdicts('sung-run'), { js: false, sql: 0 }, 'still sung');
+  // Read against the MOVED window: the placed wind-down starts at 188 s, and
+  // the kept span (absolute time) runs into it, so the ending reads sung.
+  assert.equal(outro.startMs, 188_000);
+  assert.equal(mix.vocalTailFor(outro.vocalRanges, outro.startMs), true);
+  consistent();
+});
+
+test('a malformed stored span is carried as stored, so it still keeps the track out of instrumental', () => {
+  // The parsed outro drops a bad span; the verdict counts it as singing.
+  track('bad-span');
+  writeEdges('bad-span', 20_000);
+  db.writeFacetResults('bad-span', { source: 'full', vocal: { vocalRanges: [], tailVocalRanges: null } });
+  db.requireDb().prepare('UPDATE tracks SET outro_json = ? WHERE id = ?').run(
+    JSON.stringify({ ...OUTRO, vocalRanges: [{ startMs: 190_000, endMs: 189_000 }] }), 'bad-span');
+  assert.deepEqual(verdicts('bad-span'), { js: false, sql: 0 }, 'fixture: a bad span reads vocal');
+  writeTail('bad-span', 2);
+  assert.equal(tailVersionCol('bad-span'), 2);
+  assert.deepEqual(verdicts('bad-span'), { js: false, sql: 0 });
+});
+
+test('a placed tail measured with its vocals replaces the kept evidence', () => {
+  // Vocal detection on: the re-measure arrives with the tail and wins, even
+  // when it moves the verdict (the tail WAS measured for vocals).
+  sungTrack('sung-remeasured');
+  db.writeFacetResults('sung-remeasured', { source: 'full', tail: {
+    outro: { ...OUTRO, startMs: 188_000, vocalRanges: [] }, tailSilenceMs: 20_000, tailStartMs: 194_000, version: 2 } });
+  assert.deepEqual(db.getTrack('sung-remeasured')!.outro?.vocalRanges, []);
+  assert.deepEqual(verdicts('sung-remeasured'), { js: true, sql: 1 });
+  consistent();
+});
+
+// Last: a --re-analyze clears and re-analyses every track in this database.
+test('a vocal-off --re-analyze places the tail and keeps the track sung (#2255)', async () => {
+  sungTrack('sung-flat');
+  requests.length = 0;
+  await runAnalysisPass({ reAnalyze: true, vocalBackfill: false, audioBackfill: false });
+  const mine = requests.find((q) => JSON.stringify(q).includes('sung-flat') && !q.facets);
+  assert.ok(mine, 'the flat request was sent');
+  assert.deepEqual(mine.tail_window, { end_ms: 194_000, duration_ms: 214_000 });
+  assert.equal(tailVersionCol('sung-flat'), 3, 'the flat answer placed the tail (v3, with the curve)');
+  assert.deepEqual(db.getTrack('sung-flat')!.outro?.vocalRanges, SUNG);
+  assert.deepEqual(verdicts('sung-flat'), { js: false, sql: 0 });
+  consistent();
+});
+
+// Last as well (a --re-analyze over the whole database). Pins a known gap,
+// left as is: the edges slice that runs BEFORE a regular pass covers
+// needsAnalysisIds only. A track the pass reaches another way (a --re-analyze
+// scope, or the vocal/CLAP/stem widenings) and that has no edges yet gets an
+// end-of-file tail in that pass. It is stored v1, so it is not lost: the next
+// tail pass places it.
+test('a track the pass reaches without edges keeps an end-of-file tail at v1, and the next tail pass places it', async () => {
+  track('gap1');
+  assert.equal(db.getTrack('gap1')?.decodedDurationMs ?? null, null, 'fixture: analysed, no edges yet');
+  (config.analyzer as { wholeFile: boolean }).wholeFile = true;
+  try {
+    requests.length = 0;
+    await runAnalysisPass({ reAnalyze: true, vocalBackfill: false, audioBackfill: false });
+  } finally {
+    (config.analyzer as { wholeFile: boolean }).wholeFile = false;
+  }
+  const mine = (q: Record<string, unknown>) => JSON.stringify(q).includes('gap1');
+  const flatAt = requests.findIndex((q) => mine(q) && !q.facets);
+  const edgesAt = requests.findIndex((q) => mine(q) && Array.isArray(q.facets) && (q.facets as string[]).includes('edges'));
+  assert.ok(flatAt >= 0 && edgesAt > flatAt, `the tail read (${flatAt}) came before its edges (${edgesAt})`);
+  assert.equal(requests[flatAt].tail_window, undefined, 'read off the end of the file');
+  assert.equal(tailVersionCol('gap1'), null);
+  assert.deepEqual([tailRow('gap1')?.status, tailRow('gap1')?.version], ['ok', 1], 'stored one version below');
+  assert.ok(db.facetNeedsIds('tail').includes('gap1'), 'due for the next tail pass');
+  const p = plan(['gap1']);
+  assert.deepEqual(p.items.map(i => i.facets), [['tail']]);
+  requests.length = 0;
+  await runAnalysisPass({ plan: p, vocalBackfill: false });
+  assert.deepEqual(requests[0].tail_window, { end_ms: 194_000, duration_ms: 214_000 });
+  assert.equal(tailVersionCol('gap1'), 3);
+  assert.ok(!db.facetNeedsIds('tail').includes('gap1'));
   consistent();
 });

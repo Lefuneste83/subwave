@@ -88,11 +88,11 @@ export interface Show {
   playlistInOrder: boolean;
   /** Excluded from the candidate pool regardless of the other filters. */
   excludedPlaylistIds: string[];
-  /** Album kinds (Library → Era) never played on this show, e.g. 'dj-mix'. */
-  excludedAlbumKinds: string[];
   /** A clean show: tracks tagged explicit stay off air. Only a positive tag
    *  counts, so an untagged track still plays. */
   excludeExplicit: boolean;
+  /** Album kinds (Library → Era) never played on this show, e.g. 'dj-mix'. */
+  excludedAlbumKinds: string[];
   /** The show airs as a produced episode: intro, feature segment, sign-off. */
   programme: boolean;
   /** Pin the feature segment to one skill. Empty = producer picks per episode.
