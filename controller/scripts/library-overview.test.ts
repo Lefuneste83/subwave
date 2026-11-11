@@ -22,6 +22,7 @@ await blocklist.load();
 const settings = await import('../src/settings.js');
 await settings.load();
 const ov = await import('../src/music/library-overview.js');
+const { config } = await import('../src/config.js');
 const era = await import('../src/music/era-review.js');
 
 after(async () => { db.close(); await removeTempDir(dir); });
@@ -74,18 +75,32 @@ test('library = can air + never play, and blocked rows split by what blocks them
   assert.equal(o.library, o.canAir + o.blocked.total);
 });
 
-test('DJ-ready needs moods, BPM, key and a whole-file loudness; blocked rows never count', async () => {
+test('DJ-ready needs moods, BPM, key and the loudness the station measures; blocked rows never count', async () => {
   track('ok');
   track('nomood', { moods: null });
   track('nobpm', { bpm: null });
   track('nokey', { musical_key: null });
   track('window-loudness', { loudness_version: 1 });
+  track('no-loudness', { loudness_lufs: null, loudness_version: null });
   track('blocked');
   await blocklist.add({ type: 'track', id: 'blocked' });
-  const o = ov.computeOverview(NOW);
-  assert.equal(o.djReady, 1);
-  assert.equal(o.taggedCanAir, 4, 'tagged = has moods, among what can air');
+  const lane = config.analyzer as { wholeFile: boolean };
+  const was = lane.wholeFile;
+  try {
+    // The whole-file lane on: only a whole-file loudness counts.
+    lane.wholeFile = true;
+    const o = ov.computeOverview(NOW);
+    assert.equal(o.djReady, 1);
+    assert.equal(o.taggedCanAir, 5, 'tagged = has moods, among what can air');
+    // Off (the default): nothing ever reaches v2, so the window figure counts,
+    // and a track with no loudness at all still does not.
+    lane.wholeFile = false;
+    assert.equal(ov.computeOverview(NOW).djReady, 2);
+  } finally {
+    lane.wholeFile = was;
+  }
 });
+
 
 test('aired counts distinct tracks that can air, in the window and ever', async () => {
   for (const id of ['a', 'b', 'c', 'd']) track(id);

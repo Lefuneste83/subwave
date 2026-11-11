@@ -186,7 +186,7 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
           tip={<>
             The tracks the DJ may pick: the library minus the never-play list.
             <br /><b>DJ-ready</b> = mood &amp; energy tagged, BPM &amp; key measured, loudness measured
-            over the whole file. A track missing one still airs, but the DJ and the mixer know less about it.
+            (over the whole file when whole-file analysis is on). A track missing one still airs, but the DJ and the mixer know less about it.
             {o?.lengthLimits && <><br />Length limits are set per show: the second figure is what
               {o.lengthLimits.show ? ` ${o.lengthLimits.show}` : ' the show on air'} can pick from.</>}
             <br />Click to open the Browse tab.
@@ -240,6 +240,7 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
             <br />· <b>tracks</b> with a measurement still due, not a bad file (a tail read before its edges were known): an analysis run of that measure takes them again
             <br />· <b>tracks</b> whose original-year lookup failed
             <br />· <b>tracks</b> the analysis gave up on after repeated failures
+            <br />· <b>tracks</b> whose file decodes into bursts far over full scale (corrupt frames): they air too quiet or click
             <br />All clear at 0.
           </>}
         />

@@ -13,6 +13,7 @@
 
 import * as db from './library-db.js';
 import * as blocklist from './blocklist.js';
+import { config } from '../config.js';
 import { countEraToReview, csvField } from './era-review.js';
 import { effectiveMinTrackSec, effectiveTrackLengthLimits, resolveActiveShow } from '../settings.js';
 
@@ -121,11 +122,16 @@ function hasColumn(cols: Set<string>, c: string): boolean {
 export function overviewRowsSql(): string {
   const d = db.requireDb();
   const cols = new Set((d.prepare('PRAGMA table_info(tracks)').all() as Array<{ name: string }>).map(c => c.name));
-  // Whole-file loudness is `loudness_version >= 2`; a library without the
-  // column has no whole-file figure, so nothing there is DJ-ready on it.
-  const loud = hasColumn(cols, 'loudness_version')
-    ? 'loudness_lufs IS NOT NULL AND COALESCE(loudness_version, 1) >= 2'
-    : '0';
+  // Loudness as this station measures it. With the whole-file lane on
+  // (ANALYZE_WHOLE_FILE) that is `loudness_version >= 2`, and a library
+  // without the column has no whole-file figure. With it off (the default)
+  // nothing ever reaches v2, so the window figure counts: requiring v2 there
+  // read every station as 0 % DJ-ready.
+  const loud = !config.analyzer.wholeFile
+    ? 'loudness_lufs IS NOT NULL'
+    : hasColumn(cols, 'loudness_version')
+      ? 'loudness_lufs IS NOT NULL AND COALESCE(loudness_version, 1) >= 2'
+      : '0';
   // Exactly the columns of idx_tracks_overview, so SQLite walks that index
   // (SCAN … USING COVERING INDEX) and never the wide rows (#1937). `genre` is
   // a generated column the index cannot carry: it is genres[0], rebuilt below.

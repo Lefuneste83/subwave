@@ -1390,10 +1390,6 @@ export function clearAnalysisFailures(id?: string): number {
   })();
 }
 
-// How many tracks are out of scope for having failed too often (coverage badge).
-// The bare comparison, not analysisFailureExclusion()'s COALESCE, so it reads
-// idx_tracks_fail_count (#1937); same rows while MAX_ANALYSIS_FAILURES > 0,
-// since a NULL count is a 0.
 // A file that decodes into garbage: corrupt frames (seen on MP3s) that the
 // decoder turns into bursts far above full scale. No master peaks anywhere near
 // +12 dBTP (a loud one overshoots by +2 to +4 on its inter-sample peaks), and
@@ -1412,6 +1408,10 @@ export function damagedDecodeCount(): number {
   ).get() as { n: number }).n;
 }
 
+// How many tracks are out of scope for having failed too often (coverage badge).
+// The bare comparison, not analysisFailureExclusion()'s COALESCE, so it reads
+// idx_tracks_fail_count (#1937); same rows while MAX_ANALYSIS_FAILURES > 0,
+// since a NULL count is a 0.
 export function analysisFailedCount(): number {
   return (requireDb().prepare(
     `SELECT COUNT(*) AS n FROM tracks WHERE analyze_fail_count >= ${MAX_ANALYSIS_FAILURES}`,
