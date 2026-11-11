@@ -47,7 +47,7 @@ const stateDir = mkdtempSync(join(tmpdir(), 'subwave-audio-energy-'));
 process.env.STATE_DIR = stateDir;
 
 const db = await import('../src/music/library-db.js');
-const { runPropagatedEnergyPass } = await import('../src/music/propagated-energy.js');
+const { audioEnergyOptions, runPropagatedEnergyPass } = await import('../src/music/propagated-energy.js');
 await db.open({ embeddingDim: 768, adoptStoredDim: true });
 
 after(async () => {
@@ -144,7 +144,7 @@ test('the correction scope is propagated rows carrying audio scores', () => {
 });
 
 test('a misjudged propagated track is corrected from its audio', () => {
-  stats = runPropagatedEnergyPass();
+  stats = runPropagatedEnergyPass({ fillEmpty: true, overruleLlm: false });
   assert.equal(db.getTrack('loud')!.energy, 'high', 'the reported failure case flips low → high');
 });
 
@@ -232,6 +232,48 @@ test('paging advances past a row whose score JSON is corrupt', () => {
   assert.equal(lastId, items[items.length - 1]?.id ?? lastId, 'cursor tracks the last SCANNED row');
   const end = db.pageAudioMoodScores('zzzzzzzz', 10);
   assert.equal(end.lastId, null, 'an exhausted walk reports done');
+});
+
+test('with both options off (the default) the pass only corrects propagated rows', () => {
+  db.upsertTrackMeta('offBlank', { title: 'offBlank', artist: 'N', album: 'O', duration: 300 });
+  db.upsertTrackTags('offBlank', { moods: ['night'], energy: null, source: 'llm', confidence: 0.8 });
+  db.setTrackAudioMoodScoresBulk([{ id: 'offBlank', scores: LOUD }]);
+  const off = runPropagatedEnergyPass();
+  assert.equal(db.getTrack('offBlank')!.energy, null, 'no fill unless the operator opted in');
+  assert.equal(db.getTrack('judged')!.energy, 'low', 'no overrule unless the operator opted in');
+  assert.equal(off.fillScope, 0);
+  assert.equal(off.overruleScope, 0);
+  assert.deepEqual(audioEnergyOptions(undefined), { fillEmpty: false, overruleLlm: false });
+  assert.deepEqual(audioEnergyOptions({ embedding: { audioEnergy: { fillEmpty: 'yes' } } }), { fillEmpty: false, overruleLlm: false }, 'only a real true opts in');
+});
+
+test('the overrule replaces an LLM energy only where the audio is strongly decisive', () => {
+  db.upsertTrackMeta('llmMid', { title: 'llmMid', artist: 'P', album: 'Q', duration: 300 });
+  db.upsertTrackTags('llmMid', { moods: ['night'], energy: 'high', source: 'llm', confidence: 0.8 });
+  db.setTrackAudioMoodScoresBulk([{ id: 'llmMid', scores: MIDDLING }]);
+  db.upsertTrackMeta('llmQuietWrong', { title: 'llmQuietWrong', artist: 'R', album: 'S', duration: 300 });
+  db.upsertTrackTags('llmQuietWrong', { moods: ['night'], energy: 'medium', source: 'uncertain-llm', confidence: 0.8 });
+  db.setTrackAudioMoodScoresBulk([{ id: 'llmQuietWrong', scores: QUIET }]);
+  db.upsertTrackMeta('mine', { title: 'mine', artist: 'T', album: 'U', duration: 300 });
+  db.upsertTrackTags('mine', { moods: ['night'], energy: 'low', source: 'manual', confidence: 1 });
+  db.setTrackAudioMoodScoresBulk([{ id: 'mine', scores: LOUD }]);
+
+  const run = runPropagatedEnergyPass({ fillEmpty: false, overruleLlm: true });
+  assert.equal(db.getTrack('judged')!.energy, 'high', 'an LLM low on strongly loud audio is overruled');
+  assert.equal(db.getTrack('judged')!.source, 'llm', 'only the energy column moves');
+  assert.equal(db.getTrack('llmQuietWrong')!.energy, 'low', "an LLM medium on strongly quiet audio too");
+  assert.equal(db.getTrack('llmMid')!.energy, 'high', 'audio short of the strong band never overrules');
+  assert.equal(db.getTrack('mine')!.energy, 'low', "an operator's energy is never overruled");
+  assert.equal(db.getTrack('offBlank')!.energy, null, 'the overrule never fills');
+  assert.equal(run.overruled, 2);
+  assert.equal(runPropagatedEnergyPass({ fillEmpty: false, overruleLlm: true }).overruled, 0, 'idempotent');
+});
+
+test('the overrule write loses to an energy changed between the read and the write', () => {
+  db.upsertTrackMeta('moved', { title: 'moved', artist: 'V', album: 'W', duration: 300 });
+  db.upsertTrackTags('moved', { moods: ['night'], energy: 'medium', source: 'llm', confidence: 0.8 });
+  assert.equal(db.overruleTrackEnergyBulk([{ id: 'moved', from: 'low', energy: 'high' }]), 0);
+  assert.equal(db.getTrack('moved')!.energy, 'medium');
 });
 
 test('re-running is idempotent — nothing left to correct', () => {

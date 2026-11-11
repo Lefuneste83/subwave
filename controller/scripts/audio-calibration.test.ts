@@ -16,6 +16,8 @@ import {
   arousalDiff,
   audioEnergy,
   audioEnergyFill,
+  audioEnergyOverrule,
+  ENERGY_OVERRULE_Z,
   composeMoodStateHash,
   parseMoodStateHash,
   moodPassAction,
@@ -263,6 +265,26 @@ test('an EMPTY energy is filled three ways: the measured middle is medium', () =
     const two = audioEnergy(side(hi, lo), b);
     if (two) assert.equal(audioEnergyFill(side(hi, lo), b), two);
   }
+});
+
+test('the overrule answers only in the strong band, and only to disagree', () => {
+  const b = computeBaselines(energyLibrary(400));
+  const side = (hi: number, lo: number) => ({
+    energetic: hi, workout: hi, driving: hi, celebratory: hi, festival: hi,
+    calm: lo, reflective: lo, spiritual: lo, focus: lo, night: lo,
+  });
+  const loud = side(0.30, 0.10);
+  assert.ok(arousalDiff(loud, b)! >= ENERGY_OVERRULE_Z, 'fixture is in the strong band');
+  assert.equal(audioEnergyOverrule(loud, b, 'low'), 'high');
+  assert.equal(audioEnergyOverrule(loud, b, 'medium'), 'high');
+  assert.equal(audioEnergyOverrule(loud, b, 'high'), null, 'agreement changes nothing');
+  assert.equal(audioEnergyOverrule(side(0.10, 0.30), b, 'high'), 'low');
+  // Decisive for the propagated correction, but short of the strong band.
+  const mild = side(0.22, 0.18);
+  const d = arousalDiff(mild, b)!;
+  assert.ok(d >= 0.35 && d < ENERGY_OVERRULE_Z, `fixture sits between the thresholds (got ${d.toFixed(2)})`);
+  assert.equal(audioEnergyOverrule(mild, b, 'low'), null);
+  assert.equal(audioEnergyOverrule(loud, null, 'low'), null, 'no baselines, no overrule');
 });
 
 test('the fill gives nothing when the audio cannot be scored', () => {
