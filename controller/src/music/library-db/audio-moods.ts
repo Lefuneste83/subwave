@@ -153,6 +153,51 @@ export function emptyEnergyTracksWithAudioScores(): Array<{
   return out;
 }
 
+// Scope of the LLM-energy overrule: rows whose energy an LLM gave ('llm',
+// 'uncertain-llm') and that carry audio scores. Never 'manual' or 'propagated'
+// (the correction owns those).
+export function llmEnergyTracksWithAudioScores(): Array<{
+  id: string;
+  energy: string;
+  scores: Record<string, number>;
+}> {
+  const rows = requireDb()
+    .prepare(
+      `SELECT id, energy, audio_mood_scores_json AS s FROM tracks
+        WHERE source IN ('llm', 'uncertain-llm') AND energy IS NOT NULL
+          AND audio_mood_scores_json IS NOT NULL
+        ORDER BY id`,
+    )
+    .all() as Array<{ id: string; energy: string; s: string }>;
+  const out: Array<{ id: string; energy: string; scores: Record<string, number> }> = [];
+  for (const row of rows) {
+    try {
+      const parsed = JSON.parse(row.s);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        out.push({ id: row.id, energy: row.energy, scores: parsed as Record<string, number> });
+      }
+    } catch {
+    }
+  }
+  return out;
+}
+
+// The overrule's write: `energy` only, and only while the row still holds the
+// LLM value it was judged against, so a retag or an operator edit in between
+// wins. Returns how many rows it changed.
+export function overruleTrackEnergyBulk(rows: Array<{ id: string; from: string; energy: string }>): number {
+  if (rows.length === 0) return 0;
+  const d = requireDb();
+  const stmt = d.prepare(
+    `UPDATE tracks SET energy = ? WHERE id = ? AND energy = ? AND source IN ('llm', 'uncertain-llm')`,
+  );
+  let changed = 0;
+  d.transaction((rs: typeof rows) => {
+    for (const r of rs) changed += stmt.run(r.energy, r.id, r.from).changes;
+  })(rows);
+  return changed;
+}
+
 // The fill's write: `energy` only, and only where it is STILL empty, so a tag
 // answer or an operator edit landing between the read and the write wins.
 // Returns how many rows it filled.
