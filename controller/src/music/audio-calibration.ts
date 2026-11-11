@@ -160,6 +160,22 @@ export function audioEnergy(
   return null;
 }
 
+// The energy for a tagged track that has NONE. Three-way, unlike audioEnergy,
+// because there is no guess here to leave alone: the measured middle band is
+// what 'medium' means, and leaving the box empty drops the track from every
+// show with strict filters. null only when the audio cannot be scored at all.
+// Overruling an energy that IS there stays audioEnergy's two-sided job.
+export function audioEnergyFill(
+  scores: Record<string, number>,
+  baselines: MoodBaselines | null,
+): 'low' | 'medium' | 'high' | null {
+  const diff = arousalDiff(scores, baselines);
+  if (diff == null) return null;
+  if (diff >= ENERGY_HIGH_Z) return 'high';
+  if (diff <= ENERGY_LOW_Z) return 'low';
+  return 'medium';
+}
+
 // audio_embedding_meta.mood_vocab_hash is `<vocabHash>:<calibrationVersion>`.
 // The halves invalidate different work: vocabulary → full CLAP re-score,
 // calibration → relabel from the cosines on disk.
