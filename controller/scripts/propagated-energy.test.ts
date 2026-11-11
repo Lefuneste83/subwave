@@ -23,6 +23,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { removeTempDir } from './test-utils/temp-dir.js';
+import type { TagSource } from '../src/music/library-db/types.js';
 
 // Loud and quiet ends of the arousal axis, well clear of the decision
 // threshold in both directions.
@@ -116,6 +117,22 @@ function seedCorrectionFixtures(): void {
   db.upsertTrackMeta('mid', { title: 'Mid', artist: 'F', album: 'G', duration: 300 });
   db.upsertTrackTags('mid', { moods: ['evening'], energy: 'medium', source: 'propagated', confidence: 0.5 });
   db.setTrackAudioMoodScoresBulk([{ id: 'mid', scores: MIDDLING }]);
+
+  // Tagged tracks whose answer carried moods and no energy: the fill's scope.
+  const blank = (id: string, source: TagSource, scores: Record<string, number> | null) => {
+    db.upsertTrackMeta(id, { title: id, artist: 'H', album: 'I', duration: 300 });
+    db.upsertTrackTags(id, { moods: ['night'], energy: null, source, confidence: 0.8 });
+    if (scores) db.setTrackAudioMoodScoresBulk([{ id, scores }]);
+  };
+  blank('blankLoud', 'llm', LOUD);
+  blank('blankQuiet', 'uncertain-llm', QUIET);
+  blank('blankMid', 'llm', MIDDLING);
+  // Out of the fill's scope: an operator's own tags, and a row never scored.
+  blank('blankManual', 'manual', LOUD);
+  blank('blankUnscored', 'llm', null);
+  // An untagged row (no moods) with scores stays untagged.
+  db.upsertTrackMeta('untagged', { title: 'untagged', artist: 'J', album: 'K', duration: 300 });
+  db.setTrackAudioMoodScoresBulk([{ id: 'untagged', scores: LOUD }]);
 }
 
 let stats: ReturnType<typeof runPropagatedEnergyPass>;
@@ -158,6 +175,36 @@ test('the pass reports what it did', () => {
   assert.equal(stats.corrected, 1);
 });
 
+test('an empty energy on a tagged track is filled from its audio, the middle band as medium', () => {
+  assert.equal(db.getTrack('blankLoud')!.energy, 'high');
+  assert.equal(db.getTrack('blankQuiet')!.energy, 'low');
+  assert.equal(db.getTrack('blankMid')!.energy, 'medium', 'with no guess to keep, the measured middle is medium');
+  assert.equal(stats.fillScope, 3);
+  assert.deepEqual(stats.filled, { high: 1, medium: 1, low: 1 });
+});
+
+test('a fill writes ONLY the energy column', () => {
+  const t = db.getTrack('blankLoud')!;
+  assert.equal(t.source, 'llm');
+  assert.deepEqual(t.moods, ['night']);
+  assert.equal(t.confidence, 0.8);
+});
+
+test('the fill never writes an operator row, an unscored row or an untagged row', () => {
+  assert.equal(db.getTrack('blankManual')!.energy, null, "an operator's own tags are never written by a pass");
+  assert.equal(db.getTrack('blankUnscored')!.energy, null, 'no audio scores, no evidence');
+  const u = db.getTrack('untagged')!;
+  assert.equal(u.energy, null, 'an energy alone would make an untagged row read as tagged');
+  assert.deepEqual(u.moods ?? [], [], 'still no moods');
+});
+
+test('the fill write loses to an energy that lands between the read and the write', () => {
+  db.upsertTrackMeta('raced', { title: 'raced', artist: 'L', album: 'M', duration: 300 });
+  db.upsertTrackTags('raced', { moods: ['night'], energy: 'low', source: 'llm', confidence: 0.8 });
+  assert.equal(db.fillEmptyTrackEnergyBulk([{ id: 'raced', energy: 'high' }]), 0);
+  assert.equal(db.getTrack('raced')!.energy, 'low');
+});
+
 test('a relabel spanning more than one write batch completes', async () => {
   // The regression: relabelFromStoredScores writes as it walks, and
   // better-sqlite3 throws "This database connection is busy executing a
@@ -191,4 +238,5 @@ test('re-running is idempotent — nothing left to correct', () => {
   const again = runPropagatedEnergyPass();
   assert.equal(again.corrected, 0, 'the second pass changes nothing');
   assert.equal(again.agreed, 2, 'both decisive rows now agree with the audio');
+  assert.equal(again.fillScope, 0, 'every fillable empty energy was filled');
 });
