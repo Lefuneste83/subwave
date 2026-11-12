@@ -1628,22 +1628,28 @@ def grid_checkpoint(name):
 class BeatGridder:
     """Beat This! on a mono signal: (beats, downbeats) in seconds.
 
-    On a GPU the whole track goes through the model at once, so its memory
-    grows with the track: a 60-minute mix asked for 4 GB on an 8 GB card that
-    three other workers share. Two rules keep a long file from failing the
-    others' tracks or its own:
+    The model runs over the spectrogram in fixed 1500-frame chunks, so its
+    GPU memory does not grow with the track; the spectrogram does. Beat
+    This!'s own Audio2Beats computes the STFT of the WHOLE signal on its
+    device: a 60-minute mix asked for ~4 GB at once on an 8 GB card shared by
+    four workers, and failed with CUDA out of memory. So on a GPU the
+    spectrogram is made on the CPU (the same LogMelSpect, a few seconds even
+    for a long mix) and only the mel frames (~3 MB a minute) and the model go
+    to the GPU: the same chain as Audio2Frames.signal2spect, only the STFT's
+    device moved.
+    Two more rules, for whatever still runs out:
       - the cached memory goes back after every track (empty_cache), or one
-        long track's leftovers starve the other workers until their idle
-        release;
-      - a CUDA out-of-memory answer reruns THAT track on the CPU with the same
-        checkpoint (slow, about a minute for a long mix, and rare), so every
-        grid in a library comes from one model."""
+        track's leftovers starve the other workers until their idle release;
+      - a CUDA out-of-memory answer reruns that track on the CPU with the same
+        checkpoint (slow, so it must stay rare), so every grid in a library
+        comes from one model."""
 
     def __init__(self):
         self.model = None
         self.device = None
         self.a2b = None
         self._cpu = None
+        self._spect_cpu = None
 
     def load(self):
         from beat_this.inference import Audio2Beats
@@ -1651,6 +1657,10 @@ class BeatGridder:
         self.device = resolve_device()
         self.model = grid_model_name(self.device)
         self.a2b = Audio2Beats(checkpoint_path=grid_checkpoint(self.model), device=self.device, float16=False, dbn=False)
+        if self.device == "cuda":
+            from beat_this.preprocessing import LogMelSpect
+
+            self._spect_cpu = LogMelSpect(device="cpu")
         log(f"Beat This! loaded ({self.model}, {self.device})")
 
     def _cpu_a2b(self):
@@ -1659,6 +1669,22 @@ class BeatGridder:
 
             self._cpu = Audio2Beats(checkpoint_path=grid_checkpoint(self.model), device="cpu", float16=False, dbn=False)
         return self._cpu
+
+    def _run_gpu(self, y, sr):
+        """Audio2Beats' own chain with the spectrogram made on the CPU."""
+        import numpy as np
+        import soxr
+        import torch
+
+        signal = np.asarray(y)
+        if signal.ndim == 2:
+            signal = signal.mean(1)
+        if sr != 22050:
+            signal = soxr.resample(signal, in_rate=sr, out_rate=22050)
+        with torch.inference_mode():
+            spect = self._spect_cpu(torch.tensor(signal, dtype=torch.float32))
+        beat_logits, downbeat_logits = self.a2b.spect2frames(spect.to(self.device))
+        return self.a2b.frames2beats(beat_logits, downbeat_logits)
 
     def __call__(self, y, sr):
         import numpy as np
@@ -1669,7 +1695,7 @@ class BeatGridder:
             import torch
 
             try:
-                beats, downbeats = self.a2b(y, sr)
+                beats, downbeats = self._run_gpu(y, sr)
             except torch.cuda.OutOfMemoryError:
                 torch.cuda.empty_cache()
                 log(f"Beat This!: out of GPU memory on a {len(y) / sr / 60:.0f} min track; this one runs on the CPU")

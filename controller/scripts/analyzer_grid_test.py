@@ -140,7 +140,7 @@ sys.modules["torch"] = _stub
 try:
     g = aw.BeatGridder()
     g.device, g.model = "cuda", "final0"
-    g.a2b = lambda y, sr: ([0.5, 1.0], [0.5])
+    g._run_gpu = lambda y, sr: ([0.5, 1.0], [0.5])
     out = g(np.zeros(100), 10)
     check("gpu: the cache is freed after a track", len(_freed) == 1, _freed)
     check("gpu: answers as before", list(out[0]) == [0.5, 1.0] and list(out[1]) == [0.5], out)
@@ -149,7 +149,7 @@ try:
         raise _OOM("CUDA out of memory")
 
     cpu_calls = []
-    g.a2b = _boom
+    g._run_gpu = _boom
     g._cpu = lambda y, sr: (cpu_calls.append(1) or ([0.25, 0.75], [0.25]))
     _freed.clear()
     out = g(np.zeros(100), 10)
@@ -160,7 +160,7 @@ try:
     def _other(y, sr):
         raise ValueError("bad audio")
 
-    g.a2b = _other
+    g._run_gpu = _other
     try:
         g(np.zeros(100), 10)
         check("another error is not swallowed", False)
