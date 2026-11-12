@@ -6,7 +6,7 @@
 #
 # Three published flavours (.github/workflows/publish-images.yml):
 #   * subwave-analyzer        — LEAN (default), ~1.1GB, multi-arch, no torch.
-#   * subwave-analyzer-heavy  — CLAP + Demucs baked (~1.9GB), amd64-only,
+#   * subwave-analyzer-heavy  — CLAP + Demucs + Beat This! baked (~2GB), amd64-only,
 #       CPU torch. Selected by ANALYZER_HEAVY=1 in .env.
 #   * subwave-analyzer-cuda   — heavy + cu128 torch, amd64-only. Selected by
 #       the docker-compose.analyzer-gpu.yml overlay (a device reservation
@@ -42,8 +42,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Chatterbox's separate venv keeps its own upstream torch pin.
 ARG WITH_CLAP=0
 ARG WITH_DEMUCS=0
+ARG WITH_BEAT_GRID=0
 ARG WITH_CUDA=0
-ENV ANALYZER_HF_HOME=/opt/analyzer/hf-cache
+ENV ANALYZER_HF_HOME=/opt/analyzer/hf-cache \
+    ANALYZE_GRID_WEIGHTS_DIR=/opt/analyzer/beat-this
 RUN TORCH_INDEX="https://download.pytorch.org/whl/cpu" && \
     if [ "$WITH_CUDA" = "1" ]; then TORCH_INDEX="https://download.pytorch.org/whl/cu128"; fi && \
     python3 -m venv /opt/analyzer/venv && \
@@ -70,6 +72,23 @@ RUN TORCH_INDEX="https://download.pytorch.org/whl/cpu" && \
         torch==2.7.1 torchaudio==2.7.1 demucs==4.0.1 diffq==0.2.4 && \
       /opt/analyzer/venv/bin/python -c "import torch, torchaudio, demucs, diffq" && \
       apt-get purge -y gcc libc6-dev && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* ; \
+    fi && \
+    if [ "$WITH_BEAT_GRID" = "1" ]; then \
+      # Beat This! (CPJKU, MIT code and weights): the whole-track beat grid
+      # (the `grid` facet). Unlike CLAP/Demucs its two checkpoints ARE baked
+      # (final0 81 MB for a GPU, small0 8 MB for CPU): they come from the
+      # authors' own host, not huggingface.co, and a facet that fails on a
+      # box without that reach would answer unavailable for every track.
+      /opt/analyzer/venv/bin/pip install --no-cache-dir \
+        --index-url "$TORCH_INDEX" \
+        --extra-index-url https://pypi.org/simple \
+        torch==2.7.1 torchaudio==2.7.1 beat-this==1.1.0 rotary-embedding-torch==0.9.2 einops==0.8.2 && \
+      /opt/analyzer/venv/bin/python -c "import torch, beat_this.inference" && \
+      mkdir -p "$ANALYZE_GRID_WEIGHTS_DIR" && \
+      for m in final0 small0; do \
+        curl -fsSL --retry 3 -o "$ANALYZE_GRID_WEIGHTS_DIR/$m.ckpt" \
+          "https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/$m.ckpt" || exit 1; \
+      done ; \
     fi && \
     find /opt/analyzer/venv -depth -type d -name __pycache__ -exec rm -rf {} +
 
