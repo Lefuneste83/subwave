@@ -10,6 +10,8 @@
     "analyze": "tsx src/music/analyze-library.ts",
     "facets": "tsx src/music/facets-cli.ts",
     "curve-ab": "tsx src/music/curve-ending-ab.ts",
+    "grid-report": "tsx src/music/grid-report-cli.ts",
+    "grid-apply": "tsx src/music/grid-apply-cli.ts",
     "favourites": "tsx src/music/favourites-export.ts",
     "lastfm-session": "tsx scripts/lastfm-session.ts",
     "test:embed": "tsx scripts/embedding-preflight-test.ts",

@@ -89,6 +89,9 @@ WHOLE_FILE_CONCURRENCY = _bounded_int_env("ANALYZE_WHOLE_FILE_CONCURRENCY", 4, 1
 # DJ mix streamed from the music server is the slow case.
 WHOLE_FILE_TIMEOUT_S = _bounded_float_env("ANALYZE_WHOLE_FILE_TIMEOUT_S", 900.0, 30.0, 7200.0)
 WHOLE_FILE_FACETS = ("loudness", "edges")
+# Facets that load a model (CLAP, Demucs, Beat This!): the residency tracking
+# counts a request that names one as model use.
+MODEL_FACETS = ("clap", "vocal", "stems", "grid")
 
 # Idle worker recycle (#1204 follow-up). The worker's own idle release drops
 # the CLAP/Demucs singletons, but ~1GB of librosa/numba/torch scratch stays
@@ -390,7 +393,7 @@ class StdioWorker:
         facets = payload.get("facets")
         if isinstance(facets, list):
             # A facet request loads exactly the models its facets name.
-            return bool(payload.get("tail_vocals")) or any(f in ("clap", "vocal", "stems") for f in facets)
+            return bool(payload.get("tail_vocals")) or any(f in MODEL_FACETS for f in facets)
         return bool(
             payload.get("embed") or payload.get("vocal") or payload.get("stems_dir")
             or EMBED_DEFAULT or VOCAL_DEFAULT
@@ -408,7 +411,7 @@ class StdioWorker:
                 # a stems cache publication error after successful separation.
                 # Missing/failed model loads answer unavailable instead.
                 isinstance(facets.get(f), dict) and facets[f].get("status") in ("ok", "failed")
-                for f in ("clap", "vocal", "stems")
+                for f in MODEL_FACETS
             )
         return False
 
@@ -745,6 +748,11 @@ async def health():
         # Whole-file loudness answers carry the short-term loudness curve
         # (`loudness_curve`). None on older workers, which never emit the key.
         "analyze_loudness_curve_capable": analyzer_pool.capability("loudness_curve_capable", "whole_file"),
+        # The whole-track beat grid (Beat This!, heavy images; the `grid`
+        # facet). None on older workers, which never emit the key; false on a
+        # lean image or after a failed model load (analyze_grid_error says why).
+        "analyze_grid_capable": analyzer_pool.capability("grid_capable", "beat_grid"),
+        "analyze_grid_error": analyzer_pool.capability_error("beat_grid"),
         # How many whole-file requests this host runs at once (its own lane).
         "analyze_whole_file_concurrency": WHOLE_FILE_CONCURRENCY,
         # How many analysis workers this pool holds (ANALYZE_CONCURRENCY). The
@@ -800,7 +808,7 @@ class AnalyzeRequest(BaseModel):
     # Skips every non-embedding feature in the worker.
     embedding_only: bool = False
     # Per-facet request: compute ONLY these facets (head, loudness, tail,
-    # clap, vocal, stems, edges) and answer {"facets": {...}, "source": {...}}.
+    # clap, vocal, stems, edges, grid) and answer {"facets": {...}, "source": {...}}.
     # Absent = the flat response above, unchanged. embed / vocal /
     # embedding_only are ignored when this is set: the facets say it all.
     facets: list[str] | None = None

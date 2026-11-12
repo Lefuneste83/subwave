@@ -142,7 +142,7 @@ db.upsertTrackAnalysis('e', { bpm: 100, musicalKey: 'C', loudnessLufs: -9, tailS
 sql().prepare(`UPDATE track_facet_status SET version = 0 WHERE track_id = 'e' AND facet = 'tail'`).run();
 
 const ids = db.allTrackIdsOrdered();
-const plan = (facets: string, where?: string, caps = { clap: true as boolean | null, demucs: false as boolean | null, tailVocal: true as boolean | null }, limit?: number) => {
+const plan = (facets: string, where?: string, caps: import('../src/music/acoustics-plan.js').PlanCapabilities = { clap: true, demucs: false, tailVocal: true }, limit?: number) => {
   const f = P.parseFacets(facets);
   return P.planAcoustics({ ids, facets: f, where: P.parseWhere(where), state: db.loadFacetState(f), capabilities: caps, limit });
 };
@@ -160,7 +160,7 @@ after(async () => {
 
 test('--where needs agrees with facetNeedsIds for every facet', () => {
   for (const f of db.FACETS) {
-    const p = plan(f, undefined, { clap: true, demucs: true, tailVocal: true });
+    const p = plan(f, undefined, { clap: true, demucs: true, tailVocal: true, grid: true });
     assert.deepEqual(planned(p), db.facetNeedsIds(f), f);
   }
 });

@@ -15,6 +15,7 @@ import { describeFetchError, fetchWithTimeout } from '../util/fetch-timeout.js';
 import { envInt } from '../util/env.js';
 import { parseLoudnessCurve, type LoudnessCurve } from './loudness-curve.js';
 import { parseWholeLoudnessCurve, type WholeLoudnessCurve } from './whole-loudness-curve.js';
+import type { GridAnswer, GridSegment } from './library-db/grid.js';
 
 // A structural span over the track, in ms. Contiguous over the analysed
 // window; the first is the intro/leading section.
@@ -267,6 +268,9 @@ interface WorkerMessage {
   // Whole-file loudness answers carry `loudness_curve`. Absent on workers
   // that predate it.
   loudness_curve_capable?: boolean;
+  // The whole-track beat grid (Beat This!, heavy images). Older workers never
+  // emit the key.
+  grid_capable?: boolean;
   loudness_curve?: unknown;
   loudness_curve_unavailable?: unknown;
   loudness_version?: unknown;
@@ -328,6 +332,7 @@ let _localFacetsCapable: boolean | null = null;
 let _localRangedTailCapable: boolean | null = null;
 let _localWholeFileCapable: boolean | null = null;
 let _localLoudnessCurveCapable: boolean | null = null;
+let _localGridCapable: boolean | null = null;
 let _localTextCapable: boolean | null = null;
 // Local twins of _sidecarAudioError / _sidecarVocalError — see there.
 let _localAudioError: string | null = null;
@@ -338,6 +343,8 @@ let _localVocalError: string | null = null;
 function noteLocalCapabilityLoss(msg: WorkerMessage): void {
   const lost = msg.capability_loss;
   if (!lost || typeof lost !== 'object') return;
+  // A Beat This! load that failed: the grid is gone for this worker's life.
+  if (typeof lost.beat_grid === 'string') _localGridCapable = false;
   if (typeof lost.audio_embedding === 'string') {
     if (_localAudioError !== lost.audio_embedding) {
       console.error(`[analyze] audio embeddings unavailable: ${lost.audio_embedding}`);
@@ -391,6 +398,7 @@ function startWorker(): Promise<void> {
           _localRangedTailCapable = msg.ranged_tail_capable === true;
           _localWholeFileCapable = typeof msg.whole_file_capable === 'boolean' ? msg.whole_file_capable : null;
           _localLoudnessCurveCapable = typeof msg.loudness_curve_capable === 'boolean' ? msg.loudness_curve_capable : null;
+          _localGridCapable = typeof msg.grid_capable === 'boolean' ? msg.grid_capable : null;
         }
         // After the ready assignments, so a reported loss always wins.
         noteLocalCapabilityLoss(msg);
@@ -574,6 +582,7 @@ let _sidecarFacetsCapable: boolean | null = null;
 let _sidecarRangedTailCapable: boolean | null = null;
 let _sidecarWholeFileCapable: boolean | null = null;
 let _sidecarLoudnessCurveCapable: boolean | null = null;
+let _sidecarGridCapable: boolean | null = null;
 let _sidecarWholeFileConcurrency: number | null = null;
 // The sidecar's analysis pool size (ANALYZE_CONCURRENCY); null on a sidecar
 // that predates the field.
@@ -604,6 +613,7 @@ async function probeSidecar(url: string): Promise<boolean> {
       analyze_ranged_tail_capable?: boolean | null;
       analyze_whole_file_capable?: boolean | null;
       analyze_loudness_curve_capable?: boolean | null;
+      analyze_grid_capable?: boolean | null;
       analyze_whole_file_concurrency?: number | null;
       analyze_concurrency?: number | null;
       analyze_audio_error?: string | null;
@@ -619,6 +629,7 @@ async function probeSidecar(url: string): Promise<boolean> {
       _sidecarRangedTailCapable = typeof body.analyze_ranged_tail_capable === 'boolean' ? body.analyze_ranged_tail_capable : null;
       _sidecarWholeFileCapable = typeof body.analyze_whole_file_capable === 'boolean' ? body.analyze_whole_file_capable : null;
       _sidecarLoudnessCurveCapable = typeof body.analyze_loudness_curve_capable === 'boolean' ? body.analyze_loudness_curve_capable : null;
+      _sidecarGridCapable = typeof body.analyze_grid_capable === 'boolean' ? body.analyze_grid_capable : null;
       _sidecarWholeFileConcurrency = Number.isInteger(body.analyze_whole_file_concurrency) && (body.analyze_whole_file_concurrency as number) > 0
         ? (body.analyze_whole_file_concurrency as number) : null;
       _sidecarConcurrency = Number.isInteger(body.analyze_concurrency) && (body.analyze_concurrency as number) > 0
@@ -793,6 +804,15 @@ export function wholeFileAvailable(): boolean | null {
 export function loudnessCurveAvailable(): boolean | null {
   if (_backend === 'sidecar') return _sidecarLoudnessCurveCapable;
   if (_backend === 'local') return _localLoudnessCurveCapable;
+  return null;
+}
+
+// The whole-track beat grid (`grid` facet). Planned only on `=== true`: an
+// analyzer without it (a lean image, an older one, a failed model load) would
+// answer unavailable, or, predating the facet, refuse the request.
+export function gridAvailable(): boolean | null {
+  if (_backend === 'sidecar') return _sidecarGridCapable;
+  if (_backend === 'local') return _localGridCapable;
   return null;
 }
 
@@ -1201,7 +1221,7 @@ export async function analyzePathWithUrlFallback(
 // the backend advertises it; callers fall back to the flat request otherwise.
 // ---------------------------------------------------------------------------
 
-export type FacetName = 'head' | 'loudness' | 'tail' | 'clap' | 'vocal' | 'stems' | 'edges';
+export type FacetName = 'head' | 'loudness' | 'tail' | 'clap' | 'vocal' | 'stems' | 'edges' | 'grid';
 // Read off one decode of the WHOLE file (the stream URL, or a staged copy
 // known to be complete), not the analysis windows.
 export const WHOLE_FILE_FACET_NAMES: readonly FacetName[] = ['loudness', 'edges'];
@@ -1209,7 +1229,9 @@ const readsWholeFile = (body: Record<string, unknown>) =>
   Array.isArray(body.facets) && body.facets.some(f => (WHOLE_FILE_FACET_NAMES as readonly unknown[]).includes(f));
 // A placed tail window may be decoded from the stream URL (a capped copy cannot
 // reach it), so it needs the URL and the whole-file timeout too.
-const readsStream = (body: Record<string, unknown>) => readsWholeFile(body) || body.tail_window != null;
+// The whole-track beat grid streams the whole file too (its own decode).
+const readsGrid = (body: Record<string, unknown>) => Array.isArray(body.facets) && body.facets.includes('grid');
+const readsStream = (body: Record<string, unknown>) => readsWholeFile(body) || readsGrid(body) || body.tail_window != null;
 
 // THE deadline of an analyze request, flat or facet, local worker or sidecar.
 // One that may decode from the stream URL (readsStream: the whole-file facets,
@@ -1234,6 +1256,9 @@ export interface FacetAnswer {
   result: AnalysisResult;
   // vocal: the outro's vocal ranges (absolute ms) when the tail was measured.
   tailVocalRanges: Section[] | null;
+  // grid: the fitted whole-track beat grid (parseGridAnswer), null when the
+  // answer is not ok or malformed.
+  grid?: GridAnswer | null;
 }
 
 export interface FacetSourceInfo {
@@ -1319,6 +1344,45 @@ export function rangedTailAvailable(): boolean | null {
 
 const FACET_STATUSES: readonly string[] = ['ok', 'unmeasurable', 'unavailable', 'failed'];
 
+// The worker's `grid` data (analyze_worker.grid_answer). Strict: a malformed
+// answer is null, and the caller records it as a failed attempt, never a
+// partial grid. Segments must have a positive period and at least two beats.
+export function parseGridAnswer(data: unknown): GridAnswer | null {
+  if (!data || typeof data !== 'object') return null;
+  const d = data as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const bpm = num(d.bpm);
+  const version = num(d.grid_version);
+  if (bpm == null || bpm <= 0 || version == null || !Array.isArray(d.segments) || d.segments.length === 0) return null;
+  const segments: GridSegment[] = [];
+  for (const s of d.segments as unknown[]) {
+    if (!s || typeof s !== 'object') return null;
+    const r = s as Record<string, unknown>;
+    const anchorMs = num(r.anchorMs);
+    const periodUs = num(r.periodUs);
+    const beats = num(r.beats);
+    const downbeatMs = r.downbeatMs == null ? null : num(r.downbeatMs);
+    if (anchorMs == null || periodUs == null || periodUs <= 0 || beats == null || beats < 2) return null;
+    if (r.downbeatMs != null && downbeatMs == null) return null;
+    segments.push({ anchorMs: Math.round(anchorMs), periodUs: Math.round(periodUs), beats: Math.round(beats),
+      downbeatMs: downbeatMs == null ? null : Math.round(downbeatMs) });
+  }
+  const bpb = num(d.beats_per_bar);
+  return {
+    version: Math.round(version),
+    engine: typeof d.engine === 'string' ? d.engine : 'unknown',
+    model: typeof d.model === 'string' ? d.model : null,
+    bpm,
+    beatsPerBar: bpb != null && Number.isInteger(bpb) && bpb >= 2 && bpb <= 7 ? bpb : null,
+    segments,
+    coverage: num(d.coverage),
+    residualMs: num(d.residual_ms),
+    downbeatAgreement: num(d.downbeat_agreement),
+    mainShare: num(d.main_share),
+    decodedMs: num(d.decoded_ms),
+  };
+}
+
 export function parseFacetAnswer(msg: WorkerMessage): FacetAnalysis {
   const facets: Partial<Record<FacetName, FacetAnswer>> = {};
   for (const [name, cell] of Object.entries(msg.facets ?? {})) {
@@ -1332,6 +1396,7 @@ export function parseFacetAnswer(msg: WorkerMessage): FacetAnalysis {
       reason: typeof cell.reason === 'string' ? cell.reason : null,
       result: toAnalysisResult(data),
       tailVocalRanges: parseVocalRanges(data.tail_vocal_ranges),
+      ...(name === 'grid' ? { grid: status === 'ok' ? parseGridAnswer(data) : null } : {}),
     };
   }
   const src = (msg.source ?? {}) as Record<string, unknown>;

@@ -450,7 +450,7 @@ if not VERBOSE_DECODER:
 
 # Model weights the heavy tier fetches on first use. Named here so a failed
 # load can say WHICH download died rather than echoing a bare urllib traceback.
-_WEIGHT_HOST_HINTS = ("huggingface.co", "hf.co", "hf-mirror", "cdn-lfs")
+_WEIGHT_HOST_HINTS = ("huggingface.co", "hf.co", "hf-mirror", "cdn-lfs", "cloud.cp.jku.at")
 
 
 def summarize_load_error(ex):
@@ -493,6 +493,8 @@ def capability_loss():
         lost["audio_embedding"] = _embed_error or "CLAP load failed"
     if _vocal_failed:
         lost["vocal_activity"] = _vocal_error or "Demucs load failed"
+    if _gridder_failed:
+        lost["beat_grid"] = _gridder_error or "Beat This! load failed"
     return lost
 
 
@@ -592,10 +594,13 @@ def _idle_unload_seconds():
 def _release_models(idle_s=None):
     """Drop the loaded model singletons and hand their memory back. Leaves the
     *_failed flags alone, so the next request reloads instead of no-opping."""
-    global _embedder, _vocal_detector
+    global _embedder, _vocal_detector, _gridder
     import gc
 
     freed = []
+    if _gridder is not None:
+        _gridder = None
+        freed.append("Beat This!")
     if _embedder is not None:
         _embedder = None
         freed.append("CLAP")
@@ -1562,6 +1567,391 @@ def get_embedder(force=False):
     # warm, so a long backfill never releases mid-pass (#1204).
     _touch_heavy()
     return _embedder
+
+
+# --- Whole-track beat grid (the `grid` facet) --------------------------------
+# Beat This! (CPJKU, ISMIR 2024; MIT code and weights) finds every beat and
+# downbeat over the WHOLE track, where librosa's beat_track is kept to the
+# analysis window: its tempo is quantised, so over a whole track its beats walk
+# off the grid. Measured against Traktor grids on 150 library tracks: tempo
+# right on 99 % (librosa 65 %), whole-track beat F-measure 0.99 (librosa 0.60),
+# downbeats on the bar line 82 % (librosa's every-4th-beat guess 0-28 %).
+#
+# The answer is stored as a FITTED grid, the way DJ software keeps one: an
+# anchor and a beat period per segment, a new segment only where the tempo
+# moves past GRID_TOLERANCE_S (a drummer drifting, a tempo change, a DJ mix),
+# and the downbeat as a phase on that grid. A few numbers per track instead of
+# one per beat, and the beat tracker's per-beat jitter is gone.
+#
+# Heavy images only (torch). `final0` on a GPU, `small0` (8 MB, same accuracy
+# within noise on the benchmark, ~60 % of the CPU time) on CPU; ANALYZE_GRID_MODEL
+# overrides. Without the package the facet answers unavailable and nothing
+# else changes.
+GRID_VERSION = 1
+GRID_TOLERANCE_S = 0.025
+# Consecutive off-grid beats that close a segment: one or two stray detections
+# (a fill, a break) never split the grid.
+GRID_BREAK_AFTER = 4
+GRID_MIN_SEGMENT_BEATS = 8
+GRID_MIN_BEATS = 16
+# Share of the detected beats the segments must hold for the track to have a
+# grid at all. Below it the detections are no pulse (ambient, a field
+# recording) and a short run of them landing on a line is chance: no grid, and
+# no tempo, rather than a made-up one.
+GRID_MIN_COVERAGE = 0.5
+GRID_MIN_SECONDS = 10.0
+GRID_MAX_SECONDS = float(os.environ.get("ANALYZE_GRID_MAX_SECONDS", "").strip() or "7200")
+
+_gridder = None
+_gridder_failed = False
+_gridder_error = None
+
+
+def grid_model_name(device):
+    name = os.environ.get("ANALYZE_GRID_MODEL", "").strip()
+    return name or ("final0" if device == "cuda" else "small0")
+
+
+def grid_checkpoint(name):
+    """The baked checkpoint for a model name (docker/Dockerfile.analyzer bakes
+    final0 and small0 into ANALYZE_GRID_WEIGHTS_DIR), else the name itself,
+    which Beat This! resolves by downloading from its authors' host. A path
+    or URL passes through."""
+    base = os.environ.get("ANALYZE_GRID_WEIGHTS_DIR", "").strip()
+    if base and "/" not in name:
+        baked = os.path.join(base, f"{name}.ckpt")
+        if os.path.isfile(baked):
+            return baked
+    return name
+
+
+class BeatGridder:
+    """Beat This! on a mono signal: (beats, downbeats) in seconds."""
+
+    def __init__(self):
+        self.model = None
+        self.a2b = None
+
+    def load(self):
+        from beat_this.inference import Audio2Beats
+
+        device = resolve_device()
+        self.model = grid_model_name(device)
+        self.a2b = Audio2Beats(checkpoint_path=grid_checkpoint(self.model), device=device, float16=False, dbn=False)
+        log(f"Beat This! loaded ({self.model}, {device})")
+
+    def __call__(self, y, sr):
+        import numpy as np
+
+        beats, downbeats = self.a2b(y, sr)
+        return np.asarray(beats, dtype=float), np.asarray(downbeats, dtype=float)
+
+
+def grid_capable():
+    import importlib.util as u
+
+    return u.find_spec("beat_this") is not None and u.find_spec("torch") is not None
+
+
+def get_gridder():
+    """The loaded Beat This! engine, or None (not installed, or its load failed
+    once: one bad model never retries on every track)."""
+    global _gridder, _gridder_failed, _gridder_error
+    if _gridder_failed:
+        return None
+    if _gridder is None:
+        if not grid_capable():
+            return None
+        try:
+            g = BeatGridder()
+            g.load()
+            _gridder = g
+            _maybe_start_idle_release()
+        except Exception as ex:  # noqa: BLE001 — degrade, never crash the worker
+            log(f"Beat This! load failed ({ex}); the grid facet is disabled for this run")
+            _gridder_failed = True
+            _gridder_error = summarize_load_error(ex)
+            return None
+    _touch_heavy()
+    return _gridder
+
+
+def _fit_line(ks, ts):
+    """Least squares t = a + p*k over (k, t); (a, p)."""
+    import numpy as np
+
+    k = np.asarray(ks, dtype=float)
+    tt = np.asarray(ts, dtype=float)
+    if len(k) < 2:
+        return float(tt[0]), None
+    p, a = np.polyfit(k, tt, 1)
+    return float(a), float(p)
+
+
+# Same tempo within this ratio: a later segment that also lands on an earlier
+# one's grid continues it (the beat came back after a breakdown).
+GRID_SAME_TEMPO = 0.002
+
+
+# A segment whose hits mostly skip the same number of grid lines was fitted at
+# a divisor of the beat: dense detections where it started (hi-hats in an
+# intro) set the period, and the real beats then sit on every other line and
+# count as hits, so the grid never breaks. Measured on library techno: a 124
+# BPM track read 248, with 99 % of the beats "on the grid". When at least
+# GRID_FOLD_SHARE of the steps between hits are the same multiple m (2..4),
+# the period is m times longer: refit on the hits that sit on the new lines,
+# the ones between them dropped. Octave-safe: a fold on evidence, never a
+# clamp into a tempo range.
+GRID_FOLD_SHARE = 0.6
+
+
+def _fold_sparse_grid(a, p, ks, ts, tol_s):
+    import numpy as np
+
+    if len(ks) < 3:
+        return a, p, ks, ts
+    steps = np.diff(np.asarray(ks))
+    vals, counts = np.unique(steps, return_counts=True)
+    m = int(vals[int(np.argmax(counts))])
+    if m < 2 or m > 4 or counts.max() / len(steps) < GRID_FOLD_SHARE:
+        return a, p, ks, ts
+    # The phase the most hits share on the m-times-longer grid.
+    phases, pc = np.unique(np.asarray(ks) % m, return_counts=True)
+    phase = int(phases[int(np.argmax(pc))])
+    keep = [(k, t_) for k, t_ in zip(ks, ts) if k % m == phase]
+    if len(keep) < 2:
+        return a, p, ks, ts
+    k0 = keep[0][0]
+    nks = [(k - k0) // m for k, _ in keep]
+    nts = [t_ for _, t_ in keep]
+    na, np_ = _fit_line(nks, nts)
+    if not np_ or np_ <= 0:
+        return a, p, ks, ts
+    good = [(k, t_) for k, t_ in zip(nks, nts) if abs(t_ - (na + k * np_)) <= tol_s]
+    if len(good) < 2:
+        return a, p, ks, ts
+    na, np_ = _fit_line([k for k, _ in good], [t_ for _, t_ in good])
+    return na, np_, [k for k, _ in good], [t_ for _, t_ in good]
+
+
+def _merge_resumed_grids(segs, tol_s):
+    """Join a segment to an earlier one when the beat came back on the same
+    grid: the same tempo (GRID_SAME_TEMPO) and its first beat on the earlier
+    grid extended (within tol_s). What lay between them is the tracker losing
+    the beat (a breakdown with no kick, where it follows the offbeat for a
+    while): dropped, its beats left off the grid. Measured on real club
+    tracks: the pass after a breakdown sat within 4-6 ms of the first part's
+    grid, the 13-25 beats inside the breakdown half a beat off. A real tempo
+    change, or a beat that comes back off the old grid, stays its own segment.
+    Each merge refits the line over both parts."""
+    out = []
+    for s in segs:
+        joined = False
+        for gi in range(len(out) - 1, -1, -1):
+            g = out[gi]
+            if abs(s["period_s"] / g["period_s"] - 1) > GRID_SAME_TEMPO:
+                continue
+            k = (s["anchor_s"] - g["anchor_s"]) / g["period_s"]
+            if abs(s["anchor_s"] - (g["anchor_s"] + round(k) * g["period_s"])) > tol_s:
+                continue
+            ts = g["ts"] + s["ts"]
+            ks = [int(round((t_ - g["anchor_s"]) / g["period_s"])) for t_ in ts]
+            a, pp = _fit_line(ks, ts)
+            if not pp or pp <= 0:
+                continue
+            merged = {"anchor_s": a, "period_s": pp, "first_k": 0, "last_k": max(ks),
+                      "hits": g["hits"] + s["hits"], "ts": ts}
+            # Everything after g inside the merged span was the lost beat.
+            out = out[:gi] + [merged]
+            joined = True
+            break
+        if not joined:
+            out.append(s)
+    return out
+
+
+def fit_grid(beats, downbeats, tol_s=GRID_TOLERANCE_S, break_after=GRID_BREAK_AFTER,
+             min_segment_beats=GRID_MIN_SEGMENT_BEATS):
+    """Fit beat times (s) to piecewise-constant grids. Pure: numpy only.
+
+    Each segment starts at a detected beat, predicts the next from its own
+    least-squares line (anchor + period, refit on every hit), and takes a beat
+    whose distance to the nearest grid line is within `tol_s`; a missed or
+    extra detection is skipped by index. `break_after` consecutive beats off
+    the grid close the segment at its last hit, and the next one starts at
+    the first beat after it. A segment with fewer than `min_segment_beats`
+    hits is dropped (noise between two grids), its beats left off the grid.
+
+    Downbeats are placed on the segment's grid by index: `beats_per_bar` is
+    the most common spacing between consecutive downbeats (2..7), and the
+    phase the most common index modulo it.
+
+    Returns None with too few beats, or when the segments hold under
+    GRID_MIN_COVERAGE of them (no pulse), else {segments: [{anchor_s, period_s,
+    first_k, last_k, hits, downbeat_s}], beats_per_bar, coverage, residual_s,
+    downbeat_agreement}; `anchor_s` is the time of index 0, the segment's
+    first beat."""
+    import numpy as np
+
+    b = np.sort(np.asarray(beats, dtype=float))
+    n = len(b)
+    if n < GRID_MIN_BEATS:
+        return None
+    segs = []
+    residuals = []
+    i = 0
+    while i < n - 1:
+        start = i
+        head = np.diff(b[i:i + 9])
+        head = head[head > 0]
+        if len(head) == 0:
+            i += 1
+            continue
+        a, p = float(b[i]), float(np.median(head))
+        ks, ts = [0], [float(b[i])]
+        last_k, last_hit, misses = 0, i, 0
+        j = i + 1
+        while j < n:
+            tj = float(b[j])
+            k = int(round((tj - a) / p))
+            if k > last_k and abs(tj - (a + k * p)) <= tol_s:
+                ks.append(k)
+                ts.append(tj)
+                last_k, last_hit, misses = k, j, 0
+                if len(ks) >= 4:
+                    a_fit, p_fit = _fit_line(ks, ts)
+                    if p_fit and p_fit > 0:
+                        a, p = a_fit, p_fit
+            else:
+                misses += 1
+                if misses >= break_after:
+                    break
+            j += 1
+        if len(ks) >= min_segment_beats:
+            a_fit, p_fit = _fit_line(ks, ts)
+            if p_fit and p_fit > 0:
+                a, p = a_fit, p_fit
+            a, p, ks, ts = _fold_sparse_grid(a, p, ks, ts, tol_s)
+            last_k = ks[-1]
+            segs.append({"anchor_s": a, "period_s": p, "first_k": 0, "last_k": last_k,
+                         "hits": len(ks), "ts": ts})
+        i = last_hit + 1 if last_hit > start else start + 1
+    segs = _merge_resumed_grids(segs, tol_s)
+    for s in segs:
+        residuals.extend(abs(t_ - (s["anchor_s"] + round((t_ - s["anchor_s"]) / s["period_s"]) * s["period_s"]))
+                         for t_ in s["ts"])
+    if not segs or sum(s["hits"] for s in segs) / n < GRID_MIN_COVERAGE:
+        return None
+
+    # Downbeats on each segment's grid.
+    db = np.sort(np.asarray(downbeats if downbeats is not None else [], dtype=float))
+    placed = []  # (segment index, k)
+    for si, s in enumerate(segs):
+        lo = s["anchor_s"] - tol_s
+        hi = s["anchor_s"] + s["last_k"] * s["period_s"] + tol_s
+        for d in db[(db >= lo) & (db <= hi)]:
+            k = int(round((float(d) - s["anchor_s"]) / s["period_s"]))
+            if abs(float(d) - (s["anchor_s"] + k * s["period_s"])) <= tol_s:
+                placed.append((si, k))
+    bpb = None
+    agreement = None
+    if len(placed) >= 2:
+        spacings = [k2 - k1 for (s1, k1), (s2, k2) in zip(placed, placed[1:]) if s1 == s2 and 2 <= k2 - k1 <= 7]
+        if spacings:
+            vals, counts = np.unique(spacings, return_counts=True)
+            bpb = int(vals[int(np.argmax(counts))])
+    if bpb:
+        hit_total = 0
+        for si, s in enumerate(segs):
+            mods = [k % bpb for (sj, k) in placed if sj == si]
+            if not mods:
+                s["downbeat_s"] = None
+                continue
+            vals, counts = np.unique(mods, return_counts=True)
+            phase = int(vals[int(np.argmax(counts))])
+            hit_total += int(counts.max())
+            s["downbeat_s"] = s["anchor_s"] + phase * s["period_s"]
+        agreement = hit_total / len(placed)
+    else:
+        for s in segs:
+            s["downbeat_s"] = None
+    hits = sum(s["hits"] for s in segs)
+    return {
+        "segments": [{k: v for k, v in s.items() if k != "ts"} for s in segs],
+        "beats_per_bar": bpb,
+        "coverage": hits / n,
+        "residual_s": float(np.median(residuals)) if residuals else None,
+        "downbeat_agreement": agreement,
+    }
+
+
+def grid_answer(fit, beats_detected, decoded_s, model):
+    """The `grid` facet's data from fit_grid's result: integers in ms (the
+    period to the microsecond), the main tempo from the segment spanning the
+    most time. Octave-safe by construction: the period is the measured beat
+    spacing, never clamped into a BPM range."""
+    segs = []
+    for s in fit["segments"]:
+        segs.append({
+            "anchorMs": int(round(s["anchor_s"] * 1000)),
+            "periodUs": int(round(s["period_s"] * 1_000_000)),
+            "beats": int(s["last_k"]) + 1,
+            "downbeatMs": None if s.get("downbeat_s") is None else int(round(s["downbeat_s"] * 1000)),
+        })
+    main = max(segs, key=lambda s: (s["beats"] - 1) * s["periodUs"])
+    main_span_us = (main["beats"] - 1) * main["periodUs"]
+    return {
+        "grid_version": GRID_VERSION,
+        "engine": "beat_this",
+        "model": model,
+        "bpm": round(60_000_000 / main["periodUs"], 2),
+        "beats_per_bar": fit["beats_per_bar"],
+        "segments": segs,
+        "coverage": round(fit["coverage"], 3),
+        "residual_ms": None if fit["residual_s"] is None else round(fit["residual_s"] * 1000, 1),
+        "downbeat_agreement": None if fit["downbeat_agreement"] is None else round(fit["downbeat_agreement"], 3),
+        "main_share": round(main_span_us / 1_000_000 / decoded_s, 3) if decoded_s > 0 else None,
+        "beats_detected": int(beats_detected),
+        "decoded_ms": int(round(decoded_s * 1000)),
+    }
+
+
+def decode_mono(src, sr=22050, max_s=GRID_MAX_SECONDS, timeout_s=None):
+    """The whole of `src` (URL or complete local path) as mono float32 at `sr`,
+    capped at `max_s` seconds. Raises on an ffmpeg failure."""
+    import numpy as np
+
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("ffmpeg not found")
+    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-threads", "1",
+           "-i", src, "-map", "0:a:0", "-vn", "-ac", "1", "-ar", str(sr), "-t", str(max_s),
+           "-f", "f32le", "pipe:1"]
+    proc = subprocess.run(cmd, capture_output=True, timeout=timeout_s or WHOLE_FILE_TIMEOUT_S)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {proc.stderr.decode('utf-8', 'replace').strip()[-300:]}")
+    return np.frombuffer(proc.stdout, dtype=np.float32), sr
+
+
+def facet_grid(src):
+    """The `grid` facet over the whole track: ok + fitted grid, unmeasurable
+    (too short, no beat), or unavailable (no Beat This! in this image)."""
+    if not src:
+        return _unmeasurable("no-whole-file-source")
+    gridder = get_gridder()
+    if gridder is None:
+        return _unavailable(_gridder_error or "Beat This! not installed (heavy analyzer only)")
+    try:
+        y, sr = decode_mono(src)
+        decoded_s = len(y) / sr
+        if decoded_s < GRID_MIN_SECONDS:
+            return _unmeasurable("too-short")
+        beats, downbeats = gridder(y, sr)
+        fit = fit_grid(beats, downbeats)
+        if fit is None:
+            return _unmeasurable("no-beat")
+        return _ok(grid_answer(fit, len(beats), decoded_s, gridder.model))
+    except Exception as e:  # noqa: BLE001
+        return _failed(e)
 
 
 # The vocal gate, split out of the detector so it's testable without torch /
@@ -3526,7 +3916,7 @@ def analyze(
 # A request without `facets` keeps analyze()'s flat response, byte for byte.
 # ---------------------------------------------------------------------------
 
-FACET_NAMES = ("head", "loudness", "tail", "clap", "vocal", "stems", "edges")
+FACET_NAMES = ("head", "loudness", "tail", "clap", "vocal", "stems", "edges", "grid")
 
 
 class FacetRequestError(ValueError):
@@ -4582,6 +4972,11 @@ def analyze_facets(librosa, source, facets, stems_dir=None, want_tail_vocals=Fal
             except Exception as e:  # noqa: BLE001
                 out["clap"] = _failed(e)
 
+    # The whole-track beat grid reads the same whole-file input as edges and
+    # loudness v2 (its own decode, mono at 22,050 Hz, for the model).
+    if "grid" in wanted:
+        out["grid"] = facet_grid(whole_input)
+
     return {name: out[name] for name in FACET_NAMES if name in out}
 
 
@@ -4626,10 +5021,14 @@ def analyze_facet_request(librosa, req):
     # The whole-file facets stream the music server's URL (or read a local
     # copy known to be complete); `stream_url` rides along with a path request.
     whole_input = whole_file_input(req.get("path"), req.get("complete"), req.get("stream_url") or req.get("url"))
-    if all(f in WHOLE_FILE_FACETS for f in facets):
+    if all(f in WHOLE_FILE_FACETS or f == "grid" for f in facets):
         # Nothing here needs the capped download the window facets decode:
-        # fetching it would read up to ANALYZE_MAX_BYTES for no use.
+        # fetching it would read up to ANALYZE_MAX_BYTES for no use. The grid
+        # streams the whole file too (its own mono decode, for the model); it
+        # never reaches the one-shot --whole-file lane, which holds no model.
         result = whole_file_facets(whole_input, facets)
+        if "grid" in facets:
+            result["grid"] = facet_grid(whole_input)
         edges = result.get("edges") or {}
         dur_ms = (edges.get("data") or {}).get("decoded_duration_ms")
         return {
@@ -4744,6 +5143,10 @@ def main():
         # Older workers never emit the key; the controller re-plans a v2
         # figure stored without a curve only on `=== true`.
         "loudness_curve_capable": shutil.which("ffmpeg") is not None,
+        # The whole-track beat grid (Beat This!, heavy images). Libraries
+        # installed, not yet loaded: a failed load rides back as
+        # capability_loss()["beat_grid"]. Older workers never emit the key.
+        "grid_capable": grid_capable() and shutil.which("ffmpeg") is not None,
     })
 
     for line in sys.stdin:

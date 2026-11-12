@@ -306,6 +306,7 @@ services:
         # Local build mirrors the pulled image: lean unless ANALYZER_HEAVY set.
         WITH_CLAP: ${ANALYZER_HEAVY:+1}
         WITH_DEMUCS: ${ANALYZER_HEAVY:+1}
+        WITH_BEAT_GRID: ${ANALYZER_HEAVY:+1}
     container_name: sub-wave-analyzer
     # 0 = don't create this container at all (see the off switch above).
     # 0 and 1 are the ONLY valid values: container_name is fixed above, and

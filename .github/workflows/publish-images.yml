@@ -98,6 +98,7 @@ jobs:
             build_args: |
               WITH_CLAP=0
               WITH_DEMUCS=0
+              WITH_BEAT_GRID=0
           # Heavy AIO — same one-click container with the CLAP "sounds-like" +
           # Demucs vocal stack baked in (~1.5GB torch each). Unraid one-click
           # users who want those dimensions repoint their container at the
@@ -108,6 +109,7 @@ jobs:
             build_args: |
               WITH_CLAP=1
               WITH_DEMUCS=1
+              WITH_BEAT_GRID=1
           # CUDA AIO — the heavy one-click container with CLAP + Demucs on CUDA
           # torch wheels, for a box with an NVIDIA card (#1186). The AIO analog of
           # subwave-analyzer-cuda; the operator points the container at one of
@@ -126,6 +128,7 @@ jobs:
             build_args: |
               WITH_CLAP=1
               WITH_DEMUCS=1
+              WITH_BEAT_GRID=1
               WITH_CUDA=1
           # torch 2.6.0+cu124 still ships SASS for sm_50, sm_60 and sm_70, which
           # cu128 dropped: the build for Maxwell, Pascal and Volta cards.
@@ -139,6 +142,7 @@ jobs:
             build_args: |
               WITH_CLAP=1
               WITH_DEMUCS=1
+              WITH_BEAT_GRID=1
               WITH_CUDA=1
           - image: subwave-tts-heavy
             dockerfile: docker/Dockerfile.tts-heavy
@@ -156,6 +160,7 @@ jobs:
             build_args: |
               WITH_CLAP=0
               WITH_DEMUCS=0
+              WITH_BEAT_GRID=0
           # Heavy analyzer — same image with the CLAP + Demucs CPU-torch stack
           # baked in (~1.9GB). amd64-only (matching tts-heavy — the heavy PyTorch
           # stack). Operators opt in with ANALYZER_HEAVY=1 in .env, which points
@@ -167,6 +172,7 @@ jobs:
             build_args: |
               WITH_CLAP=1
               WITH_DEMUCS=1
+              WITH_BEAT_GRID=1
           # CUDA analyzer — the heavy stack on cu128 torch wheels for NVIDIA
           # hosts (#1099). amd64-only like heavy. Selected by the
           # docker-compose.analyzer-gpu.yml overlay (which also adds the GPU
@@ -178,6 +184,7 @@ jobs:
             build_args: |
               WITH_CLAP=1
               WITH_DEMUCS=1
+              WITH_BEAT_GRID=1
               WITH_CUDA=1
     steps:
       # fetch-depth: 0 pulls full history + tags so `git describe` resolves the
