@@ -35,7 +35,7 @@ const grid = (over: Partial<import('../src/music/library-db/grid.js').TrackGrid>
   bpm: 124, beatsPerBar: 4,
   segments: [{ anchorMs: 480, periodUs: 483871, beats: 700, downbeatMs: 480 }],
   coverage: 0.97, residualMs: 5, downbeatAgreement: 0.84, mainShare: 0.99, decodedMs: 340_000,
-  measuredAt: '2026-11-12T00:00:00Z', ...over,
+  measuredAt: '2026-11-12T00:00:00Z', applied: 0 as const, headBpm: null, headBeatsJson: null, headBarsJson: null, ...over,
 });
 const P = 483.871;
 const track = (over: Partial<Parameters<typeof R.compareGrid>[0]> = {}) => ({
@@ -167,7 +167,7 @@ test('the report reads only: the library file is unchanged', () => {
   db.requireDb().pragma('wal_checkpoint(TRUNCATE)');
   const file = join(stateDir, 'library.db');
   const before = readFileSync(file);
-  const rows = db.allMeasuredGrids().map(({ id, grid: g }) => R.compareGrid({ ...db.getTrack(id)!, id }, g)!);
+  const rows = db.allMeasuredGrids().map(({ id, grid: g }) => R.compareGrid(R.withHeadValues({ ...db.getTrack(id)!, id }, g), g)!);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].relation, 'double');
   db.requireDb().pragma('wal_checkpoint(TRUNCATE)');

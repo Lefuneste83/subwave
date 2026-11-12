@@ -4,10 +4,13 @@
 //
 // Why a table of its own and its own attempt count:
 //   - The grid is opt-in (`npm run analyze -- --facets grid`, heavy analyzer
-//     only). Nothing else reads it until the operator approves the dry-run
-//     report (music/grid-report.ts) and turns the adapter on, so an upgrade
-//     changes nothing a station plays: today's `bpm`, `beats_json` and
-//     `bars_json` stay the head analysis's own.
+//     only), so an upgrade changes nothing a station plays: with no grid
+//     measured, `bpm`, `beats_json` and `bars_json` stay the head analysis's.
+//   - A measured grid that passes music/grid-policy.ts replaces them
+//     (tracks.applyGridToTrack). The head analysis's own values are kept here
+//     (`head_*`, while `applied` = 1), so `npm run grid-apply -- --revert`
+//     restores them; a reverted row is `applied` = -1 and stays reverted
+//     until `npm run grid-apply` is run again.
 //   - The track's shared failure count (`analyze_fail_count`) gates every
 //     regular analysis retry and is copied onto each facet that has no row
 //     (library-db/facets.ts deriveFacetRows). A grid failure counted there
@@ -59,7 +62,15 @@ export interface TrackGrid {
   mainShare: number | null;
   decodedMs: number | null;
   measuredAt: string;
+  // 1: written over the head's values (kept in head*); 0: not; -1: reverted
+  // by the operator, never re-applied until `npm run grid-apply`.
+  applied: GridApplied;
+  headBpm: number | null;
+  headBeatsJson: string | null;
+  headBarsJson: string | null;
 }
+
+export type GridApplied = -1 | 0 | 1;
 
 // The analyzer's `grid` data, as parsed by music/analyzer.ts parseGridAnswer.
 export interface GridAnswer {
@@ -95,7 +106,11 @@ export function ensureGridTable(d: Database.Database): void {
     downbeat_agreement REAL,
     main_share         REAL,
     decoded_ms         INTEGER,
-    measured_at        TEXT    NOT NULL
+    measured_at        TEXT    NOT NULL,
+    applied            INTEGER NOT NULL DEFAULT 0,
+    head_bpm           REAL,
+    head_beats_json    TEXT,
+    head_bars_json     TEXT
   ) WITHOUT ROWID`);
 }
 
@@ -159,6 +174,7 @@ interface GridRow {
   model: string | null; bpm: number | null; beats_per_bar: number | null; segments_json: string | null;
   coverage: number | null; residual_ms: number | null; downbeat_agreement: number | null;
   main_share: number | null; decoded_ms: number | null; measured_at: string;
+  applied: number; head_bpm: number | null; head_beats_json: string | null; head_bars_json: string | null;
 }
 
 function parseSegments(json: string | null): GridSegment[] {
@@ -178,11 +194,13 @@ function toGrid(r: GridRow): TrackGrid {
     model: r.model, bpm: r.bpm, beatsPerBar: r.beats_per_bar, segments: parseSegments(r.segments_json),
     coverage: r.coverage, residualMs: r.residual_ms, downbeatAgreement: r.downbeat_agreement,
     mainShare: r.main_share, decodedMs: r.decoded_ms, measuredAt: r.measured_at,
+    applied: (r.applied === 1 ? 1 : r.applied === -1 ? -1 : 0), headBpm: r.head_bpm,
+    headBeatsJson: r.head_beats_json, headBarsJson: r.head_bars_json,
   };
 }
 
-export function getGrid(id: string): TrackGrid | null {
-  const r = requireDb().prepare('SELECT * FROM track_grid WHERE track_id = ?').get(id) as GridRow | undefined;
+export function getGrid(id: string, d: Database.Database = requireDb()): TrackGrid | null {
+  const r = d.prepare('SELECT * FROM track_grid WHERE track_id = ?').get(id) as GridRow | undefined;
   return r ? toGrid(r) : null;
 }
 
@@ -194,9 +212,41 @@ export function allMeasuredGrids(): Array<{ id: string; grid: TrackGrid }> {
   return rows.map((r) => ({ id: r.track_id, grid: toGrid(r) }));
 }
 
+// Every grid row the head's values were kept for (applied = 1), or every
+// operator-reverted one (-1), by id.
+export function gridIdsApplied(state: GridApplied): string[] {
+  return (requireDb().prepare('SELECT track_id FROM track_grid WHERE applied = ? ORDER BY track_id').all(state) as Array<{ track_id: string }>)
+    .map((r) => r.track_id);
+}
+
+// Ids with a measured grid, for `npm run grid-apply`.
+export function measuredGridIds(): string[] {
+  return (requireDb().prepare(`SELECT track_id FROM track_grid WHERE status = 'ok' ORDER BY track_id`).all() as Array<{ track_id: string }>)
+    .map((r) => r.track_id);
+}
+
+// The grid's bookkeeping of what it replaced: `applied` and the head's own
+// values (null unless applied = 1). Written only by tracks.applyGridToTrack and
+// its revert.
+export function setGridApplied(
+  d: Database.Database, id: string, applied: GridApplied,
+  head: { bpm: number | null; beatsJson: string | null; barsJson: string | null } | null,
+): void {
+  d.prepare('UPDATE track_grid SET applied = ?, head_bpm = ?, head_beats_json = ?, head_bars_json = ? WHERE track_id = ?')
+    .run(applied, head?.bpm ?? null, head?.beatsJson ?? null, head?.barsJson ?? null, id);
+}
+
+// A head write replaced tracks.bpm/beats/bars with fresh head values: what was
+// kept as the head's is stale. An operator revert (-1) stays reverted.
+export function forgetGridHead(d: Database.Database, id?: string): void {
+  const sql = 'UPDATE track_grid SET applied = 0, head_bpm = NULL, head_beats_json = NULL, head_bars_json = NULL WHERE applied = 1';
+  if (id == null) d.prepare(sql).run();
+  else d.prepare(`${sql} AND track_id = ?`).run(id);
+}
+
 // ID rotation: the old id's row moves to the new id unless it has its own.
 export function moveGridRow(d: Database.Database, oldId: string, newId: string): void {
-  d.prepare('INSERT OR IGNORE INTO track_grid SELECT ?, status, version, reason, attempts, engine, model, bpm, beats_per_bar, segments_json, coverage, residual_ms, downbeat_agreement, main_share, decoded_ms, measured_at FROM track_grid WHERE track_id = ?')
+  d.prepare('INSERT OR IGNORE INTO track_grid SELECT ?, status, version, reason, attempts, engine, model, bpm, beats_per_bar, segments_json, coverage, residual_ms, downbeat_agreement, main_share, decoded_ms, measured_at, applied, head_bpm, head_beats_json, head_bars_json FROM track_grid WHERE track_id = ?')
     .run(newId, oldId);
   d.prepare('DELETE FROM track_grid WHERE track_id = ?').run(oldId);
 }

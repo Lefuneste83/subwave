@@ -8,7 +8,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as db from './library-db.js';
 import * as embeddings from './embeddings.js';
-import { GRID_WRITE_GATE, compareGrid, gridReportCsv, summariseGridReport, type GridReportRow } from './grid-report.js';
+import { GRID_WRITE_GATE, compareGrid, withHeadValues, gridReportCsv, summariseGridReport, type GridReportRow } from './grid-report.js';
 
 function flag(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
@@ -47,7 +47,7 @@ async function main() {
   for (const { id, grid } of db.allMeasuredGrids()) {
     const t = db.getTrack(id);
     if (!t) continue;
-    const row = compareGrid({ ...t, id }, grid);
+    const row = compareGrid(withHeadValues({ ...t, id }, grid), grid);
     if (row) rows.push(row);
   }
   rows.sort((a, b) => a.artist.localeCompare(b.artist) || a.title.localeCompare(b.title));

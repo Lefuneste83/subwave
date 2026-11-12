@@ -140,12 +140,16 @@ test('parseGridAnswer is strict', () => {
   assert.equal(analyzer.parseGridAnswer(null), null);
 });
 
-test('a grid write leaves the track and its analysis failure history alone', () => {
+test('a grid write leaves the track\'s analysis failure history alone', () => {
   track('g1');
   db.recordAnalysisFailure('g1', 'tail: placed window not reached');
   const before = trackCols('g1');
   db.writeGridResult('g1', { grid: analyzer.parseGridAnswer(GOOD_GRID)! });
-  assert.deepEqual(trackCols('g1'), before, 'bpm, beats, bars and the failure count untouched');
+  const after = trackCols('g1');
+  assert.deepEqual([after.analyze_fail_count, after.analyze_error], [before.analyze_fail_count, before.analyze_error],
+    'the failure count untouched');
+  // The grid passes the gate (grid-apply.test.ts pins the write itself).
+  assert.equal(after.bpm, 124);
   const g = db.getGrid('g1');
   assert.equal(g?.status, 'ok');
   assert.equal(g?.bpm, 124);
@@ -228,7 +232,7 @@ test('the planner plans grid only on a positive capability; a regular run never 
   assert.ok(P.parseFacets('grid').includes('grid'));
 });
 
-test('a grid-only plan streams by URL, writes the grid and nothing else', async () => {
+test('a grid-only plan streams by URL and writes the grid', async () => {
   track('run1');
   const before = trackCols('run1');
   await analyzer.isAvailable();
@@ -246,7 +250,8 @@ test('a grid-only plan streams by URL, writes the grid and nothing else', async 
   assert.ok(typeof requests[0].url === 'string' && !('path' in requests[0]), 'by url, no staged copy');
   assert.equal(streamHits, 0, 'no capped download');
   assert.equal(db.getGrid('run1')?.bpm, 124);
-  assert.deepEqual(trackCols('run1'), before);
+  assert.equal(trackCols('run1').bpm, 124, 'applied over the head (grid-apply.test.ts)');
+  assert.deepEqual([trackCols('run1').analyze_fail_count, trackCols('run1').analyze_error], [before.analyze_fail_count, before.analyze_error]);
 });
 
 test('a grid that fails alone is stamped on the grid row, never on the track', async () => {

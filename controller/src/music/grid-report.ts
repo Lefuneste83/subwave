@@ -21,6 +21,7 @@
 
 import { soundWords, trackAcoustics, type AcousticsFields } from './sound-line.js';
 import type { GridSegment, TrackGrid } from './library-db/grid.js';
+import { gridDecision } from './grid-policy.js';
 
 export type TempoRelation = 'same' | 'double' | 'half' | 'three-halves' | 'two-thirds' | 'other' | 'no-stored-bpm';
 
@@ -41,24 +42,9 @@ export function tempoRelation(stored: number | null | undefined, grid: number): 
   return 'other';
 }
 
-// The gate step 4 proposes: only a grid the model held with confidence may
-// replace a stored value. Bars need the downbeats to agree on one phase too
-// (one real track read 0.56: its bar line split across two phases).
-// A grid tempo above maxBpm is held too: on 300 library tracks the only
-// confident grids past it were double-time readings (220 and 226 for tracks
-// near 110), and nothing is ever halved to fit (octave-safe rule: a hold
-// keeps the stored value and lists the track, it never clamps).
-// "Steady" is the share of the track whose grid sits within STEADY_TEMPO_BAND
-// of the main tempo, summed over segments: a live drummer or a break splits a
-// steady song into several segments that all agree (on 300 library tracks, 27
-// such songs held by the main segment alone had segments within 4 %).
-export const STEADY_TEMPO_BAND = 0.04;
-export const GRID_WRITE_GATE = {
-  minCoverage: 0.8,       // detected beats on the grid
-  minSteadyShare: 0.6,    // the track's share on the main tempo (any segment)
-  minDownbeatAgreement: 0.75,
-  maxBpm: 200,
-} as const;
+// The gate is music/grid-policy.ts, the one the write uses: re-exported so
+// the report's readers keep one import.
+export { GRID_WRITE_GATE, STEADY_TEMPO_BAND, steadyShare } from './grid-policy.js';
 
 // A beat time of the grid nearest `ms`, within the segment that covers it.
 function segmentAt(segments: GridSegment[], ms: number): GridSegment | null {
@@ -98,16 +84,6 @@ export function storedBeatsOnGrid(segments: GridSegment[], beatsMs: readonly num
   return on / beatsMs.length;
 }
 
-export function steadyShare(g: Pick<TrackGrid, 'bpm' | 'segments' | 'decodedMs'>): number | null {
-  if (!g.bpm || !g.decodedMs || g.decodedMs <= 0) return null;
-  let ms = 0;
-  for (const s of g.segments) {
-    const bpm = 60_000_000 / s.periodUs;
-    if (Math.abs(bpm / g.bpm - 1) <= STEADY_TEMPO_BAND) ms += ((s.beats - 1) * s.periodUs) / 1000;
-  }
-  return Math.min(1, ms / g.decodedMs);
-}
-
 export interface GridReportTrack extends AcousticsFields {
   id: string;
   artist: string | null;
@@ -115,6 +91,22 @@ export interface GridReportTrack extends AcousticsFields {
   genres?: string[];
   beats: number[] | null;
   bars: number[] | null;
+}
+
+// The track as the head analysis left it: once a grid is applied, the
+// track carries the grid's values, and the head's own are kept on the grid row.
+export function withHeadValues<T extends GridReportTrack>(t: T, g: TrackGrid): T {
+  if (g.applied !== 1) return t;
+  const ms = (json: string | null): number[] | null => {
+    if (!json) return null;
+    try {
+      const v = JSON.parse(json);
+      return Array.isArray(v) ? v.filter((x): x is number => typeof x === 'number' && Number.isFinite(x)) : null;
+    } catch {
+      return null;
+    }
+  };
+  return { ...t, bpm: g.headBpm, beats: ms(g.headBeatsJson), bars: ms(g.headBarsJson) };
 }
 
 export interface GridReportRow {
@@ -153,15 +145,9 @@ export function compareGrid(t: GridReportTrack, g: TrackGrid): GridReportRow | n
   const after = soundWords(trackAcoustics({ ...t, bpm: g.bpm })).measured;
   const firstBar = (t.bars ?? []).find((b) => Number.isFinite(b) && b >= 0);
   const offset = firstBar != null ? barOffsetBeats(g, firstBar) : null;
-  const steady = steadyShare(g);
-  const confident = (g.coverage ?? 0) >= GRID_WRITE_GATE.minCoverage && (steady ?? 0) >= GRID_WRITE_GATE.minSteadyShare &&
-    g.bpm <= GRID_WRITE_GATE.maxBpm;
-  const barsConfident = confident && (g.downbeatAgreement ?? 0) >= GRID_WRITE_GATE.minDownbeatAgreement && !!g.beatsPerBar;
-  const held: string[] = [];
-  if ((g.coverage ?? 0) < GRID_WRITE_GATE.minCoverage) held.push(`coverage ${round(g.coverage)}`);
-  if ((steady ?? 0) < GRID_WRITE_GATE.minSteadyShare) held.push(`steady tempo on ${round(steady)} of the track`);
-  if (g.bpm > GRID_WRITE_GATE.maxBpm) held.push(`${g.bpm} BPM, above ${GRID_WRITE_GATE.maxBpm}: possibly double time`);
-  if (confident && !barsConfident) held.push(`bars: downbeat agreement ${round(g.downbeatAgreement)}`);
+  const decision = gridDecision(g);
+  const confident = decision.bpm;
+  const steady = decision.steadyShare;
   return {
     id: t.id,
     artist: t.artist ?? '',
@@ -184,8 +170,8 @@ export function compareGrid(t: GridReportTrack, g: TrackGrid): GridReportRow | n
     downbeatAgreement: g.downbeatAgreement,
     beatsPerBar: g.beatsPerBar,
     wouldWriteBpm: confident,
-    wouldWriteBars: barsConfident,
-    heldBecause: held.length ? held.join('; ') : null,
+    wouldWriteBars: decision.bars,
+    heldBecause: decision.held.length ? decision.held.join('; ') : null,
   };
 }
 
