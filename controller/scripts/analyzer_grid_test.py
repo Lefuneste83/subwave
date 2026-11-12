@@ -101,6 +101,26 @@ shifted = grid(112.0, main[340] + period * 0.4, 300, seed=5)
 f = aw.fit_grid(np.concatenate([main[:340], shifted]), None)
 check("same tempo, new phase: two segments", len(f["segments"]) == 2, len(f["segments"]))
 
+# Dense detections where the segment starts (hi-hats in an intro: beats AND
+# offbeats for 16 beats), then the beat alone: the grid is the beat's, never
+# the hi-hats' double time (measured: a 124 BPM techno track read 248).
+beat = grid(124.0, 0.5, 600, jitter_ms=4, seed=6)
+offbeats = beat[:16] + (60.0 / 124.0) / 2
+f = aw.fit_grid(np.sort(np.concatenate([beat, offbeats])), downbeats_of(beat, 4, 0))
+check("dense intro: the grid is the beat's tempo", abs(60 / f["segments"][0]["period_s"] - 124.0) < 0.1,
+      [round(60 / s["period_s"], 2) for s in f["segments"]])
+check("dense intro: one segment over the track", len(f["segments"]) == 1 and f["segments"][0]["last_k"] >= 590,
+      [(round(60 / s["period_s"], 1), s["last_k"]) for s in f["segments"]])
+# A real double-time track (every detection on the fast grid) stays fast.
+fast = grid(174.0, 0.2, 500, jitter_ms=3, seed=7)
+f = aw.fit_grid(fast, None)
+check("a real 174 BPM track is not folded", abs(60 / f["segments"][0]["period_s"] - 174.0) < 0.1, 60 / f["segments"][0]["period_s"])
+# Beats detected only every other beat (a sparse tracker) fold to that spacing:
+# the grid follows the detections it has.
+sparse = grid(124.0, 0.5, 600)[::2]
+f = aw.fit_grid(sparse, None)
+check("every-other-beat detections: their own spacing", abs(60 / f["segments"][0]["period_s"] - 62.0) < 0.1, 60 / f["segments"][0]["period_s"])
+
 # A tempo change 120 → 128 BPM: two segments, each with its own tempo.
 a = grid(120.0, 0.0, 128)
 c = grid(128.0, a[-1] + 60.0 / 128.0, 160)

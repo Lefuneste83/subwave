@@ -87,9 +87,26 @@ test('the gate holds an unconfident grid, and its word change is no re-embed', (
   assert.equal(low.wouldWriteBars, false);
   assert.equal(low.reEmbed, false);
   assert.match(low.heldBecause ?? '', /coverage 0.6/);
-  const split = R.compareGrid(track(), grid({ mainShare: 0.48 }))!;
+  const fast = R.compareGrid(track({ bpm: 73.8 }), grid({ bpm: 219.99 }))!;
+  assert.equal(fast.wouldWriteBpm, false, 'above 200 BPM: held, never halved');
+  assert.match(fast.heldBecause ?? '', /above 200: possibly double time/);
+  assert.equal(R.compareGrid(track({ bpm: 184.6 }), grid({ bpm: 187.7, segments: [{ anchorMs: 480, periodUs: 319659, beats: 1060, downbeatMs: 480 }] }))!.wouldWriteBpm, true);
+  // Two segments at 124 and 30 s of something else in 340 s: 0.3 steady.
+  const split = R.compareGrid(track(), grid({ segments: [
+    { anchorMs: 480, periodUs: 483871, beats: 200, downbeatMs: 480 },
+    { anchorMs: 100_000, periodUs: 600000, beats: 300, downbeatMs: 100_000 },
+  ] }))!;
   assert.equal(split.wouldWriteBpm, false);
-  assert.match(split.heldBecause ?? '', /main tempo 0.48/);
+  assert.match(split.heldBecause ?? '', /steady tempo on 0.28 of the track/);
+  // A steady song split by small drifts (live drums) is written: its segments
+  // all sit within 4 % of the main tempo.
+  const drift = R.compareGrid(track(), grid({ mainShare: 0.3, segments: [
+    { anchorMs: 480, periodUs: 483871, beats: 200, downbeatMs: 480 },
+    { anchorMs: 98_000, periodUs: 490000, beats: 200, downbeatMs: 98_000 },
+    { anchorMs: 196_000, periodUs: 478000, beats: 280, downbeatMs: 196_000 },
+  ] }))!;
+  assert.equal(drift.steadyShare, 0.96);
+  assert.equal(drift.wouldWriteBpm, true);
 });
 
 test('bars are held when the downbeats split, written when they agree', () => {

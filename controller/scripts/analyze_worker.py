@@ -1693,6 +1693,47 @@ def _fit_line(ks, ts):
 GRID_SAME_TEMPO = 0.002
 
 
+# A segment whose hits mostly skip the same number of grid lines was fitted at
+# a divisor of the beat: dense detections where it started (hi-hats in an
+# intro) set the period, and the real beats then sit on every other line and
+# count as hits, so the grid never breaks. Measured on library techno: a 124
+# BPM track read 248, with 99 % of the beats "on the grid". When at least
+# GRID_FOLD_SHARE of the steps between hits are the same multiple m (2..4),
+# the period is m times longer: refit on the hits that sit on the new lines,
+# the ones between them dropped. Octave-safe: a fold on evidence, never a
+# clamp into a tempo range.
+GRID_FOLD_SHARE = 0.6
+
+
+def _fold_sparse_grid(a, p, ks, ts, tol_s):
+    import numpy as np
+
+    if len(ks) < 3:
+        return a, p, ks, ts
+    steps = np.diff(np.asarray(ks))
+    vals, counts = np.unique(steps, return_counts=True)
+    m = int(vals[int(np.argmax(counts))])
+    if m < 2 or m > 4 or counts.max() / len(steps) < GRID_FOLD_SHARE:
+        return a, p, ks, ts
+    # The phase the most hits share on the m-times-longer grid.
+    phases, pc = np.unique(np.asarray(ks) % m, return_counts=True)
+    phase = int(phases[int(np.argmax(pc))])
+    keep = [(k, t_) for k, t_ in zip(ks, ts) if k % m == phase]
+    if len(keep) < 2:
+        return a, p, ks, ts
+    k0 = keep[0][0]
+    nks = [(k - k0) // m for k, _ in keep]
+    nts = [t_ for _, t_ in keep]
+    na, np_ = _fit_line(nks, nts)
+    if not np_ or np_ <= 0:
+        return a, p, ks, ts
+    good = [(k, t_) for k, t_ in zip(nks, nts) if abs(t_ - (na + k * np_)) <= tol_s]
+    if len(good) < 2:
+        return a, p, ks, ts
+    na, np_ = _fit_line([k for k, _ in good], [t_ for _, t_ in good])
+    return na, np_, [k for k, _ in good], [t_ for _, t_ in good]
+
+
 def _merge_resumed_grids(segs, tol_s):
     """Join a segment to an earlier one when the beat came back on the same
     grid: the same tempo (GRID_SAME_TEMPO) and its first beat on the earlier
@@ -1790,6 +1831,8 @@ def fit_grid(beats, downbeats, tol_s=GRID_TOLERANCE_S, break_after=GRID_BREAK_AF
             a_fit, p_fit = _fit_line(ks, ts)
             if p_fit and p_fit > 0:
                 a, p = a_fit, p_fit
+            a, p, ks, ts = _fold_sparse_grid(a, p, ks, ts, tol_s)
+            last_k = ks[-1]
             segs.append({"anchor_s": a, "period_s": p, "first_k": 0, "last_k": last_k,
                          "hits": len(ks), "ts": ts})
         i = last_hit + 1 if last_hit > start else start + 1

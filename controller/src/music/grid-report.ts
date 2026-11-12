@@ -13,8 +13,8 @@
 //     function the embed text uses): every such track re-embeds;
 //   - where today's first stored bar line sits on the grid: on a downbeat, or
 //     how many beats off (a bar shift moves every bar-snapped transition);
-//   - the grid's own confidence (beats on the grid, the main segment's share
-//     of the track, downbeat agreement), and the write step 4 would make under
+//   - the grid's own confidence (beats on the grid, the share of the track on
+//     the main tempo, downbeat agreement), and the write step 4 would make under
 //     its proposed gate (GRID_WRITE_GATE), so the operator approves a rule, not
 //     a list.
 // Pure except for the CLI at the bottom (grid-report-cli.ts).
@@ -28,7 +28,9 @@ export type TempoRelation = 'same' | 'double' | 'half' | 'three-halves' | 'two-t
 const RELATIONS: Array<[TempoRelation, number]> = [
   ['same', 1], ['double', 2], ['half', 0.5], ['three-halves', 1.5], ['two-thirds', 2 / 3],
 ];
-export const SAME_TEMPO_TOLERANCE = 0.02;
+// librosa's tempo estimates fall on a coarse grid (112.35, 117.45, 123.05,
+// 129.2…), about 4.5 % apart: a true tempo can read up to half a step off.
+export const SAME_TEMPO_TOLERANCE = 0.03;
 
 export function tempoRelation(stored: number | null | undefined, grid: number): TempoRelation {
   if (stored == null || !Number.isFinite(stored) || stored <= 0) return 'no-stored-bpm';
@@ -42,10 +44,20 @@ export function tempoRelation(stored: number | null | undefined, grid: number): 
 // The gate step 4 proposes: only a grid the model held with confidence may
 // replace a stored value. Bars need the downbeats to agree on one phase too
 // (one real track read 0.56: its bar line split across two phases).
+// A grid tempo above maxBpm is held too: on 300 library tracks the only
+// confident grids past it were double-time readings (220 and 226 for tracks
+// near 110), and nothing is ever halved to fit (octave-safe rule: a hold
+// keeps the stored value and lists the track, it never clamps).
+// "Steady" is the share of the track whose grid sits within STEADY_TEMPO_BAND
+// of the main tempo, summed over segments: a live drummer or a break splits a
+// steady song into several segments that all agree (on 300 library tracks, 27
+// such songs held by the main segment alone had segments within 4 %).
+export const STEADY_TEMPO_BAND = 0.04;
 export const GRID_WRITE_GATE = {
   minCoverage: 0.8,       // detected beats on the grid
-  minMainShare: 0.6,      // the main tempo's segment spans this share of the track
+  minSteadyShare: 0.6,    // the track's share on the main tempo (any segment)
   minDownbeatAgreement: 0.75,
+  maxBpm: 200,
 } as const;
 
 // A beat time of the grid nearest `ms`, within the segment that covers it.
@@ -86,6 +98,16 @@ export function storedBeatsOnGrid(segments: GridSegment[], beatsMs: readonly num
   return on / beatsMs.length;
 }
 
+export function steadyShare(g: Pick<TrackGrid, 'bpm' | 'segments' | 'decodedMs'>): number | null {
+  if (!g.bpm || !g.decodedMs || g.decodedMs <= 0) return null;
+  let ms = 0;
+  for (const s of g.segments) {
+    const bpm = 60_000_000 / s.periodUs;
+    if (Math.abs(bpm / g.bpm - 1) <= STEADY_TEMPO_BAND) ms += ((s.beats - 1) * s.periodUs) / 1000;
+  }
+  return Math.min(1, ms / g.decodedMs);
+}
+
 export interface GridReportTrack extends AcousticsFields {
   id: string;
   artist: string | null;
@@ -113,6 +135,7 @@ export interface GridReportRow {
   segments: number;
   coverage: number | null;
   mainShare: number | null;
+  steadyShare: number | null;
   downbeatAgreement: number | null;
   beatsPerBar: number | null;
   // What step 4 would write under GRID_WRITE_GATE.
@@ -130,11 +153,14 @@ export function compareGrid(t: GridReportTrack, g: TrackGrid): GridReportRow | n
   const after = soundWords(trackAcoustics({ ...t, bpm: g.bpm })).measured;
   const firstBar = (t.bars ?? []).find((b) => Number.isFinite(b) && b >= 0);
   const offset = firstBar != null ? barOffsetBeats(g, firstBar) : null;
-  const confident = (g.coverage ?? 0) >= GRID_WRITE_GATE.minCoverage && (g.mainShare ?? 0) >= GRID_WRITE_GATE.minMainShare;
+  const steady = steadyShare(g);
+  const confident = (g.coverage ?? 0) >= GRID_WRITE_GATE.minCoverage && (steady ?? 0) >= GRID_WRITE_GATE.minSteadyShare &&
+    g.bpm <= GRID_WRITE_GATE.maxBpm;
   const barsConfident = confident && (g.downbeatAgreement ?? 0) >= GRID_WRITE_GATE.minDownbeatAgreement && !!g.beatsPerBar;
   const held: string[] = [];
   if ((g.coverage ?? 0) < GRID_WRITE_GATE.minCoverage) held.push(`coverage ${round(g.coverage)}`);
-  if ((g.mainShare ?? 0) < GRID_WRITE_GATE.minMainShare) held.push(`main tempo ${round(g.mainShare)} of the track`);
+  if ((steady ?? 0) < GRID_WRITE_GATE.minSteadyShare) held.push(`steady tempo on ${round(steady)} of the track`);
+  if (g.bpm > GRID_WRITE_GATE.maxBpm) held.push(`${g.bpm} BPM, above ${GRID_WRITE_GATE.maxBpm}: possibly double time`);
   if (confident && !barsConfident) held.push(`bars: downbeat agreement ${round(g.downbeatAgreement)}`);
   return {
     id: t.id,
@@ -154,6 +180,7 @@ export function compareGrid(t: GridReportTrack, g: TrackGrid): GridReportRow | n
     segments: g.segments.length,
     coverage: g.coverage,
     mainShare: g.mainShare,
+    steadyShare: round(steady),
     downbeatAgreement: g.downbeatAgreement,
     beatsPerBar: g.beatsPerBar,
     wouldWriteBpm: confident,
@@ -193,7 +220,7 @@ export function summariseGridReport(rows: readonly GridReportRow[]): GridReportS
 
 const CSV_COLUMNS: Array<keyof GridReportRow> = [
   'id', 'artist', 'title', 'genre', 'storedBpm', 'gridBpm', 'deltaBpm', 'relation', 'wordsBefore', 'wordsAfter',
-  'reEmbed', 'barOffsetBeats', 'barShift', 'storedBeatsOnGrid', 'segments', 'coverage', 'mainShare',
+  'reEmbed', 'barOffsetBeats', 'barShift', 'storedBeatsOnGrid', 'segments', 'coverage', 'mainShare', 'steadyShare',
   'downbeatAgreement', 'beatsPerBar', 'wouldWriteBpm', 'wouldWriteBars', 'heldBecause',
 ];
 
