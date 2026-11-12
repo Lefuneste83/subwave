@@ -276,7 +276,8 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
   if (facets.includes('grid')) {
     warnings.push(
       'grid: Beat This! over the whole track (one stream per track, ~1.5 s on a GPU, ~8 s on CPU); stored on its own ' +
-        '(track_grid) — today\'s bpm and bars are not changed' +
+        '(track_grid); a grid passing its gate (grid-policy.ts) replaces the bpm, and the bars when the downbeats agree ' +
+        '(the old values kept: npm run grid-apply -- --revert)' +
         (input.capabilities.grid !== true ? ' — the analyzer does not report the beat grid (heavy image built WITH_BEAT_GRID=1 needed), so nothing is planned' : ''),
     );
   }
