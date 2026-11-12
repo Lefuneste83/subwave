@@ -85,6 +85,22 @@ check("breakdown (no beats for 32): one segment across it", len(f["segments"]) =
 check("breakdown: the grid's last index counts the silent beats", f["segments"][0]["last_k"] == 399,
       f["segments"][0]["last_k"])
 
+# A breakdown where the tracker follows the OFFBEAT for 20 beats, then the beat
+# comes back on the first grid (measured on real club tracks): one grid, the
+# offbeat stretch dropped.
+main = grid(112.0, 0.03, 700, jitter_ms=5, seed=4)
+period = 60.0 / 112.0
+off = main[330:350] + period / 2
+b4 = np.sort(np.concatenate([main[:330], off, main[350:]]))
+f = aw.fit_grid(b4, downbeats_of(main, 4, 0))
+check("offbeat breakdown: one grid across it", len(f["segments"]) == 1, [round(s["anchor_s"], 2) for s in f["segments"]])
+check("offbeat breakdown: the grid spans the whole track", f["segments"][0]["last_k"] == 699, f["segments"][0]["last_k"])
+check("offbeat breakdown: only the offbeat stretch is off the grid", abs(f["coverage"] - 680 / 700) < 1e-9, f["coverage"])
+# The same tempo coming back OFF the old grid (a new take, an edit) stays apart.
+shifted = grid(112.0, main[340] + period * 0.4, 300, seed=5)
+f = aw.fit_grid(np.concatenate([main[:340], shifted]), None)
+check("same tempo, new phase: two segments", len(f["segments"]) == 2, len(f["segments"]))
+
 # A tempo change 120 → 128 BPM: two segments, each with its own tempo.
 a = grid(120.0, 0.0, 128)
 c = grid(128.0, a[-1] + 60.0 / 128.0, 160)

@@ -1688,6 +1688,47 @@ def _fit_line(ks, ts):
     return float(a), float(p)
 
 
+# Same tempo within this ratio: a later segment that also lands on an earlier
+# one's grid continues it (the beat came back after a breakdown).
+GRID_SAME_TEMPO = 0.002
+
+
+def _merge_resumed_grids(segs, tol_s):
+    """Join a segment to an earlier one when the beat came back on the same
+    grid: the same tempo (GRID_SAME_TEMPO) and its first beat on the earlier
+    grid extended (within tol_s). What lay between them is the tracker losing
+    the beat (a breakdown with no kick, where it follows the offbeat for a
+    while): dropped, its beats left off the grid. Measured on real club
+    tracks: the pass after a breakdown sat within 4-6 ms of the first part's
+    grid, the 13-25 beats inside the breakdown half a beat off. A real tempo
+    change, or a beat that comes back off the old grid, stays its own segment.
+    Each merge refits the line over both parts."""
+    out = []
+    for s in segs:
+        joined = False
+        for gi in range(len(out) - 1, -1, -1):
+            g = out[gi]
+            if abs(s["period_s"] / g["period_s"] - 1) > GRID_SAME_TEMPO:
+                continue
+            k = (s["anchor_s"] - g["anchor_s"]) / g["period_s"]
+            if abs(s["anchor_s"] - (g["anchor_s"] + round(k) * g["period_s"])) > tol_s:
+                continue
+            ts = g["ts"] + s["ts"]
+            ks = [int(round((t_ - g["anchor_s"]) / g["period_s"])) for t_ in ts]
+            a, pp = _fit_line(ks, ts)
+            if not pp or pp <= 0:
+                continue
+            merged = {"anchor_s": a, "period_s": pp, "first_k": 0, "last_k": max(ks),
+                      "hits": g["hits"] + s["hits"], "ts": ts}
+            # Everything after g inside the merged span was the lost beat.
+            out = out[:gi] + [merged]
+            joined = True
+            break
+        if not joined:
+            out.append(s)
+    return out
+
+
 def fit_grid(beats, downbeats, tol_s=GRID_TOLERANCE_S, break_after=GRID_BREAK_AFTER,
              min_segment_beats=GRID_MIN_SEGMENT_BEATS):
     """Fit beat times (s) to piecewise-constant grids. Pure: numpy only.
@@ -1749,11 +1790,13 @@ def fit_grid(beats, downbeats, tol_s=GRID_TOLERANCE_S, break_after=GRID_BREAK_AF
             a_fit, p_fit = _fit_line(ks, ts)
             if p_fit and p_fit > 0:
                 a, p = a_fit, p_fit
-            res = [abs(t_ - (a + k_ * p)) for k_, t_ in zip(ks, ts)]
-            residuals.extend(res)
             segs.append({"anchor_s": a, "period_s": p, "first_k": 0, "last_k": last_k,
-                         "hits": len(ks), "start_index": start})
+                         "hits": len(ks), "ts": ts})
         i = last_hit + 1 if last_hit > start else start + 1
+    segs = _merge_resumed_grids(segs, tol_s)
+    for s in segs:
+        residuals.extend(abs(t_ - (s["anchor_s"] + round((t_ - s["anchor_s"]) / s["period_s"]) * s["period_s"]))
+                         for t_ in s["ts"])
     if not segs or sum(s["hits"] for s in segs) / n < GRID_MIN_COVERAGE:
         return None
 
@@ -1791,7 +1834,7 @@ def fit_grid(beats, downbeats, tol_s=GRID_TOLERANCE_S, break_after=GRID_BREAK_AF
             s["downbeat_s"] = None
     hits = sum(s["hits"] for s in segs)
     return {
-        "segments": [{k: v for k, v in s.items() if k != "start_index"} for s in segs],
+        "segments": [{k: v for k, v in s.items() if k != "ts"} for s in segs],
         "beats_per_bar": bpb,
         "coverage": hits / n,
         "residual_s": float(np.median(residuals)) if residuals else None,
