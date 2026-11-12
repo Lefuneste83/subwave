@@ -187,13 +187,13 @@ function syncYearIfEraChanged(id: string, before: StoredEra | null): void {
   syncTrackFacets(id);
 }
 
-function markTextVectorDirty(id: string): void {
-  requireDb()
+function markTextVectorDirty(id: string): boolean {
+  return requireDb()
     .prepare(
       `UPDATE tracks SET text_vector_dirty = 1
         WHERE id = ? AND EXISTS (SELECT 1 FROM track_vectors WHERE id = tracks.id)`,
     )
-    .run(id);
+    .run(id).changes > 0;
 }
 
 function markTextVectorDirtyIfEraChanged(id: string, before: StoredEra | null): void {
@@ -1424,6 +1424,40 @@ export function applyGridToTrack(id: string, opts: { force?: boolean } = {}): Gr
     markTextVectorDirtyIfSoundChanged(id, ['measured']);
     return 'applied';
   })();
+}
+
+// `npm run grid-apply -- --reembed-moved`: the operator's Re-embed, scoped to
+// the tracks a grid moved the Sound: tempo word of. Only where the vector's own
+// words are unknown (built before text_vector_sound was stored: the
+// measurement rule above never marks those); a known one is already judged by
+// markTextVectorDirtyIfSoundChanged. "Moved" compares the measured words with
+// the head's BPM against the grid's, everything else as the row is now.
+// `dryRun` only answers whether it would mark.
+export function markGridMovedVectorIfUnknown(id: string, dryRun = false): boolean {
+  const g = getGrid(id);
+  if (!g || g.applied !== 1) return false;
+  const row = requireDb()
+    .prepare(
+      `SELECT bpm, musical_key, audio_moods, vocal_ranges_json,
+              ${SQL_TAIL_VOCAL_RANGES} AS tail_vocal_ranges_json, text_vector_sound, text_vector_dirty,
+              EXISTS (SELECT 1 FROM track_vectors v WHERE v.id = tracks.id) AS has_vector
+         FROM tracks WHERE id = ?`,
+    )
+    .get(id) as (Pick<TrackRow, 'bpm' | 'musical_key' | 'audio_moods' | 'vocal_ranges_json' | 'text_vector_sound'> & {
+      tail_vocal_ranges_json: string | null; text_vector_dirty: number | null; has_vector: number;
+    }) | undefined;
+  if (!row || !row.has_vector || row.text_vector_dirty === 1) return false;
+  if (parseVectorSound(row.text_vector_sound ?? null) != null) return false;
+  const base = {
+    musicalKey: row.musical_key,
+    audioMoods: row.audio_moods ? safeParseArray(row.audio_moods) : [],
+    ...parseVocalRangesJson(row.vocal_ranges_json),
+    ...parseTailVocalRangesJson(row.tail_vocal_ranges_json),
+  };
+  const before = soundWords({ ...base, bpm: g.headBpm }).measured;
+  const after = soundWords({ ...base, bpm: row.bpm }).measured;
+  if (sameWords(before, after)) return false;
+  return dryRun ? true : markTextVectorDirty(id);
 }
 
 // `npm run grid-apply -- --revert`: the head's own values back, and the row

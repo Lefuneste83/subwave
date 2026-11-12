@@ -121,6 +121,57 @@ sparse = grid(124.0, 0.5, 600)[::2]
 f = aw.fit_grid(sparse, None)
 check("every-other-beat detections: their own spacing", abs(60 / f["segments"][0]["period_s"] - 62.0) < 0.1, 60 / f["segments"][0]["period_s"])
 
+# The GPU memory rules (BeatGridder): the cache goes back after every track,
+# and an out-of-memory answer reruns that track on the CPU with the same
+# checkpoint. A stub torch stands in when the real one is absent.
+import types  # noqa: E402
+
+_real_torch = sys.modules.get("torch")
+_stub = types.ModuleType("torch")
+_freed = []
+
+
+class _OOM(RuntimeError):
+    pass
+
+
+_stub.cuda = types.SimpleNamespace(OutOfMemoryError=_OOM, empty_cache=lambda: _freed.append(1))
+sys.modules["torch"] = _stub
+try:
+    g = aw.BeatGridder()
+    g.device, g.model = "cuda", "final0"
+    g.a2b = lambda y, sr: ([0.5, 1.0], [0.5])
+    out = g(np.zeros(100), 10)
+    check("gpu: the cache is freed after a track", len(_freed) == 1, _freed)
+    check("gpu: answers as before", list(out[0]) == [0.5, 1.0] and list(out[1]) == [0.5], out)
+
+    def _boom(y, sr):
+        raise _OOM("CUDA out of memory")
+
+    cpu_calls = []
+    g.a2b = _boom
+    g._cpu = lambda y, sr: (cpu_calls.append(1) or ([0.25, 0.75], [0.25]))
+    _freed.clear()
+    out = g(np.zeros(100), 10)
+    check("gpu out of memory: that track reruns on the cpu", cpu_calls == [1] and list(out[0]) == [0.25, 0.75], (cpu_calls, out))
+    check("gpu out of memory: the cache is freed before the rerun and after", len(_freed) == 2, _freed)
+    check("the cpu rerun keeps the model name (one model per library)", g.model == "final0", g.model)
+
+    def _other(y, sr):
+        raise ValueError("bad audio")
+
+    g.a2b = _other
+    try:
+        g(np.zeros(100), 10)
+        check("another error is not swallowed", False)
+    except ValueError:
+        check("another error is not swallowed", True)
+finally:
+    if _real_torch is not None:
+        sys.modules["torch"] = _real_torch
+    else:
+        del sys.modules["torch"]
+
 # A tempo change 120 → 128 BPM: two segments, each with its own tempo.
 a = grid(120.0, 0.0, 128)
 c = grid(128.0, a[-1] + 60.0 / 128.0, 160)

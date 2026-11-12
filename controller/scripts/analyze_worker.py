@@ -1626,24 +1626,56 @@ def grid_checkpoint(name):
 
 
 class BeatGridder:
-    """Beat This! on a mono signal: (beats, downbeats) in seconds."""
+    """Beat This! on a mono signal: (beats, downbeats) in seconds.
+
+    On a GPU the whole track goes through the model at once, so its memory
+    grows with the track: a 60-minute mix asked for 4 GB on an 8 GB card that
+    three other workers share. Two rules keep a long file from failing the
+    others' tracks or its own:
+      - the cached memory goes back after every track (empty_cache), or one
+        long track's leftovers starve the other workers until their idle
+        release;
+      - a CUDA out-of-memory answer reruns THAT track on the CPU with the same
+        checkpoint (slow, about a minute for a long mix, and rare), so every
+        grid in a library comes from one model."""
 
     def __init__(self):
         self.model = None
+        self.device = None
         self.a2b = None
+        self._cpu = None
 
     def load(self):
         from beat_this.inference import Audio2Beats
 
-        device = resolve_device()
-        self.model = grid_model_name(device)
-        self.a2b = Audio2Beats(checkpoint_path=grid_checkpoint(self.model), device=device, float16=False, dbn=False)
-        log(f"Beat This! loaded ({self.model}, {device})")
+        self.device = resolve_device()
+        self.model = grid_model_name(self.device)
+        self.a2b = Audio2Beats(checkpoint_path=grid_checkpoint(self.model), device=self.device, float16=False, dbn=False)
+        log(f"Beat This! loaded ({self.model}, {self.device})")
+
+    def _cpu_a2b(self):
+        if self._cpu is None:
+            from beat_this.inference import Audio2Beats
+
+            self._cpu = Audio2Beats(checkpoint_path=grid_checkpoint(self.model), device="cpu", float16=False, dbn=False)
+        return self._cpu
 
     def __call__(self, y, sr):
         import numpy as np
 
-        beats, downbeats = self.a2b(y, sr)
+        if self.device != "cuda":
+            beats, downbeats = self.a2b(y, sr)
+        else:
+            import torch
+
+            try:
+                beats, downbeats = self.a2b(y, sr)
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                log(f"Beat This!: out of GPU memory on a {len(y) / sr / 60:.0f} min track; this one runs on the CPU")
+                beats, downbeats = self._cpu_a2b()(y, sr)
+            finally:
+                torch.cuda.empty_cache()
         return np.asarray(beats, dtype=float), np.asarray(downbeats, dtype=float)
 
 

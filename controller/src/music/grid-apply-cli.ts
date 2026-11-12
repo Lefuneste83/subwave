@@ -8,7 +8,11 @@
 // a grid was written over, and those rows marked reverted, so no later
 // analysis re-applies them until `npm run grid-apply` is run again.
 //
-// `--dry-run` counts what either would do and writes nothing. Tracks whose
+// `npm run grid-apply -- --reembed-moved`: marks for re-embedding the tracks a
+// grid moved the tempo word of whose vectors don't record their words (built
+// before the station stored them); the next tagging run rebuilds them.
+//
+// `--dry-run` counts what any of these would do and writes nothing. Tracks whose
 // tempo word moved are marked for re-embedding; the next tagging run (the
 // scheduled one, or Library → Tag) rebuilds their vectors.
 
@@ -19,12 +23,17 @@ import { gridDecision } from './grid-policy.js';
 async function main() {
   const args = process.argv.slice(2);
   const revert = args.includes('--revert');
+  const reembedMoved = args.includes('--reembed-moved');
   const dryRun = args.includes('--dry-run');
   await db.open({ embeddingDim: embeddings.resolveEmbeddingDim(), adoptStoredDim: true });
   const dirtyBefore = db.textVectorDirtyIds().length;
   const counts: Record<string, number> = {};
   const bump = (k: string) => { counts[k] = (counts[k] ?? 0) + 1; };
-  if (revert) {
+  if (reembedMoved) {
+    for (const id of db.gridIdsApplied(1)) {
+      if (db.markGridMovedVectorIfUnknown(id, dryRun)) bump(dryRun ? 'would mark' : 'marked');
+    }
+  } else if (revert) {
     const ids = db.gridIdsApplied(1);
     for (const id of ids) {
       if (dryRun) bump('would restore');
@@ -42,7 +51,7 @@ async function main() {
     }
   }
   const marked = db.textVectorDirtyIds().length - dirtyBefore;
-  console.log(`[grid-apply] ${revert ? 'revert' : 'apply'}${dryRun ? ' (dry run, nothing written)' : ''}:`,
+  console.log(`[grid-apply] ${reembedMoved ? 'reembed-moved' : revert ? 'revert' : 'apply'}${dryRun ? ' (dry run, nothing written)' : ''}:`,
     Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(', ') || 'nothing to do');
   if (!dryRun) {
     console.log(`[grid-apply] text vectors newly marked for re-embedding: ${marked} (the next tagging run rebuilds them)`);

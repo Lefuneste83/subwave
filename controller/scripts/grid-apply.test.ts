@@ -169,6 +169,35 @@ test('an ID rotation carries the kept head with the grid', () => {
   assert.equal(db.getGrid('a9'), null);
 });
 
+test('--reembed-moved marks only an unknown-words vector whose tempo word the grid moved', () => {
+  const plain = (id: string, bpm: number) => {
+    db.upsertTrackMeta(id, { title: id, artist: 'A', album: 'B', duration: 340 } as never);
+    db.upsertTrackAnalysis(id, { bpm, musicalKey: '8A', loudnessLufs: -9, beats: HEAD_BEATS, bars: HEAD_BARS, source: 'full' } as never);
+    const v = new Float32Array(DIM); v[0] = 1;
+    db.upsertTrackVector(id, v, null); // built before the words were stored: unknown
+    clearDirty(id);
+  };
+  plain('r1', 62);
+  db.writeGridResult('r1', { grid: answer() });
+  assert.equal(row('r1').text_vector_dirty, 0, 'the measurement rule never marks an unknown vector');
+  assert.equal(db.markGridMovedVectorIfUnknown('r1', true), true, 'dry run says it would');
+  assert.equal(row('r1').text_vector_dirty, 0, 'and writes nothing');
+  assert.equal(db.markGridMovedVectorIfUnknown('r1'), true);
+  assert.equal(row('r1').text_vector_dirty, 1);
+  plain('r2', 123.05);
+  db.writeGridResult('r2', { grid: answer() });
+  assert.equal(db.markGridMovedVectorIfUnknown('r2'), false, 'upbeat both before and after');
+  // A known vector is the measurement rule's (a1-like, seeded with its words).
+  seed('r3');
+  db.writeGridResult('r3', { grid: answer() });
+  clearDirty('r3');
+  assert.equal(db.markGridMovedVectorIfUnknown('r3'), false);
+  // Not applied (held): nothing.
+  plain('r4', 62);
+  db.writeGridResult('r4', { grid: answer({ coverage: 0.5 }) });
+  assert.equal(db.markGridMovedVectorIfUnknown('r4'), false);
+});
+
 test('window and bar arithmetic', () => {
   assert.equal(P.headWindowEndMs([100, 200], [150, 900]), 900);
   assert.equal(P.headWindowEndMs(null, null), P.DEFAULT_HEAD_WINDOW_MS);
