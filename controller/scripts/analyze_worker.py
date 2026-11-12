@@ -4978,10 +4978,14 @@ def analyze_facet_request(librosa, req):
     # The whole-file facets stream the music server's URL (or read a local
     # copy known to be complete); `stream_url` rides along with a path request.
     whole_input = whole_file_input(req.get("path"), req.get("complete"), req.get("stream_url") or req.get("url"))
-    if all(f in WHOLE_FILE_FACETS for f in facets):
+    if all(f in WHOLE_FILE_FACETS or f == "grid" for f in facets):
         # Nothing here needs the capped download the window facets decode:
-        # fetching it would read up to ANALYZE_MAX_BYTES for no use.
+        # fetching it would read up to ANALYZE_MAX_BYTES for no use. The grid
+        # streams the whole file too (its own mono decode, for the model); it
+        # never reaches the one-shot --whole-file lane, which holds no model.
         result = whole_file_facets(whole_input, facets)
+        if "grid" in facets:
+            result["grid"] = facet_grid(whole_input)
         edges = result.get("edges") or {}
         dur_ms = (edges.get("data") or {}).get("decoded_duration_ms")
         return {

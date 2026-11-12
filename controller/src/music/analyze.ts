@@ -26,6 +26,10 @@ import {
 import { probeListenerCount } from '../broadcast/listeners.js';
 import { sweepKeepLastFromDisk } from '../broadcast/pick-stems.js';
 import { planAcoustics, type AcousticsPlan, type WorkRequest } from './acoustics-plan.js';
+
+// The beat grid failed and nothing else was asked of the track: a failure for
+// the pass's systemic guard like any other, stamped on the grid row alone.
+class GridFailure extends Error {}
 import { leadIds, planRegularRun, regularRunFacets } from './regular-run-plan.js';
 
 // Status events for the panel, mirrored to the `[analyze] …` console line.
@@ -667,11 +671,12 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
   let consecutiveFailures = 0;
   // Failure stamps held back until the pass proves it may hand them out: a
   // success flushes the buffer, the systemic guard tripping discards it.
-  let pendingFailureStamps: Array<{ id: string; reason: string }> = [];
+  let pendingFailureStamps: Array<{ id: string; reason: string; grid?: boolean }> = [];
   const flushFailureStamps = () => {
     for (const f of pendingFailureStamps) {
       try {
-        db.recordAnalysisFailure(f.id, f.reason);
+        if (f.grid) db.writeGridResult(f.id, { failed: f.reason });
+        else db.recordAnalysisFailure(f.id, f.reason);
       } catch (stampErr: any) {
         // Never let bookkeeping end the pass.
         console.error(`[analyze] ${f.id} failure stamp failed: ${stampErr?.message || stampErr}`);
@@ -709,8 +714,14 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
     const f = useFacets ? plannedFacets.get(songId) : undefined;
     return !!f && f.length > 0 && f.every((x) => db.WHOLE_FILE_FACETS.includes(x));
   };
+  // The beat grid streams the whole file too, but holds a model: never the
+  // whole-file lane, and never a staged copy either.
+  const streamsWholeOnly = (songId: string) => {
+    const f = useFacets ? plannedFacets.get(songId) : undefined;
+    return !!f && f.length > 0 && f.every((x) => db.WHOLE_FILE_FACETS.includes(x) || x === 'grid');
+  };
   const prefetch = (songId: string): Prefetch =>
-    isRanged(songId) || wholeFileOnly(songId)
+    isRanged(songId) || streamsWholeOnly(songId)
       ? Promise.resolve({ skip: true as const })
       : analyzer.downloadCapped(songId).then((r) => r, (err) => ({ err }));
 
@@ -796,9 +807,19 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
     // 'unmeasurable' (see below): not "answered".
     const missed = new Set<db.Facet>();
     let wroteClap = false;
+    // The grid's answer is written on its own (writeGridResult): its failure
+    // is never the track's analysis failure (library-db/grid.ts).
+    let gridResult: db.GridResult | null = null;
     for (const f of requestedFacets) {
       const a = res?.facets[f];
       if (!a) continue;
+      if (f === 'grid') {
+        if (a.status === 'unavailable') continue;
+        if (a.status === 'failed') gridResult = { failed: a.reason ?? 'failed' };
+        else if (a.status === 'unmeasurable') gridResult = { unmeasurable: a.reason ?? 'not-measured', version: db.GRID_FACET_VERSION };
+        else gridResult = a.grid ? { grid: a.grid } : { failed: 'malformed grid answer' };
+        continue;
+      }
       if (a.status === 'failed') { failures.push(db.facetFailure(f, a.reason)); continue; }
       if (a.status === 'unavailable') continue;
       // A placed window the backend could not read, over a tail already
@@ -870,15 +891,29 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
       }
     }
     const answered = facets.filter((f) => {
+      if (f === 'grid') return false;
       if (f === 'vocal' && lyricVocal) return true;
       if (missed.has(f)) return false;
       const a = res?.facets[f];
       return a && a.status !== 'failed' && a.status !== 'unavailable';
     });
+    const gridAnswered = gridResult != null && !('failed' in gridResult);
     // Nothing usable came back: fail the track like a flat analysis would, so
-    // the pass's systemic-failure guard sees it.
-    if (failures.length > 0 && answered.length === 0) throw new Error(failures.join('; '));
-    if (answered.length === 0) return { kind: 'skipped' };
+    // the pass's systemic-failure guard sees it. A grid that failed alone is
+    // a GridFailure: it counts for that guard, and is stamped on the grid row
+    // only (flushFailureStamps), never on the track's analysis failures.
+    if (failures.length > 0 && answered.length === 0) {
+      // A grid that did answer is kept; the other facets' failure still goes
+      // through the guard as the track's own.
+      if (gridAnswered) db.writeGridResult(id, gridResult!, source);
+      throw new Error([...failures, ...(gridResult && 'failed' in gridResult ? [db.facetFailure('grid', gridResult.failed)] : [])].join('; '));
+    }
+    if (answered.length === 0 && !gridAnswered) {
+      if (gridResult && 'failed' in gridResult) throw new GridFailure(gridResult.failed);
+      return { kind: 'skipped' };
+    }
+    if (gridResult) db.writeGridResult(id, gridResult, source);
+    if (answered.length === 0) return { kind: 'analyzed', audioEmbedded: false, vocalAnalyzed: false };
     if (failures.length > 0) w.failed = failures.join('; ');
     if (wroteClap && !audioMetaStamped) {
       db.setAudioEmbeddingMeta(audioModelLabel, db.AUDIO_EMBEDDING_DIM);
@@ -1040,7 +1075,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
       const reason = String(err?.message || err);
       console.error(`[analyze] ${id} failed: ${reason}`);
       if (failureCountsAgainstTrack(consecutiveFailures)) {
-        pendingFailureStamps.push({ id, reason });
+        pendingFailureStamps.push({ id, reason, ...(err instanceof GridFailure ? { grid: true } : {}) });
       } else if (consecutiveFailures === SYSTEMIC_FAILURE_RUN + 1) {
         logEvent(
           'warning',

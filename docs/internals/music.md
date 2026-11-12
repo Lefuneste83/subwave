@@ -812,6 +812,25 @@ Demucs on the placed window, the seek side, a real ffmpeg window landing on the
 sample) and `scripts/tail-placement.test.ts` (versions, the tolerance, live
 promotion, no overwrite, the request and the stamp end to end).
 
+**The whole-track beat grid (`grid` facet, opt-in, heavy analyzer only).**
+`npm run analyze -- --facets grid` runs Beat This! (CPJKU, MIT code and
+weights, baked by `WITH_BEAT_GRID=1`) over the whole track and stores a
+FITTED grid: per segment an anchor and a beat period, a new segment only where
+the tempo really moves, downbeats as a phase on it (`analyze_worker.fit_grid`,
+about 300 bytes a track). A kickless breakdown where the tracker follows the
+offbeat is joined back onto the grid it left. Measured against Traktor grids on
+150 library tracks: tempo right 99 % (librosa's 40 s window 65 %), whole-track
+beats on the grid F 0.99 (librosa whole-track 0.60), downbeats on the bar line
+82 %. It lives in its own table (`library-db/grid.ts`, `track_grid`) with its
+own status, reason and attempts: the facet is planned only by `--facets grid`
+and only on `analyze_grid_capable === true` (unknown is not planned, since an
+older analyzer would read a grid-only item as a full analysis), never by a
+regular run; its failures never touch `analyze_fail_count` (which gates the
+regular retries) and a regular failure never fans out onto it; an unmeasurable
+grid (no steady pulse) is no "Needs you" item. Nothing reads it yet: today's
+`bpm`, `beats_json` and `bars_json` stay the head analysis's until the operator
+approves the dry-run report and turns the adapter on (the next steps).
+
 **Tail v3 adds the tail's short-term loudness curve, and a fade can be cut at
 its AUDIBLE end** (`transitions.fadeAudibleEnd`, off by default, and
 `transitions.fadeAudibleEndDb`, 15–35, default 20). The silence trim's absolute

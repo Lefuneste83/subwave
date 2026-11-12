@@ -59,6 +59,10 @@ export interface PlanCapabilities {
   // without one (`no-curve`) is re-planned only on `=== true`: an analyzer that
   // predates the curve would answer without it again, every run.
   loudnessCurve?: boolean | null;
+  // The whole-track beat grid (Beat This!, heavy analyzer). Planned only on
+  // `=== true`: unknown is NOT planned, unlike CLAP/Demucs, because an analyzer
+  // that predates the facet would read a grid-only item as a full analysis.
+  grid?: boolean | null;
 }
 
 export interface PlanInput {
@@ -100,7 +104,8 @@ export interface WorkItem {
 // (placeTail): re-reading it could not place it.
 // 'stem-scan' / 'stem-budget': a regular run's stems-only item left outside the
 // stem priority scan, or past the stem budget's free slots (regular-run-plan.ts).
-export type SkipReason = 'no-clap' | 'no-demucs' | 'no-tail-vocal' | 'no-whole-file' | 'no-curve' | 'no-edges' | 'year-known' | 'year-off' | 'limit' | 'stem-scan' | 'stem-budget';
+// 'no-grid': the analyzer does not positively report the beat grid.
+export type SkipReason = 'no-clap' | 'no-demucs' | 'no-tail-vocal' | 'no-whole-file' | 'no-curve' | 'no-edges' | 'no-grid' | 'year-known' | 'year-off' | 'limit' | 'stem-scan' | 'stem-budget';
 
 export interface FacetPlanCount {
   facet: Facet;
@@ -205,6 +210,7 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
     // An analyzer without them would answer `loudness` with a window figure
     // (still due) and `edges` not at all: a guaranteed no-op.
     if (WHOLE_FILE_FACETS.includes(f) && input.capabilities.wholeFile === false) return 'no-whole-file';
+    if (f === 'grid' && input.capabilities.grid !== true) return 'no-grid';
     if (f === 'year' && input.capabilities.yearLookups === false) return 'year-off';
     if (f === 'year' && cell?.status === 'ok') return 'year-known';
     if (f === 'tail' && input.placeTail && cell && input.state.get(id)?.get('edges')?.status !== 'ok') return 'no-edges';
@@ -265,6 +271,13 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
     warnings.push(
       `${whole.join(', ')}: read${whole.length === 1 ? 's' : ''} the whole file (one decode per track, streamed from the music server)` +
         (input.capabilities.wholeFile == null ? ' — whole-file capability unknown (analyzer not probed or predates it)' : ''),
+    );
+  }
+  if (facets.includes('grid')) {
+    warnings.push(
+      'grid: Beat This! over the whole track (one stream per track, ~1.5 s on a GPU, ~8 s on CPU); stored on its own ' +
+        '(track_grid) — today\'s bpm and bars are not changed' +
+        (input.capabilities.grid !== true ? ' — the analyzer does not report the beat grid (heavy image built WITH_BEAT_GRID=1 needed), so nothing is planned' : ''),
     );
   }
   const yearItems = items.filter((i) => i.facets.includes('year')).length;

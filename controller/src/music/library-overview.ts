@@ -200,10 +200,14 @@ function readEraToReview(): number {
 // planner takes it again, so it is not a file to open, and is counted apart.
 const currentVersionSql = (p = '') =>
   `CASE ${p}facet ${Object.entries(db.FACET_VERSIONS).map(([f, v]) => `WHEN '${f}' THEN ${Number(v)}`).join(' ')} END`;
+// Neither the year (no file problem) nor an opt-in facet (the beat grid: a
+// track with no steady pulse has none, and that is no fault of the file).
+const notAFileProblem = (p = '') =>
+  `${p}facet NOT IN (${['year', ...db.OPT_IN_FACETS].map((f) => `'${f}'`).join(', ')})`;
 const unreadableSql = (p = '') =>
-  `${p}status = 'unmeasurable' AND ${p}facet <> 'year' AND ${p}version >= ${currentVersionSql(p)}`;
+  `${p}status = 'unmeasurable' AND ${notAFileProblem(p)} AND ${p}version >= ${currentVersionSql(p)}`;
 const remeasureSql = (p = '') =>
-  `${p}status = 'unmeasurable' AND ${p}facet <> 'year' AND ${p}version < ${currentVersionSql(p)}`;
+  `${p}status = 'unmeasurable' AND ${notAFileProblem(p)} AND ${p}version < ${currentVersionSql(p)}`;
 const yearFailedSql = (p = '') => `${p}status = 'failed' AND ${p}facet = 'year'`;
 
 /**

@@ -7,6 +7,7 @@ import {
   PLACED_TAIL_STAMP, SQL_PLACED_TAIL_STAMP, isPlacedTailStamp, isWholeFileLoudnessVersion, placedTailMovedBy,
   restampFacetRows, syncTrackFacets, tailEndsAtMusic, type Facet, type FacetSource,
 } from './facets.js';
+import { deleteGridRow, recordGridFailure, recordGridUnmeasurable, writeGrid, type GridAnswer } from './grid.js';
 import type { FileInfo, TagWrite, TrackEnrichment, TrackKeyRange, TrackMeta, TrackOutro, TrackPaceSpan, TrackRecord, TrackRow, TrackSection } from './types.js';
 import { normaliseExplicitStatus, normaliseYear, rowToTrack, safeParseArray } from './rows.js';
 import { SQL_KEPT_YEAR_SOURCES, type OriginalYearOutcome, type YearSource } from '../original-year-policy.js';
@@ -331,7 +332,7 @@ export function earliestMeasuredAt(): string | null {
 }
 
 // Everything the analyzer measured from a track's audio, for one track: the
-// head analysis, the whole-file loudness (its curve too) and edges, the tail (placed or not),
+// head analysis, the whole-file loudness (its curve too) and edges, the beat grid, the tail (placed or not),
 // vocal ranges, the stems stamp, CLAP and the audio moods and descriptors derived
 // from it, the map position derived from CLAP, and the failure history that
 // described the old file. Unlike clearAnalysis() nothing is kept: the whole-file
@@ -366,6 +367,8 @@ export function clearTrackAudio(id: string, fileSize?: number | null): void {
     // old file; the year row is not an audio measurement (a failed lookup's
     // attempt count lives only there).
     d.prepare(`DELETE FROM track_facet_status WHERE track_id = ? AND facet <> 'year'`).run(id);
+    // The beat grid was measured on the old file too.
+    deleteGridRow(d, id);
     syncTrackFacets(id);
   })();
 }
@@ -1332,6 +1335,25 @@ export function writeFacetResults(id: string, w: FacetWrite): void {
     if (w.head || w.vocal || (w.tail && !('unmeasurable' in w.tail))) {
       markTextVectorDirtyIfSoundChanged(id, ['measured']);
     }
+  })();
+}
+
+// The `grid` facet's answer (library-db/grid.ts). Its own writer on purpose:
+// writeFacetResults clears the track's analysis failure history on a success,
+// and a grid answer says nothing about the regular analysis. Re-derives the
+// facet rows in the same transaction, so the grid row mirrors its table.
+export type GridResult =
+  | { grid: GridAnswer }
+  | { unmeasurable: string; version: number }
+  | { failed: string };
+
+export function writeGridResult(id: string, r: GridResult, source: FacetSource = 'url'): void {
+  const d = requireDb();
+  d.transaction(() => {
+    if ('grid' in r) writeGrid(id, r.grid);
+    else if ('unmeasurable' in r) recordGridUnmeasurable(id, r.version, r.unmeasurable);
+    else recordGridFailure(id, r.failed);
+    syncTrackFacets(id, { source });
   })();
 }
 
