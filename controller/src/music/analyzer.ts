@@ -16,6 +16,7 @@ import { envInt } from '../util/env.js';
 import { parseLoudnessCurve, type LoudnessCurve } from './loudness-curve.js';
 import { parseWholeLoudnessCurve, type WholeLoudnessCurve } from './whole-loudness-curve.js';
 import type { GridAnswer, GridSegment } from './library-db/grid.js';
+import { getDb, trackFileSize } from './library-db.js';
 
 // A structural span over the track, in ms. Contiguous over the analysed
 // window; the first is the intro/leading section.
@@ -71,6 +72,12 @@ export interface AnalysisResult {
   // true when head stems were written to the requested stems_dir. null = none
   // requested / backend predates the feature.
   stemsCached: boolean | null;
+  // Whether the tail stems (and their meta) landed (`tail_stems_landed`), said
+  // only when the tail was proven and asked for: false = a tail that could
+  // have landed did not (stem-stamp-policy.ts retries it). null/absent = no
+  // tail to cut, or an analyzer from before #2238. Not the facet's older
+  // `tail_stems`, which an older analyzer also sends false for an unproven tail.
+  tailStemsLanded?: boolean | null;
   // Dead-air gaps at the file's edges (ms), measured against an ABSOLUTE dBFS
   // floor — never the relative gates behind introMs / outro.startMs, which ask
   // where the MUSIC starts and would read a quiet intro as silence. The tail is
@@ -305,6 +312,7 @@ interface WorkerMessage {
   tail_silence_ms?: unknown;
   tail_start_ms?: unknown;
   stems_cached?: boolean;
+  tail_stems_landed?: boolean;
   text_embeddings?: unknown;
   // render_transition op fields
   path?: string;
@@ -449,6 +457,10 @@ export interface AnalyzeRequestOpts {
   // machine refuse to write into its own unmounted share; an older backend
   // ignores the field.
   stems_require_marker?: boolean;
+  // The library's size for the file (tracks.file_size), set with stems_dir by
+  // withStemSource, never by a caller: the stamp the worker writes beside the
+  // stems (#2238). An older backend ignores it.
+  source_size?: number;
   // Baseline analysis is already current; compute only the CLAP vector.
   embedding_only?: boolean;
   // Where the music stops (from the stored edges): the tail window ends there.
@@ -488,6 +500,7 @@ function toAnalysisResult(msg: WorkerMessage): AnalysisResult {
           tailSilenceMs: parseSilenceMs(msg.tail_silence_ms),
           tailStartMs: parseSilenceMs(msg.tail_start_ms),
           stemsCached: typeof msg.stems_cached === 'boolean' ? msg.stems_cached : null,
+          tailStemsLanded: typeof msg.tail_stems_landed === 'boolean' ? msg.tail_stems_landed : null,
           loudnessVersion: parseFinite(msg.loudness_version),
           samplePeakDb: parseFinite(msg.sample_peak_db),
           loudnessRangeLu: parseFinite(msg.lra_lu),
@@ -714,6 +727,7 @@ async function sidecarRequest(body: ({ url: string } | { path: string }) & Analy
     tailSilenceMs: parseSilenceMs(resBody.tail_silence_ms),
     tailStartMs: parseSilenceMs(resBody.tail_start_ms),
     stemsCached: typeof resBody.stems_cached === 'boolean' ? resBody.stems_cached : null,
+    tailStemsLanded: typeof resBody.tail_stems_landed === 'boolean' ? resBody.tail_stems_landed : null,
     tailPlaced: resBody.tail_window === 'edges',
   };
 }
@@ -1071,11 +1085,27 @@ function localRenderTransition(payload: RenderTransitionPayload, timeoutMs: numb
 
 // Analyse one track by id over the URL path (the backend fetches the audio).
 // Throws on failure — the caller leaves the row NULL and retries next run.
+// Stem provenance (#2238): a request that writes stems carries the library's
+// size for the file, which the worker stamps on each window it writes
+// (head-meta.json/tail-meta.json) and stem-cache.hasWindow checks against the
+// row. The raw stream's bytes are the file, so this is the size even when the
+// worker only holds a capped prefix (most lossless files) or cuts a placed
+// tail from the stream, where it could not measure one itself. Unknown (no
+// row size, no library open) sends nothing, and the worker falls back to what
+// it can prove.
+// One place, keyed on the song id, so no request path can leave it out.
+function withStemSource<T extends { stems_dir?: string }>(songId: string, opts: T): T & { source_size?: number } {
+  if (!opts.stems_dir) return opts;
+  const size = getDb() ? trackFileSize(songId) : null;
+  return size != null ? { ...opts, source_size: size } : opts;
+}
+
 export async function analyze(songId: string, opts: AnalyzeRequestOpts = {}): Promise<AnalysisResult> {
   const backend = await resolveBackend();
   if (!backend) throw new Error('no analysis backend available');
   const url = subsonic.getRawStreamUrl(songId);
-  return backend === 'sidecar' ? analyzeViaSidecar(url, opts) : analyzeViaLocal(url, opts);
+  const req = withStemSource(songId, opts);
+  return backend === 'sidecar' ? analyzeViaSidecar(url, req) : analyzeViaLocal(url, req);
 }
 
 // Navidrome answers a request for a file missing on disk with an HTTP 200
@@ -1194,7 +1224,7 @@ export async function analyzePathWithUrlFallback(
   onUrlFallback?: () => void,
 ): Promise<AnalysisResult> {
   try {
-    return await analyzePath(localPath, opts);
+    return await analyzePath(localPath, withStemSource(songId, opts));
   } catch (err) {
     if (!(err instanceof AnalyzerPathUnavailableError)) throw err;
     if (!pathFallbackWarned) {
@@ -1210,6 +1240,7 @@ export async function analyzePathWithUrlFallback(
     delete urlOpts.complete;
     delete urlOpts.stems_dir;
     delete urlOpts.stems_require_marker;
+    delete urlOpts.source_size;
     onUrlFallback?.();
     return analyze(songId, urlOpts);
   }
@@ -1459,11 +1490,11 @@ export async function analyzeFacets(
   // A stems target always travels with stems_require_marker, as on the flat
   // path, so an unmounted share on the analyzer's machine is never written to.
   const stems = opts.stems_dir
-    ? {
+    ? withStemSource(songId, {
         stems_dir: opts.stems_dir,
         stems_require_marker: true,
         ...(opts.stems_windows?.length ? { stems_windows: opts.stems_windows } : {}),
-      }
+      })
     : {};
   const url = subsonic.getRawStreamUrl(songId);
   const timeoutMs = opts.timeoutMs; // undefined: facetRequest's default

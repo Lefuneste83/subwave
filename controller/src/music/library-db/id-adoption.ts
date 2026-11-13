@@ -24,7 +24,7 @@ const NEVER_WRITTEN = ['id', 'genre'];
 // adoption carries tags onto it), so the next search re-keys it from the merged
 // sources. Carrying them could leave old keys marked fresh.
 const WALK_OWNED = [
-  'title', 'artist', 'album', 'album_id', 'artist_id', 'year',
+  'title', 'artist', 'album', 'album_id', 'artist_id', 'album_artist_id', 'year',
   'genres', 'duration_sec', 'is_compilation', 'era_untrusted',
   'explicit_status',
   ...SEARCH_KEY_DDL.columns,
@@ -66,6 +66,9 @@ const GROUPS: Array<{ anchor: string; cols: string[] }> = [
   // Which window the outro was measured on: it follows the outro it describes
   // (outro_json itself is carried new ?? old, so this takes the same side).
   { anchor: 'outro_json', cols: ['tail_version'] },
+  // The stem-stamp policy's miss count (#2238) describes the stems_at
+  // decision, so it takes the same side (stems_at is carried new ?? old).
+  { anchor: 'stems_at', cols: ['stems_tail_misses'] },
   { anchor: 'audio_moods', cols: ['audio_moods', 'audio_mood_scores_json'] },
   { anchor: 'audio_descriptors', cols: ['audio_descriptors', 'audio_descriptor_scores_json'] },
   { anchor: 'map_x', cols: ['map_x', 'map_y'] },
