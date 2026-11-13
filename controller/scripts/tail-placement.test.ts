@@ -793,7 +793,9 @@ test('a vocal-only plan also places a due tail, so one separation settles both (
   assert.deepEqual(requests[0].facets, ['tail', 'vocal']);
   assert.equal(requests[0].tail_vocals, undefined, 'the vocal facet separates the tail; no second tail pass');
   assert.deepEqual(requests[0].tail_window, { end_ms: 194_000, duration_ms: 214_000 });
-  assert.equal(tailVersionCol('due-voc'), 2, 'the tail is placed');
+  // The fork's placed tail carries the loudness curve, so it is stamped with
+  // the current tail version (3 here, 2 upstream): assert the version, not the number.
+  assert.equal(tailVersionCol('due-voc'), db.FACET_VERSIONS.tail, 'the tail is placed');
   assert.deepEqual(db.getTrack('due-voc')!.outro?.vocalRanges, [{ startMs: 186_000, endMs: 188_000 }], 'its vocals merged');
   const v = vocalRowOf('due-voc');
   assert.deepEqual([v?.status, v?.version, v?.reason], ['ok', db.FACET_VERSIONS.vocal, null]);
