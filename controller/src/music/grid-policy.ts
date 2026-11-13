@@ -83,15 +83,15 @@ function uniqueSorted(ms: number[]): number[] {
   return out;
 }
 
-// The grid's beats in [0, endMs], ms.
-export function gridBeatsWithin(segments: readonly GridSegment[], endMs: number): number[] {
+// The grid's beats in [fromMs, endMs], ms.
+export function gridBeatsWithin(segments: readonly GridSegment[], endMs: number, fromMs = 0): number[] {
   const out: number[] = [];
   for (const s of segments) {
     const p = s.periodUs / 1000;
     for (let k = 0; k < s.beats; k++) {
       const t = s.anchorMs + k * p;
       if (t > endMs) break;
-      if (t >= 0) out.push(Math.round(t));
+      if (t >= fromMs && t >= 0) out.push(Math.round(t));
     }
   }
   return uniqueSorted(out);
@@ -100,7 +100,7 @@ export function gridBeatsWithin(segments: readonly GridSegment[], endMs: number)
 // The grid's bar lines in [0, endMs], ms: each segment's downbeat phase, one
 // line every beatsPerBar beats across the segment. A segment with no settled
 // phase gives none.
-export function gridBarsWithin(segments: readonly GridSegment[], beatsPerBar: number, endMs: number): number[] {
+export function gridBarsWithin(segments: readonly GridSegment[], beatsPerBar: number, endMs: number, fromMs = 0): number[] {
   const out: number[] = [];
   for (const s of segments) {
     if (s.downbeatMs == null) continue;
@@ -111,8 +111,23 @@ export function gridBarsWithin(segments: readonly GridSegment[], beatsPerBar: nu
     for (let j = j0; ; j++) {
       const t = s.downbeatMs + j * bar;
       if (t > to) break;
-      if (t >= 0) out.push(Math.round(t));
+      if (t >= fromMs && t >= 0) out.push(Math.round(t));
     }
   }
   return uniqueSorted(out);
+}
+
+// The tempo of the grid segment that covers most of [fromMs, toMs] (an outro
+// that slows down keeps its own tempo), 2 decimals; null when no segment
+// covers at least MIN_WINDOW_BEATS of it.
+const MIN_WINDOW_BEATS = 4;
+export function gridTempoWithin(segments: readonly GridSegment[], fromMs: number, toMs: number): number | null {
+  let best: GridSegment | null = null;
+  let bestMs = 0;
+  for (const s of segments) {
+    const overlap = Math.min(segmentEnd(s), toMs) - Math.max(s.anchorMs, fromMs);
+    if (overlap > bestMs) { best = s; bestMs = overlap; }
+  }
+  if (!best || bestMs < (MIN_WINDOW_BEATS * best.periodUs) / 1000) return null;
+  return Math.round((60_000_000 / best.periodUs) * 100) / 100;
 }

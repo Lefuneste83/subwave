@@ -7,8 +7,8 @@ import {
   PLACED_TAIL_STAMP, SQL_PLACED_TAIL_STAMP, isPlacedTailStamp, isWholeFileLoudnessVersion, placedTailMovedBy,
   restampFacetRows, syncTrackFacets, tailEndsAtMusic, type Facet, type FacetSource,
 } from './facets.js';
-import { deleteGridRow, forgetGridHead, getGrid, recordGridFailure, recordGridUnmeasurable, setGridApplied, writeGrid, type GridAnswer } from './grid.js';
-import { gridBarsWithin, gridBeatsWithin, gridDecision, headWindowEndMs } from '../grid-policy.js';
+import { deleteGridRow, forgetGridHead, getGrid, recordGridFailure, recordGridUnmeasurable, setGridApplied, setGridOutro, writeGrid, type GridAnswer, type TrackGrid } from './grid.js';
+import { gridBarsWithin, gridBeatsWithin, gridDecision, gridTempoWithin, headWindowEndMs, type GridDecision } from '../grid-policy.js';
 import type { FileInfo, TagWrite, TrackEnrichment, TrackKeyRange, TrackMeta, TrackOutro, TrackPaceSpan, TrackRecord, TrackRow, TrackSection } from './types.js';
 import { normaliseExplicitStatus, normaliseYear, parseMsArray, rowToTrack, safeParseArray } from './rows.js';
 import { SQL_KEPT_YEAR_SOURCES, type OriginalYearOutcome, type YearSource } from '../original-year-policy.js';
@@ -1336,10 +1336,9 @@ export function writeFacetResults(id: string, w: FacetWrite): void {
     syncTrackFacets(id, { fresh, tried, source: w.source, unmeasurable, tailUnplaced: w.tailUnplaced });
     if (w.clap) upsertTrackAudioVector(id, w.clap);
     // Fresh head values: the grid's kept copy is stale (upsertTrackAnalysis).
-    if (w.head) {
-      forgetGridHead(d, id);
-      applyGridToTrack(id);
-    }
+    // A fresh tail is recognised by applyGridToOutro itself.
+    if (w.head) forgetGridHead(d, id);
+    if (w.head || w.tail) applyGridToTrack(id);
     // Only the facets that write a measured word's columns: a stems-only or
     // loudness-only answer moved none, so it never marks.
     if (w.head || w.vocal || (w.tail && !('unmeasurable' in w.tail))) {
@@ -1400,11 +1399,13 @@ export function applyGridToTrack(id: string, opts: { force?: boolean } = {}): Gr
     if (!decision.bpm) {
       if (g.applied !== 1) {
         if (g.applied === -1) setGridApplied(d, id, 0, null);
+        applyGridToOutro(d, id, g, decision);
         return g.status === 'ok' ? 'held' : 'none';
       }
       d.prepare('UPDATE tracks SET bpm = ?, beats_json = ?, bars_json = ? WHERE id = ?')
         .run(head.bpm, head.beatsJson, head.barsJson, id);
       setGridApplied(d, id, 0, null);
+      applyGridToOutro(d, id, g, decision);
       markTextVectorDirtyIfSoundChanged(id, ['measured']);
       return 'restored';
     }
@@ -1421,9 +1422,86 @@ export function applyGridToTrack(id: string, opts: { force?: boolean } = {}): Gr
     }
     d.prepare('UPDATE tracks SET bpm = ?, beats_json = ?, bars_json = ? WHERE id = ?').run(g.bpm, beatsJson, barsJson, id);
     setGridApplied(d, id, 1, head);
+    applyGridToOutro(d, id, g, decision);
     markTextVectorDirtyIfSoundChanged(id, ['measured']);
     return 'applied';
   })();
+}
+
+// The ending's tempo, beats and bars (outro_json's bpm/beats/bars; every other
+// outro field untouched), by the same decision as the head. The tail
+// measurement's own trio is kept on the grid row with what the grid wrote over
+// it: stored values that no longer match what the grid wrote are a fresh tail
+// measurement, which becomes the kept one and is covered again. So a tail
+// re-analysis can't silently undo the grid, and a revert finds the right values.
+//   - the window: from the first kept tail beat or bar (else the outro start)
+//     to the end of the decoded file;
+//   - the tempo: the grid segment covering most of that window, so an outro
+//     that slows down keeps its own; none covering it holds the ending;
+//   - beats + bars only when the bars pass, as for the head (the tail
+//     measurement's bars were every 4th beat, with no downbeat phase).
+type OutroTrio = { bpm: number | null; beats: number[] | null; bars: number[] | null };
+const msList = (v: unknown): number[] | null =>
+  Array.isArray(v) ? v.filter((x): x is number => typeof x === 'number' && Number.isFinite(x)) : null;
+const trioOf = (o: Record<string, unknown> | null | undefined): OutroTrio => ({
+  bpm: typeof o?.bpm === 'number' && Number.isFinite(o.bpm) ? o.bpm : null,
+  beats: msList(o?.beats),
+  bars: msList(o?.bars),
+});
+const sameTrio = (a: OutroTrio, b: OutroTrio) => JSON.stringify(a) === JSON.stringify(b);
+function parseTrio(json: string | null): OutroTrio | null {
+  if (!json) return null;
+  try { return trioOf(JSON.parse(json)); } catch { return null; }
+}
+
+function gridOutroTrio(g: TrackGrid, kept: OutroTrio, startMs: number, decision: GridDecision): OutroTrio | null {
+  const from = Math.min(kept.beats?.[0] ?? Infinity, kept.bars?.[0] ?? Infinity, startMs);
+  const to = g.decodedMs ?? Math.max(...g.segments.map((s) => s.anchorMs + ((s.beats - 1) * s.periodUs) / 1000));
+  if (!Number.isFinite(from) || !(to > from)) return null;
+  const bpm = gridTempoWithin(g.segments, from, to);
+  if (bpm == null) return null;
+  let { beats, bars } = kept;
+  if (decision.bars && g.beatsPerBar) {
+    const b = gridBeatsWithin(g.segments, to, from);
+    const br = gridBarsWithin(g.segments, g.beatsPerBar, to, from);
+    if (b.length && br.length) { beats = b; bars = br; }
+  }
+  return { bpm, beats, bars };
+}
+
+function writeOutroTrio(d: ReturnType<typeof requireDb>, id: string, outro: Record<string, unknown>, t: OutroTrio): void {
+  const next: Record<string, unknown> = { ...outro };
+  for (const k of ['bpm', 'beats', 'bars'] as const) {
+    const v = t[k];
+    if (v == null || (Array.isArray(v) && !v.length)) delete next[k];
+    else next[k] = v;
+  }
+  d.prepare('UPDATE tracks SET outro_json = ? WHERE id = ?').run(JSON.stringify(next), id);
+}
+
+function applyGridToOutro(d: ReturnType<typeof requireDb>, id: string, g: TrackGrid, decision: GridDecision, revert = false): void {
+  const r = d.prepare('SELECT outro_json FROM tracks WHERE id = ?').get(id) as { outro_json: string | null } | undefined;
+  let outro: Record<string, unknown> | null = null;
+  try { outro = r?.outro_json ? JSON.parse(r.outro_json) : null; } catch { outro = null; }
+  const keptStored = parseTrio(g.headOutroJson);
+  const wrote = parseTrio(g.gridOutroJson);
+  if (!outro || typeof outro !== 'object') {
+    if (keptStored || wrote) setGridOutro(d, id, null, null);
+    return;
+  }
+  const current = trioOf(outro);
+  // Still the grid's own values: the kept trio stands; anything else is fresh.
+  const kept = keptStored && wrote && sameTrio(current, wrote) ? keptStored : current;
+  const next = !revert && decision.bpm
+    ? gridOutroTrio(g, kept, typeof outro.startMs === 'number' ? outro.startMs : Infinity, decision)
+    : null;
+  if (next) {
+    if (!sameTrio(current, next)) writeOutroTrio(d, id, outro, next);
+    setGridOutro(d, id, JSON.stringify(kept), JSON.stringify(next));
+  } else {
+    if (!sameTrio(current, kept)) writeOutroTrio(d, id, outro, kept);
+    if (keptStored || wrote) setGridOutro(d, id, null, null);
+  }
 }
 
 // `npm run grid-apply -- --reembed-moved`: the operator's Re-embed, scoped to
@@ -1471,6 +1549,7 @@ export function revertGridOnTrack(id: string): boolean {
       d.prepare('UPDATE tracks SET bpm = ?, beats_json = ?, bars_json = ? WHERE id = ?')
         .run(g.headBpm, g.headBeatsJson, g.headBarsJson, id);
     }
+    applyGridToOutro(d, id, g, gridDecision(g), true);
     setGridApplied(d, id, -1, null);
     if (g.applied === 1) markTextVectorDirtyIfSoundChanged(id, ['measured']);
     return g.applied === 1;

@@ -68,6 +68,10 @@ export interface TrackGrid {
   headBpm: number | null;
   headBeatsJson: string | null;
   headBarsJson: string | null;
+  // The ending's {bpm, beats, bars} inside outro_json: the tail measurement's
+  // own (kept) and what the grid wrote over it; both null when not written.
+  headOutroJson: string | null;
+  gridOutroJson: string | null;
 }
 
 export type GridApplied = -1 | 0 | 1;
@@ -110,8 +114,15 @@ export function ensureGridTable(d: Database.Database): void {
     applied            INTEGER NOT NULL DEFAULT 0,
     head_bpm           REAL,
     head_beats_json    TEXT,
-    head_bars_json     TEXT
+    head_bars_json     TEXT,
+    head_outro_json    TEXT,
+    grid_outro_json    TEXT
   ) WITHOUT ROWID`);
+  // The ending's columns came after the table shipped: added in place.
+  const cols = new Set((d.prepare('PRAGMA table_info(track_grid)').all() as Array<{ name: string }>).map((c) => c.name));
+  for (const c of ['head_outro_json', 'grid_outro_json']) {
+    if (!cols.has(c)) d.exec(`ALTER TABLE track_grid ADD COLUMN ${c} TEXT`);
+  }
 }
 
 // The facet derivation's view of this table, as columns of a `FROM tracks`
@@ -175,6 +186,7 @@ interface GridRow {
   coverage: number | null; residual_ms: number | null; downbeat_agreement: number | null;
   main_share: number | null; decoded_ms: number | null; measured_at: string;
   applied: number; head_bpm: number | null; head_beats_json: string | null; head_bars_json: string | null;
+  head_outro_json: string | null; grid_outro_json: string | null;
 }
 
 function parseSegments(json: string | null): GridSegment[] {
@@ -196,6 +208,7 @@ function toGrid(r: GridRow): TrackGrid {
     mainShare: r.main_share, decodedMs: r.decoded_ms, measuredAt: r.measured_at,
     applied: (r.applied === 1 ? 1 : r.applied === -1 ? -1 : 0), headBpm: r.head_bpm,
     headBeatsJson: r.head_beats_json, headBarsJson: r.head_bars_json,
+    headOutroJson: r.head_outro_json ?? null, gridOutroJson: r.grid_outro_json ?? null,
   };
 }
 
@@ -244,9 +257,14 @@ export function forgetGridHead(d: Database.Database, id?: string): void {
   else d.prepare(`${sql} AND track_id = ?`).run(id);
 }
 
+// The ending's bookkeeping (tracks.applyGridToTrack): both null = not written.
+export function setGridOutro(d: Database.Database, id: string, headJson: string | null, gridJson: string | null): void {
+  d.prepare('UPDATE track_grid SET head_outro_json = ?, grid_outro_json = ? WHERE track_id = ?').run(headJson, gridJson, id);
+}
+
 // ID rotation: the old id's row moves to the new id unless it has its own.
 export function moveGridRow(d: Database.Database, oldId: string, newId: string): void {
-  d.prepare('INSERT OR IGNORE INTO track_grid SELECT ?, status, version, reason, attempts, engine, model, bpm, beats_per_bar, segments_json, coverage, residual_ms, downbeat_agreement, main_share, decoded_ms, measured_at, applied, head_bpm, head_beats_json, head_bars_json FROM track_grid WHERE track_id = ?')
+  d.prepare('INSERT OR IGNORE INTO track_grid SELECT ?, status, version, reason, attempts, engine, model, bpm, beats_per_bar, segments_json, coverage, residual_ms, downbeat_agreement, main_share, decoded_ms, measured_at, applied, head_bpm, head_beats_json, head_bars_json, head_outro_json, grid_outro_json FROM track_grid WHERE track_id = ?')
     .run(newId, oldId);
   d.prepare('DELETE FROM track_grid WHERE track_id = ?').run(oldId);
 }

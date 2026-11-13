@@ -198,6 +198,82 @@ test('--reembed-moved marks only an unknown-words vector whose tempo word the gr
   assert.equal(db.markGridMovedVectorIfUnknown('r4'), false);
 });
 
+// The ending (outro_json bpm/beats/bars): the tail measurement read 61 BPM
+// near the end, with bars every 4th beat from an arbitrary phase.
+const TAIL_BEATS = Array.from({ length: 30 }, (_, i) => Math.round(310_000 + i * 983.6)).filter((b) => b < 339_000);
+const TAIL_BARS = TAIL_BEATS.filter((_, i) => i % 4 === 2);
+const OUTRO = { startMs: 312_000, ending: 'fade', lufs: -14.5, bpm: 61, beats: TAIL_BEATS, bars: TAIL_BARS, vocalRanges: [] };
+const outroOf = (id: string) => JSON.parse((db.requireDb().prepare('SELECT outro_json FROM tracks WHERE id = ?').get(id) as { outro_json: string }).outro_json);
+function seedWithOutro(id: string, outro: Record<string, unknown> = OUTRO) {
+  db.upsertTrackMeta(id, { title: id, artist: 'A', album: 'B', duration: 340 } as never);
+  db.upsertTrackAnalysis(id, { bpm: 62, musicalKey: '8A', loudnessLufs: -9, beats: HEAD_BEATS, bars: HEAD_BARS, outro, source: 'full' } as never);
+}
+
+test('the ending takes the grid\'s tempo, beats and bars; every other outro field stays', () => {
+  seedWithOutro('o1');
+  db.writeGridResult('o1', { grid: answer() });
+  const o = outroOf('o1');
+  assert.equal(o.bpm, 124);
+  assert.equal(o.ending, 'fade');
+  assert.equal(o.lufs, -14.5);
+  assert.deepEqual(o.vocalRanges, []);
+  assert.equal(o.startMs, 312_000);
+  assert.ok(o.beats[0] >= TAIL_BEATS[0] && o.beats[0] - TAIL_BEATS[0] < PERIOD, 'from the first kept tail beat');
+  assert.ok(Math.abs(o.beats[1] - o.beats[0] - PERIOD) < 1);
+  // Bars on the grid's downbeat phase (480 + 4k periods), not every 4th detection.
+  for (const b of o.bars) assert.ok(Math.abs(((b - 480) / PERIOD) % 4) < 0.01 || Math.abs(((b - 480) / PERIOD) % 4 - 4) < 0.01, `bar ${b}`);
+  const g = db.getGrid('o1')!;
+  assert.deepEqual(JSON.parse(g.headOutroJson!), { bpm: 61, beats: TAIL_BEATS, bars: TAIL_BARS });
+});
+
+test('the ending: bars held keeps its beats and bars, tempo still the grid\'s', () => {
+  seedWithOutro('o2');
+  db.writeGridResult('o2', { grid: answer({ downbeatAgreement: 0.5 }) });
+  const o = outroOf('o2');
+  assert.equal(o.bpm, 124);
+  assert.deepEqual(o.beats, TAIL_BEATS);
+  assert.deepEqual(o.bars, TAIL_BARS);
+});
+
+test('the ending keeps its own tempo when the grid slows down there', () => {
+  seedWithOutro('o3');
+  db.writeGridResult('o3', { grid: answer({ mainShare: 0.9, segments: [
+    { anchorMs: 480, periodUs: 483871, beats: 620, downbeatMs: 480 },        // to ~300 s at 124
+    { anchorMs: 300_500, periodUs: 500000, beats: 79, downbeatMs: 300_500 },  // 120 BPM outro
+  ] }) });
+  assert.equal(row('o3').bpm, 124);
+  assert.equal(outroOf('o3').bpm, 120);
+});
+
+test('a fresh tail measurement is kept and covered again; revert restores it', () => {
+  seedWithOutro('o4');
+  db.writeGridResult('o4', { grid: answer() });
+  const fresh = { ...OUTRO, bpm: 60.5, lufs: -15 };
+  db.upsertTrackAnalysis('o4', { bpm: 62, musicalKey: '8A', loudnessLufs: -9, beats: HEAD_BEATS, bars: HEAD_BARS, outro: fresh, source: 'full' } as never);
+  assert.equal(outroOf('o4').bpm, 124, 'covered again');
+  assert.equal(outroOf('o4').lufs, -15, 'the fresh measurement\'s other fields land');
+  assert.equal(JSON.parse(db.getGrid('o4')!.headOutroJson!).bpm, 60.5, 'the fresh tempo is the kept one');
+  assert.equal(db.revertGridOnTrack('o4'), true);
+  const o = outroOf('o4');
+  assert.deepEqual([o.bpm, o.beats, o.bars], [60.5, TAIL_BEATS, TAIL_BARS]);
+  assert.equal(o.lufs, -15);
+  assert.deepEqual([db.getGrid('o4')!.headOutroJson, db.getGrid('o4')!.gridOutroJson], [null, null]);
+});
+
+test('the ending goes back with the head when the grid no longer passes; held never touches it', () => {
+  seedWithOutro('o5');
+  db.writeGridResult('o5', { grid: answer() });
+  db.writeGridResult('o5', { version: 1, unmeasurable: 'no-beat' });
+  assert.deepEqual([outroOf('o5').bpm, outroOf('o5').bars], [61, TAIL_BARS]);
+  seedWithOutro('o6');
+  db.writeGridResult('o6', { grid: answer({ coverage: 0.5 }) });
+  assert.deepEqual(outroOf('o6'), OUTRO);
+  // No outro at all: nothing written, nothing kept.
+  seed('o7');
+  db.writeGridResult('o7', { grid: answer() });
+  assert.equal(db.getGrid('o7')!.headOutroJson, null);
+});
+
 test('window and bar arithmetic', () => {
   assert.equal(P.headWindowEndMs([100, 200], [150, 900]), 900);
   assert.equal(P.headWindowEndMs(null, null), P.DEFAULT_HEAD_WINDOW_MS);
@@ -211,4 +287,7 @@ test('window and bar arithmetic', () => {
     { anchorMs: 5000, periodUs: 500000, beats: 9, downbeatMs: 5500 },
   ], 4, 20_000), [0, 2000, 4000, 5500, 7500]);
   assert.equal(P.gridDecision(null).bpm, false);
+  assert.deepEqual(P.gridBeatsWithin([{ anchorMs: 0, periodUs: 500000, beats: 10, downbeatMs: 0 }], 3000, 1200), [1500, 2000, 2500, 3000]);
+  assert.equal(P.gridTempoWithin([{ anchorMs: 0, periodUs: 500000, beats: 10, downbeatMs: 0 }], 0, 5000), 120);
+  assert.equal(P.gridTempoWithin([{ anchorMs: 0, periodUs: 500000, beats: 10, downbeatMs: 0 }], 4200, 9000), null, 'under 4 beats covered');
 });

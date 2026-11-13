@@ -35,7 +35,7 @@ const grid = (over: Partial<import('../src/music/library-db/grid.js').TrackGrid>
   bpm: 124, beatsPerBar: 4,
   segments: [{ anchorMs: 480, periodUs: 483871, beats: 700, downbeatMs: 480 }],
   coverage: 0.97, residualMs: 5, downbeatAgreement: 0.84, mainShare: 0.99, decodedMs: 340_000,
-  measuredAt: '2026-11-12T00:00:00Z', applied: 0 as const, headBpm: null, headBeatsJson: null, headBarsJson: null, ...over,
+  measuredAt: '2026-11-12T00:00:00Z', applied: 0 as const, headBpm: null, headBeatsJson: null, headBarsJson: null, headOutroJson: null, gridOutroJson: null, ...over,
 });
 const P = 483.871;
 const track = (over: Partial<Parameters<typeof R.compareGrid>[0]> = {}) => ({

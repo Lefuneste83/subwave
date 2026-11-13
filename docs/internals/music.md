@@ -834,8 +834,16 @@ head's, so they never disagree): most detected beats on the grid (coverage ≥
 0.8), the main tempo (±4 %, over every segment: a live drummer splits a steady
 song) on ≥ 0.6 of the track, at most 200 BPM (the only confident readings above
 it were double time; held, never halved), bars also downbeat agreement ≥ 0.75.
+The same decision covers the ENDING (`outro_json`'s `bpm`, `beats`, `bars`, every
+other outro field untouched): the tempo of the grid segment covering the tail
+window (an outro that slows keeps its own), and the grid's beats and downbeat
+bars there when the bars pass (the tail measurement's bars were every 4th beat
+with no downbeat phase). The tail's own trio is kept on the grid row beside
+what the grid wrote (`head_outro_json`, `grid_outro_json`): stored values that
+no longer match what the grid wrote are a fresh tail measurement, which becomes
+the kept one and is covered again.
 `tracks.applyGridToTrack` is the one write: it runs on every grid answer and
-after every head write, so a re-analysis's fresh head values become the ones
+after every head or tail write, so a re-analysis's fresh head values become the ones
 kept and the grid goes over them again. The head's own values stay on the grid
 row (`head_*`); `npm run grid-apply -- --revert` puts them back and marks the
 rows reverted (a re-analysis doesn't re-apply them) until `npm run grid-apply`.
