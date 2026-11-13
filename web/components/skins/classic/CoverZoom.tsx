@@ -116,8 +116,8 @@ export default function CoverZoom({ src, title, artist, album, origin, onClosed 
         onClick={(e) => { e.stopPropagation(); close(); }}
         className="v3-focus relative cursor-zoom-out appearance-none border-0 bg-transparent p-0"
       >
-        {/* The animated box carries the registration ticks, so they travel
-            with the cover as it grows and shrinks. */}
+        {/* The animated box is what grows from and shrinks back into the
+            thumbnail. */}
         <div ref={coverRef} className="relative">
           <div className="relative size-[min(78vmin,512px,calc(100dvh-220px))] min-h-[160px] min-w-[160px] overflow-hidden rounded-sm border border-ink bg-[var(--bg)] shadow-[0_28px_90px_-24px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
             <span className="v3-cover-placeholder" aria-hidden="true" />
@@ -131,10 +131,6 @@ export default function CoverZoom({ src, title, artist, album, origin, onClosed 
               />
             )}
           </div>
-          <span className="pointer-events-none absolute -top-[6px] -left-[6px] size-[10px] border-t border-l border-ink" aria-hidden="true" />
-          <span className="pointer-events-none absolute -top-[6px] -right-[6px] size-[10px] border-t border-r border-ink" aria-hidden="true" />
-          <span className="pointer-events-none absolute -bottom-[6px] -left-[6px] size-[10px] border-b border-l border-ink" aria-hidden="true" />
-          <span className="pointer-events-none absolute -right-[6px] -bottom-[6px] size-[10px] border-r border-b border-ink" aria-hidden="true" />
         </div>
       </button>
       {(title || byline) && (
