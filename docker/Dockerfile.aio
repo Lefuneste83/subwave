@@ -9,7 +9,7 @@
 # NOT bundled (kept lean): tts-heavy engines and the docker-socket-proxy Stats
 # panel — both degrade gracefully. Bundled: Piper + Kokoro TTS and the lean
 # acoustic analyzer as an in-process venv (ANALYZE_PYTHON; no sidecars here).
-# CI also publishes `subwave-aio-heavy` (WITH_CLAP=1 WITH_DEMUCS=1) and
+# CI also publishes `subwave-aio-heavy` (WITH_CLAP=1 WITH_DEMUCS=1 WITH_BEAT_GRID=1) and
 # `subwave-aio-cuda` (+ WITH_CUDA=1) — see docs/unraid.md.
 
 # ---- web build: Next.js standalone (mirrors web/Dockerfile) ----------------
@@ -180,6 +180,7 @@ ENV KOKORO_MODEL=/opt/kokoro/models/kokoro-v1.0.onnx \
 # in docs/internals/infrastructure.md.
 ARG WITH_CLAP=0
 ARG WITH_DEMUCS=0
+ARG WITH_BEAT_GRID=0
 ARG WITH_CUDA=0
 ARG TORCH_CUDA=cu128
 RUN TORCH_INDEX="https://download.pytorch.org/whl/cpu" && \
@@ -215,12 +216,26 @@ RUN TORCH_INDEX="https://download.pytorch.org/whl/cpu" && \
       /opt/analyzer/venv/bin/python -c "import torch, torchaudio, demucs, diffq" && \
       apt-get purge -y gcc libc6-dev python3-dev && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* ; \
     fi && \
+    if [ "$WITH_BEAT_GRID" = "1" ]; then \
+      # Beat This! and its two baked checkpoints — see docker/Dockerfile.analyzer.
+      /opt/analyzer/venv/bin/pip install --no-cache-dir \
+        --index-url "$TORCH_INDEX" \
+        --extra-index-url https://pypi.org/simple \
+        torch==$TORCH_VER torchaudio==$TORCH_VER beat-this==1.1.0 rotary-embedding-torch==0.9.2 einops==0.8.2 && \
+      /opt/analyzer/venv/bin/python -c "import torch, beat_this.inference" && \
+      mkdir -p /opt/analyzer/beat-this && \
+      for m in final0 small0; do \
+        curl -fsSL --retry 3 -o "/opt/analyzer/beat-this/$m.ckpt" \
+          "https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/$m.ckpt" || exit 1; \
+      done ; \
+    fi && \
     find /opt/analyzer/venv -depth -type d -name __pycache__ -exec rm -rf {} +
 # ANALYZE_PYTHON flips on the controller's local analyze backend; HF_HOME puts
 # CLAP/Demucs weights under the persisted state dir so they survive recreates.
 # ANALYZE_WORKER defaults to /app/scripts/analyze_worker.py (copied below).
 ENV ANALYZE_PYTHON=/opt/analyzer/venv/bin/python \
-    HF_HOME=/var/sub-wave/hf-cache
+    HF_HOME=/var/sub-wave/hf-cache \
+    ANALYZE_GRID_WEIGHTS_DIR=/opt/analyzer/beat-this
 # Expose analyzer pip for maintenance while system python3 keeps precedence.
 # Kokoro and analyzer workers still use their explicit *_PYTHON paths.
 ENV PATH=$PATH:/opt/analyzer/venv/bin

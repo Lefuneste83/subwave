@@ -43,8 +43,9 @@ import { ANALYSIS_VERSION, requireDb } from './handle.js';
 import { MAX_ANALYSIS_FAILURES, analysisFailureExclusion } from '../analyze-capability.js';
 import { YEAR_MAX_ATTEMPTS, yearRetryDue } from '../original-year-policy.js';
 import { eraSuspectSql } from '../era-suspect.js';
+import { GRID_FACET_VERSION, GRID_SOURCE_SELECT, ensureGridTable, type GridStatus } from './grid.js';
 
-export const FACETS = ['head', 'loudness', 'tail', 'clap', 'vocal', 'stems', 'edges', 'year'] as const;
+export const FACETS = ['head', 'loudness', 'tail', 'clap', 'vocal', 'stems', 'edges', 'grid', 'year'] as const;
 export type Facet = (typeof FACETS)[number];
 // The facets the audio analyzer produces. An analysis failure (analyze_fail_count,
 // analyze_error) counts against these only: it says nothing about a MusicBrainz
@@ -53,6 +54,15 @@ export type AnalysisFacet = Exclude<Facet, 'year'>;
 export const ANALYSIS_FACETS = FACETS.filter((f): f is AnalysisFacet => f !== 'year');
 export function isAnalysisFacet(f: Facet): f is AnalysisFacet {
   return f !== 'year';
+}
+// Facets only an explicit `--facets` run measures, with their own state and
+// failure history (library-db/grid.ts): never planned by a regular run, never
+// given the track's shared analysis failure count, never counted as a library
+// problem when unmeasurable. The whole-track beat grid is one (heavy analyzer
+// only; a track with no steady pulse has none, and that is no fault).
+export const OPT_IN_FACETS: readonly Facet[] = ['grid'];
+export function isOptInFacet(f: Facet): boolean {
+  return OPT_IN_FACETS.includes(f);
 }
 export type FacetStatus = 'ok' | 'unmeasurable' | 'failed';
 
@@ -70,6 +80,8 @@ export type FacetStatus = 'ok' | 'unmeasurable' | 'failed';
 // measurement's own (`loudness_version`, NULL = 1), never assumed.
 // edges = silence at both ends against the absolute floor + the decoded length,
 // from the same whole-file decode.
+// grid = the whole-track beat grid (Beat This!, library-db/grid.ts); its
+// version is the analyzer's GRID_VERSION, read off its own table.
 // tail v2 = a window ending where the music stops (placed from the stored
 // edges); v1 = the file's last ANALYZE_OUTRO_SECONDS. Read off the columns
 // (tailVersionOf), never assumed.
@@ -81,6 +93,7 @@ export const FACET_VERSIONS: Readonly<Record<Facet, number>> = {
   vocal: 2,
   stems: 1,
   edges: 1,
+  grid: GRID_FACET_VERSION,
   year: 1,
 };
 
@@ -210,6 +223,12 @@ export interface FacetSourceRow {
   has_original_year: number; // original_year IS NOT NULL
   original_year_source: string | null;
   year_checked: number;      // original_year_checked_at IS NOT NULL
+  // The grid facet's own state (track_grid, GRID_SOURCE_SELECT); absent or
+  // null = never attempted.
+  grid_status?: GridStatus | null;
+  grid_version?: number | null;
+  grid_reason?: string | null;
+  grid_attempts?: number | null;
 }
 
 export const FACET_SOURCE_SELECT =
@@ -228,7 +247,8 @@ export const FACET_SOURCE_SELECT =
    COALESCE(${eraSuspectSql()}, 0) AS year_suspect,
    original_year IS NOT NULL                          AS has_original_year,
    original_year_source,
-   original_year_checked_at IS NOT NULL               AS year_checked`;
+   original_year_checked_at IS NOT NULL               AS year_checked,
+   ${GRID_SOURCE_SELECT}`;
 
 export interface DerivedFacet {
   facet: Facet;
@@ -323,6 +343,15 @@ export function deriveFacetRows(
 
   if (row.has_edges) ok('edges');
 
+  // The grid's state is its own table's, failures and attempts included: the
+  // track's analysis failure count never touches it (OPT_IN_FACETS).
+  if (row.grid_status) {
+    out.push({
+      facet: 'grid', status: row.grid_status, version: row.grid_version ?? FACET_VERSIONS.grid,
+      reason: row.grid_reason ?? null, attempts: row.grid_attempts ?? 0, measuredVersion: true,
+    });
+  }
+
   // Year. Its rows never take the analysis failure count.
   if (!row.year_suspect) {
     out.push({ facet: 'year', status: 'ok', version: FACET_VERSIONS.year, reason: 'not-needed', attempts: 0 });
@@ -341,6 +370,7 @@ export function deriveFacetRows(
   }
 
   for (const facet of ANALYSIS_FACETS) {
+    if (isOptInFacet(facet)) continue;
     const reason = opts.unmeasurable?.[facet];
     if (reason == null) continue;
     const prior = out.find(r => r.facet === facet);
@@ -373,7 +403,7 @@ export function deriveFacetRows(
     }
     const have = new Set(out.map(r => r.facet));
     for (const facet of ANALYSIS_FACETS) {
-      if (!have.has(facet)) out.push(failed(facet));
+      if (!have.has(facet) && !isOptInFacet(facet)) out.push(failed(facet));
     }
   }
   return out;
@@ -484,13 +514,14 @@ function syncTrackFacetsOn(d: Database.Database, id: string, opts: SyncOpts): vo
     // reason. A failure's reason is the latest error.
     // An ok loudness row's reason (`no-curve`) describes the columns too.
     if (!isFresh && prev && prev.status === r.status && r.status !== 'failed' && r.facet !== 'vocal' && r.facet !== 'year' &&
-      !(r.facet === 'loudness' && r.status === 'ok')) r.reason = prev.reason;
+      !isOptInFacet(r.facet) && !(r.facet === 'loudness' && r.status === 'ok')) r.reason = prev.reason;
     // Measuring edges re-decides which window a stored tail sits on (the
     // tolerance in tailVersionOf), so that is taken as is too: otherwise every
     // track whose edges arrive after this table was derived stays planned for
     // a tail re-read it does not need.
-    const promoted = r.measuredVersion &&
-      (opts.rederive || (r.facet === 'tail' && (fresh.has('edges') || tried.has('edges'))));
+    // An opt-in facet's row mirrors its own table, version included.
+    const promoted = (r.measuredVersion && isOptInFacet(r.facet)) || (r.measuredVersion &&
+      (opts.rederive || (r.facet === 'tail' && (fresh.has('edges') || tried.has('edges')))));
     const version =
       isFresh || promoted || !prev || (prev.status !== r.status && unmeasurable[r.facet] == null)
         ? r.version : Math.min(prev.version, r.version);
@@ -541,8 +572,8 @@ export function facetDerivationStamp(): string {
   // reads the tail's version off its columns (tailVersionOf). Revision 4
   // re-opens a 'capped-download' tail an earlier derivation had settled.
   // Revision 5 settles the tail of a file the edges scan found silent.
-  // Adding a facet changes FACET_VERSIONS, so the year facet's rows were
-  // derived for every track on the first open after it landed.
+  // Adding a facet (year, grid) changes FACET_VERSIONS, which re-derives on
+  // its own; with no grid stored yet that re-derive leaves every row as it was.
   return JSON.stringify({ revision: 5, analysis: ANALYSIS_VERSION, facets: FACET_VERSIONS });
 }
 
@@ -565,6 +596,7 @@ export function resyncAllFacets(d: Database.Database): number {
   let synced = 0;
   d.transaction(() => {
     d.prepare('DELETE FROM track_facet_status WHERE track_id NOT IN (SELECT id FROM tracks)').run();
+    d.prepare('DELETE FROM track_grid WHERE track_id NOT IN (SELECT id FROM tracks)').run();
     const ids = (d.prepare('SELECT id FROM tracks').all() as Array<{ id: string }>).map(r => r.id);
     for (const id of ids) {
       syncTrackFacetsOn(d, id, { rederive: true });
@@ -580,6 +612,8 @@ export function resyncAllFacets(d: Database.Database): number {
 // changed since it was last derived. Idempotent; called on every open from
 // migrate(). Returns rows seeded (0 when the table already existed).
 export function ensureFacetStatus(d: Database.Database): number {
+  // FACET_SOURCE_SELECT reads it, so it exists before any derivation.
+  ensureGridTable(d);
   d.exec(`CREATE TABLE IF NOT EXISTS track_facet_meta (
     pk    INTEGER PRIMARY KEY CHECK (pk = 1),
     stamp TEXT NOT NULL
@@ -730,6 +764,16 @@ export function clearFacetFailures(id?: string): void {
 // The year facet has its own retry rule (yearLookupDueIds).
 export function facetNeedsIds(facet: Facet, limit?: number): string[] {
   if (facet === 'year') return yearLookupDueIds(Date.now(), limit);
+  if (isOptInFacet(facet)) {
+    // Its own attempts, never the track's analysis failure count (grid.ts).
+    const sql =
+      `SELECT t.id FROM tracks t
+         LEFT JOIN track_facet_status s ON s.track_id = t.id AND s.facet = ?
+        WHERE (s.track_id IS NULL OR s.version < ? OR s.status = 'failed')
+          AND COALESCE(s.attempts, 0) < ${MAX_ANALYSIS_FAILURES}
+        ORDER BY t.id` + (limit && limit > 0 ? ` LIMIT ${Math.floor(limit)}` : '');
+    return (requireDb().prepare(sql).all(facet, FACET_VERSIONS[facet]) as Array<{ id: string }>).map(r => r.id);
+  }
   const sql =
     `SELECT t.id FROM tracks t
        LEFT JOIN track_facet_status s ON s.track_id = t.id AND s.facet = ?

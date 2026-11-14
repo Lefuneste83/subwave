@@ -801,6 +801,50 @@ Demucs on the placed window, the seek side, a real ffmpeg window landing on the
 sample) and `scripts/tail-placement.test.ts` (versions, the tolerance, live
 promotion, no overwrite, the request and the stamp end to end).
 
+**The whole-track beat grid (`grid` facet, opt-in, heavy analyzer only).**
+`npm run analyze -- --facets grid` runs Beat This! (CPJKU, MIT code and
+weights, baked by `WITH_BEAT_GRID=1`) over the whole track and stores a
+FITTED grid: per segment an anchor and a beat period, a new segment only where
+the tempo really moves, downbeats as a phase on it (`analyze_worker.fit_grid`,
+about 300 bytes a track). A kickless breakdown where the tracker follows the
+offbeat is joined back onto the grid it left. Measured against Traktor grids on
+150 library tracks: tempo right 99 % (librosa's 40 s window 65 %), whole-track
+beats on the grid F 0.99 (librosa whole-track 0.60), downbeats on the bar line
+82 %. It lives in its own table (`library-db/grid.ts`, `track_grid`) with its
+own status, reason and attempts: the facet is planned only by `--facets grid`
+and only on `analyze_grid_capable === true` (unknown is not planned, since an
+older analyzer would read a grid-only item as a full analysis), never by a
+regular run; its failures never touch `analyze_fail_count` (which gates the
+regular retries) and a regular failure never fans out onto it; an unmeasurable
+grid (no steady pulse) is settled and never counted as a fault of the file. A grid that passes
+`music/grid-policy.ts` replaces the head analysis's `bpm`, and its beats and bar
+lines over the head window when the downbeats agree (otherwise both stay the
+head's, so they never disagree): most detected beats on the grid (coverage ≥
+0.8), the main tempo (±4 %, over every segment: a live drummer splits a steady
+song) on ≥ 0.6 of the track, at most 200 BPM (the only confident readings above
+it were double time; held, never halved), bars also downbeat agreement ≥ 0.75.
+The same decision covers the ENDING (`outro_json`'s `bpm`, `beats`, `bars`, every
+other outro field untouched): the tempo of the grid segment covering the tail
+window (an outro that slows keeps its own), and the grid's beats and downbeat
+bars there when the bars pass (the tail measurement's bars were every 4th beat
+with no downbeat phase). The tail's own trio is kept on the grid row beside
+what the grid wrote (`head_outro_json`, `grid_outro_json`): stored values that
+no longer match what the grid wrote are a fresh tail measurement, which becomes
+the kept one and is covered again.
+`tracks.applyGridToTrack` is the one write: it runs on every grid answer and
+after every head or tail write, so a re-analysis's fresh head values become the ones
+kept and the grid goes over them again. The head's own values stay on the grid
+row (`head_*`); `npm run grid-apply -- --revert` puts them back and marks the
+rows reverted (a re-analysis doesn't re-apply them) until `npm run grid-apply`.
+A moved tempo word marks the vector (`markTextVectorDirtyIfSoundChanged`); the
+next tagging run re-embeds it. `npm run grid-report` is the read-only dry run
+(stored against grid tempo, octave and 3:2 fixes, tempo-word moves, bar shifts):
+on 300 library tracks (200 random) the gate replaced the BPM of 69 % of the
+random tracks with a grid, 17 % a real tempo fix (octave, 3:2, other), and
+moved the tempo word of 16 %. Pinned by `scripts/grid-apply.test.ts`,
+`scripts/grid-report.test.ts`, `scripts/grid-facet.test.ts` and
+`scripts/analyzer_grid_test.py`.
+
 ## Prepared artist episodes
 
 `broadcast/show-preparation.ts` owns `state/show-preparations.json`. Its key is a

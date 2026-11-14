@@ -130,6 +130,7 @@ async function buildFacetPlan(args: string[], limit: number | undefined): Promis
       wholeFile: available ? analyzer.wholeFileAvailable() : null,
       loudnessCurve: available ? analyzer.loudnessCurveAvailable() : null,
       yearLookups: enrichCfg.originalYear !== false,
+      grid: available ? analyzer.gridAvailable() : null,
     },
     limit,
   });

@@ -25,6 +25,7 @@ services:
       args:
         WITH_CLAP: 1
         WITH_DEMUCS: 1
+        WITH_BEAT_GRID: 1
         WITH_CUDA: 1
     # The deploy.resources reservation is the modern (CDI) path. On hosts where
     # the NVIDIA runtime is registered in LEGACY mode it fails with "could not

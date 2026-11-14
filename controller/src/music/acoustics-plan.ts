@@ -59,6 +59,10 @@ export interface PlanCapabilities {
   // MusicBrainz year lookups (settings.embedding.enrichment.originalYear).
   // Absent = on, the setting's own default.
   yearLookups?: boolean;
+  // The whole-track beat grid (Beat This!, heavy analyzer). Planned only on
+  // `=== true`: unknown is NOT planned, unlike CLAP/Demucs, because an analyzer
+  // that predates the facet would read a grid-only item as a full analysis.
+  grid?: boolean | null;
 }
 
 export interface PlanInput {
@@ -88,7 +92,8 @@ export interface WorkItem {
 
 // 'year-known': the year needs no lookup (trusted, resolved or manual).
 // 'year-off': MusicBrainz lookups are switched off in the settings.
-export type SkipReason = 'no-clap' | 'no-demucs' | 'no-tail-vocal' | 'no-whole-file' | 'no-curve' | 'year-known' | 'year-off' | 'limit';
+// 'no-grid': the analyzer does not positively report the beat grid.
+export type SkipReason = 'no-clap' | 'no-demucs' | 'no-tail-vocal' | 'no-whole-file' | 'no-curve' | 'no-grid' | 'year-known' | 'year-off' | 'limit';
 
 export interface FacetPlanCount {
   facet: Facet;
@@ -221,6 +226,7 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
     // (still due) and `edges` not at all: a guaranteed no-op.
     if (WHOLE_FILE_FACETS.includes(f) && input.capabilities.wholeFile === false) return 'no-whole-file';
     if (f === 'loudness' && cell?.reason === 'no-curve' && input.capabilities.loudnessCurve !== true) return 'no-curve';
+    if (f === 'grid' && input.capabilities.grid !== true) return 'no-grid';
     if (f === 'year' && input.capabilities.yearLookups === false) return 'year-off';
     if (f === 'year' && cell?.status === 'ok') return 'year-known';
     return null;
@@ -288,6 +294,14 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
     warnings.push(
       `${whole.join(', ')}: read${whole.length === 1 ? 's' : ''} the whole file (one decode per track, streamed from the music server)` +
         (input.capabilities.wholeFile == null ? ' — whole-file capability unknown (analyzer not probed or predates it)' : ''),
+    );
+  }
+  if (facets.includes('grid')) {
+    warnings.push(
+      'grid: Beat This! over the whole track (one stream per track, ~1.5 s on a GPU, ~8 s on CPU); stored on its own ' +
+        '(track_grid); a grid passing its gate (grid-policy.ts) replaces the bpm, and the bars when the downbeats agree ' +
+        '(the old values kept: npm run grid-apply -- --revert)' +
+        (input.capabilities.grid !== true ? ' — the analyzer does not report the beat grid (heavy image built WITH_BEAT_GRID=1 needed), so nothing is planned' : ''),
     );
   }
   const yearItems = items.filter((i) => i.facets.includes('year')).length;

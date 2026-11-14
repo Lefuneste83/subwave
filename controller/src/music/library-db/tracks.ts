@@ -7,8 +7,10 @@ import {
   PLACED_TAIL_STAMP, SQL_PLACED_TAIL_STAMP, isPlacedTailStamp, isWholeFileLoudnessVersion, placedTailMovedBy,
   restampFacetRows, syncTrackFacets, tailEndsAtMusic, type Facet, type FacetSource,
 } from './facets.js';
+import { deleteGridRow, forgetGridHead, getGrid, recordGridFailure, recordGridUnmeasurable, setGridApplied, setGridOutro, writeGrid, type GridAnswer, type TrackGrid } from './grid.js';
+import { gridBarsWithin, gridBeatsWithin, gridDecision, gridTempoWithin, headWindowEndMs, type GridDecision } from '../grid-policy.js';
 import type { FileInfo, TagWrite, TrackEnrichment, TrackKeyRange, TrackMeta, TrackOutro, TrackPaceSpan, TrackRecord, TrackRow, TrackSection } from './types.js';
-import { normaliseExplicitStatus, normaliseYear, rowToTrack, safeParseArray } from './rows.js';
+import { normaliseExplicitStatus, normaliseYear, parseMsArray, rowToTrack, safeParseArray } from './rows.js';
 import { SQL_KEPT_YEAR_SOURCES, type OriginalYearOutcome, type YearSource } from '../original-year-policy.js';
 import { runDdl } from './schema.js';
 import { touchGenreInputs } from './genre-inputs.js';
@@ -177,13 +179,13 @@ function syncYearIfEraChanged(id: string, before: StoredEra | null): void {
   syncTrackFacets(id);
 }
 
-function markTextVectorDirty(id: string): void {
-  requireDb()
+function markTextVectorDirty(id: string): boolean {
+  return requireDb()
     .prepare(
       `UPDATE tracks SET text_vector_dirty = 1
         WHERE id = ? AND EXISTS (SELECT 1 FROM track_vectors WHERE id = tracks.id)`,
     )
-    .run(id);
+    .run(id).changes > 0;
 }
 
 function markTextVectorDirtyIfEraChanged(id: string, before: StoredEra | null): void {
@@ -349,7 +351,7 @@ export function earliestMeasuredAt(): string | null {
 
 // Everything the analyzer measured from a track's audio, for one track: the
 // head analysis and its loudness, the whole-file loudness (its curve too) and
-// edges, the tail, vocal ranges, the stems stamp, CLAP and the audio moods and
+// edges, the beat grid, the tail, vocal ranges, the stems stamp, CLAP and the audio moods and
 // descriptors derived from it, the map position derived from CLAP, and the
 // failure history that described the old file. Unlike clearAnalysis() nothing
 // is kept: every figure was measured on a file that is gone, and a whole-file
@@ -384,6 +386,8 @@ export function clearTrackAudio(id: string, fileSize?: number | null): void {
     // old file; the year row is not an audio measurement (a failed lookup's
     // attempt count lives only there).
     d.prepare(`DELETE FROM track_facet_status WHERE track_id = ? AND facet <> 'year'`).run(id);
+    // The beat grid was measured on the old file too.
+    deleteGridRow(d, id);
     syncTrackFacets(id);
   })();
 }
@@ -1207,6 +1211,10 @@ export function upsertTrackAnalysis(id: string, a: TrackAnalysisWrite): void {
     tailReason: a.source === 'capped' ? 'capped-download' : undefined,
     tailUnplaced: !placedAnswer,
   });
+  // Fresh head values: the grid's kept copy of them is stale, and it goes
+  // over them again when it passes.
+  forgetGridHead(d, id);
+  applyGridToTrack(id);
   markTextVectorDirtyIfSoundChanged(id, ['measured']);
   })();
 }
@@ -1435,11 +1443,224 @@ export function writeFacetResults(id: string, w: FacetWrite): void {
     }
     syncTrackFacets(id, { fresh, tried, source: w.source, unmeasurable, tailUnplaced: w.tailUnplaced });
     if (w.clap) upsertTrackAudioVector(id, w.clap);
+    // Fresh head values: the grid's kept copy is stale (upsertTrackAnalysis).
+    // A fresh tail is recognised by applyGridToOutro itself.
+    if (w.head) forgetGridHead(d, id);
+    if (w.head || w.tail) applyGridToTrack(id);
     // Only the facets that write a measured word's columns: a stems-only or
     // loudness-only answer moved none, so it never marks.
     if (w.head || w.vocal || (w.tail && !('unmeasurable' in w.tail))) {
       markTextVectorDirtyIfSoundChanged(id, ['measured']);
     }
+  })();
+}
+
+// The `grid` facet's answer (library-db/grid.ts). Its own writer on purpose:
+// writeFacetResults clears the track's analysis failure history on a success,
+// and a grid answer says nothing about the regular analysis. Re-derives the
+// facet rows in the same transaction, so the grid row mirrors its table.
+export type GridResult =
+  | { grid: GridAnswer }
+  | { unmeasurable: string; version: number }
+  | { failed: string };
+
+export function writeGridResult(id: string, r: GridResult, source: FacetSource = 'url'): void {
+  const d = requireDb();
+  d.transaction(() => {
+    if ('grid' in r) writeGrid(id, r.grid);
+    else if ('unmeasurable' in r) recordGridUnmeasurable(id, r.version, r.unmeasurable);
+    else recordGridFailure(id, r.failed);
+    syncTrackFacets(id, { source });
+    // A failed attempt keeps the grid it had, and what it wrote.
+    if (!('failed' in r)) applyGridToTrack(id);
+  })();
+}
+
+// The whole-track grid over the head analysis's tempo and bar lines:
+// the one write of a grid into tracks.bpm/beats_json/bars_json, and its
+// undoing. music/grid-policy.ts decides; this only moves values.
+//   - Passing the gate: bpm becomes the grid's; when the bars pass too, the
+//     beats and bars over the head window (the span the stored ones cover)
+//     become the grid's, otherwise both stay the head's, so they never
+//     disagree. The head's own values are kept on the grid row (head_*).
+//   - Held (or no longer a measured grid): the head's values go back.
+//   - An operator-reverted row (applied = -1) is left alone unless `force`
+//     (`npm run grid-apply`).
+// Runs after every grid answer and after every head write (a re-analysis
+// writes fresh head values, which become the ones kept). A moved tempo word
+// marks the text vector like any measurement.
+export type GridApplyOutcome = 'applied' | 'held' | 'restored' | 'reverted' | 'none';
+
+export function applyGridToTrack(id: string, opts: { force?: boolean } = {}): GridApplyOutcome {
+  const d = requireDb();
+  return d.transaction((): GridApplyOutcome => {
+    const g = getGrid(id, d);
+    if (!g) return 'none';
+    if (g.applied === -1 && !opts.force) return 'reverted';
+    const row = d.prepare('SELECT bpm, beats_json, bars_json FROM tracks WHERE id = ?').get(id) as
+      { bpm: number | null; beats_json: string | null; bars_json: string | null } | undefined;
+    if (!row) return 'none';
+    const head = g.applied === 1
+      ? { bpm: g.headBpm, beatsJson: g.headBeatsJson, barsJson: g.headBarsJson }
+      : { bpm: row.bpm, beatsJson: row.beats_json, barsJson: row.bars_json };
+    const decision = gridDecision(g);
+    if (!decision.bpm) {
+      if (g.applied !== 1) {
+        if (g.applied === -1) setGridApplied(d, id, 0, null);
+        applyGridToOutro(d, id, g, decision);
+        return g.status === 'ok' ? 'held' : 'none';
+      }
+      d.prepare('UPDATE tracks SET bpm = ?, beats_json = ?, bars_json = ? WHERE id = ?')
+        .run(head.bpm, head.beatsJson, head.barsJson, id);
+      setGridApplied(d, id, 0, null);
+      applyGridToOutro(d, id, g, decision);
+      markTextVectorDirtyIfSoundChanged(id, ['measured']);
+      return 'restored';
+    }
+    let beatsJson = head.beatsJson;
+    let barsJson = head.barsJson;
+    if (decision.bars && g.beatsPerBar) {
+      const end = headWindowEndMs(head.beatsJson ? parseMsArray(head.beatsJson) : null, head.barsJson ? parseMsArray(head.barsJson) : null);
+      const beats = gridBeatsWithin(g.segments, end);
+      const bars = gridBarsWithin(g.segments, g.beatsPerBar, end);
+      if (beats.length && bars.length) {
+        beatsJson = JSON.stringify(beats);
+        barsJson = JSON.stringify(bars);
+      }
+    }
+    d.prepare('UPDATE tracks SET bpm = ?, beats_json = ?, bars_json = ? WHERE id = ?').run(g.bpm, beatsJson, barsJson, id);
+    setGridApplied(d, id, 1, head);
+    applyGridToOutro(d, id, g, decision);
+    markTextVectorDirtyIfSoundChanged(id, ['measured']);
+    return 'applied';
+  })();
+}
+
+// The ending's tempo, beats and bars (outro_json's bpm/beats/bars; every other
+// outro field untouched), by the same decision as the head. The tail
+// measurement's own trio is kept on the grid row with what the grid wrote over
+// it: stored values that no longer match what the grid wrote are a fresh tail
+// measurement, which becomes the kept one and is covered again. So a tail
+// re-analysis can't silently undo the grid, and a revert finds the right values.
+//   - the window: from the first kept tail beat or bar (else the outro start)
+//     to the end of the decoded file;
+//   - the tempo: the grid segment covering most of that window, so an outro
+//     that slows down keeps its own; none covering it holds the ending;
+//   - beats + bars only when the bars pass, as for the head (the tail
+//     measurement's bars were every 4th beat, with no downbeat phase).
+type OutroTrio = { bpm: number | null; beats: number[] | null; bars: number[] | null };
+const msList = (v: unknown): number[] | null =>
+  Array.isArray(v) ? v.filter((x): x is number => typeof x === 'number' && Number.isFinite(x)) : null;
+const trioOf = (o: Record<string, unknown> | null | undefined): OutroTrio => ({
+  bpm: typeof o?.bpm === 'number' && Number.isFinite(o.bpm) ? o.bpm : null,
+  beats: msList(o?.beats),
+  bars: msList(o?.bars),
+});
+const sameTrio = (a: OutroTrio, b: OutroTrio) => JSON.stringify(a) === JSON.stringify(b);
+function parseTrio(json: string | null): OutroTrio | null {
+  if (!json) return null;
+  try { return trioOf(JSON.parse(json)); } catch { return null; }
+}
+
+function gridOutroTrio(g: TrackGrid, kept: OutroTrio, startMs: number, decision: GridDecision): OutroTrio | null {
+  const from = Math.min(kept.beats?.[0] ?? Infinity, kept.bars?.[0] ?? Infinity, startMs);
+  const to = g.decodedMs ?? Math.max(...g.segments.map((s) => s.anchorMs + ((s.beats - 1) * s.periodUs) / 1000));
+  if (!Number.isFinite(from) || !(to > from)) return null;
+  const bpm = gridTempoWithin(g.segments, from, to);
+  if (bpm == null) return null;
+  let { beats, bars } = kept;
+  if (decision.bars && g.beatsPerBar) {
+    const b = gridBeatsWithin(g.segments, to, from);
+    const br = gridBarsWithin(g.segments, g.beatsPerBar, to, from);
+    if (b.length && br.length) { beats = b; bars = br; }
+  }
+  return { bpm, beats, bars };
+}
+
+function writeOutroTrio(d: ReturnType<typeof requireDb>, id: string, outro: Record<string, unknown>, t: OutroTrio): void {
+  const next: Record<string, unknown> = { ...outro };
+  for (const k of ['bpm', 'beats', 'bars'] as const) {
+    const v = t[k];
+    if (v == null || (Array.isArray(v) && !v.length)) delete next[k];
+    else next[k] = v;
+  }
+  d.prepare('UPDATE tracks SET outro_json = ? WHERE id = ?').run(JSON.stringify(next), id);
+}
+
+function applyGridToOutro(d: ReturnType<typeof requireDb>, id: string, g: TrackGrid, decision: GridDecision, revert = false): void {
+  const r = d.prepare('SELECT outro_json FROM tracks WHERE id = ?').get(id) as { outro_json: string | null } | undefined;
+  let outro: Record<string, unknown> | null = null;
+  try { outro = r?.outro_json ? JSON.parse(r.outro_json) : null; } catch { outro = null; }
+  const keptStored = parseTrio(g.headOutroJson);
+  const wrote = parseTrio(g.gridOutroJson);
+  if (!outro || typeof outro !== 'object') {
+    if (keptStored || wrote) setGridOutro(d, id, null, null);
+    return;
+  }
+  const current = trioOf(outro);
+  // Still the grid's own values: the kept trio stands; anything else is fresh.
+  const kept = keptStored && wrote && sameTrio(current, wrote) ? keptStored : current;
+  const next = !revert && decision.bpm
+    ? gridOutroTrio(g, kept, typeof outro.startMs === 'number' ? outro.startMs : Infinity, decision)
+    : null;
+  if (next) {
+    if (!sameTrio(current, next)) writeOutroTrio(d, id, outro, next);
+    setGridOutro(d, id, JSON.stringify(kept), JSON.stringify(next));
+  } else {
+    if (!sameTrio(current, kept)) writeOutroTrio(d, id, outro, kept);
+    if (keptStored || wrote) setGridOutro(d, id, null, null);
+  }
+}
+
+// `npm run grid-apply -- --reembed-moved`: the operator's Re-embed, scoped to
+// the tracks a grid moved the Sound: tempo word of. Only where the vector's own
+// words are unknown (built before text_vector_sound was stored: the
+// measurement rule above never marks those); a known one is already judged by
+// markTextVectorDirtyIfSoundChanged. "Moved" compares the measured words with
+// the head's BPM against the grid's, everything else as the row is now.
+// `dryRun` only answers whether it would mark.
+export function markGridMovedVectorIfUnknown(id: string, dryRun = false): boolean {
+  const g = getGrid(id);
+  if (!g || g.applied !== 1) return false;
+  const row = requireDb()
+    .prepare(
+      `SELECT bpm, musical_key, audio_moods, vocal_ranges_json,
+              ${SQL_TAIL_VOCAL_RANGES} AS tail_vocal_ranges_json, text_vector_sound, text_vector_dirty,
+              EXISTS (SELECT 1 FROM track_vectors v WHERE v.id = tracks.id) AS has_vector
+         FROM tracks WHERE id = ?`,
+    )
+    .get(id) as (Pick<TrackRow, 'bpm' | 'musical_key' | 'audio_moods' | 'vocal_ranges_json' | 'text_vector_sound'> & {
+      tail_vocal_ranges_json: string | null; text_vector_dirty: number | null; has_vector: number;
+    }) | undefined;
+  if (!row || !row.has_vector || row.text_vector_dirty === 1) return false;
+  if (parseVectorSound(row.text_vector_sound ?? null) != null) return false;
+  const base = {
+    musicalKey: row.musical_key,
+    audioMoods: row.audio_moods ? safeParseArray(row.audio_moods) : [],
+    ...parseVocalRangesJson(row.vocal_ranges_json),
+    ...parseTailVocalRangesJson(row.tail_vocal_ranges_json),
+  };
+  const before = soundWords({ ...base, bpm: g.headBpm }).measured;
+  const after = soundWords({ ...base, bpm: row.bpm }).measured;
+  if (sameWords(before, after)) return false;
+  return dryRun ? true : markTextVectorDirty(id);
+}
+
+// `npm run grid-apply -- --revert`: the head's own values back, and the row
+// marked reverted so no later write re-applies it.
+export function revertGridOnTrack(id: string): boolean {
+  const d = requireDb();
+  return d.transaction((): boolean => {
+    const g = getGrid(id, d);
+    if (!g || g.applied === -1) return false;
+    if (g.applied === 1) {
+      d.prepare('UPDATE tracks SET bpm = ?, beats_json = ?, bars_json = ? WHERE id = ?')
+        .run(g.headBpm, g.headBeatsJson, g.headBarsJson, id);
+    }
+    applyGridToOutro(d, id, g, gridDecision(g), true);
+    setGridApplied(d, id, -1, null);
+    if (g.applied === 1) markTextVectorDirtyIfSoundChanged(id, ['measured']);
+    return g.applied === 1;
   })();
 }
 
@@ -1590,6 +1811,10 @@ export function clearAnalysis(opts: { keepVocal?: boolean; clearStems?: boolean 
   // CLAP vectors are written in the same pass, and the audio moods and
   // descriptors cleared above are derived from them.
   d.prepare('DELETE FROM track_audio_vectors').run();
+  // bpm/beats/bars are cleared above, the grid's included: the kept head
+  // values describe an analysis being redone. The re-analysis's head write
+  // applies the grid again.
+  forgetGridHead(d);
   clearFacetRows(opts);
   })();
 }

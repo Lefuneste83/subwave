@@ -341,6 +341,7 @@ services:
         # Local build mirrors the pulled image: lean unless ANALYZER_HEAVY set.
         WITH_CLAP: \${ANALYZER_HEAVY:+1}
         WITH_DEMUCS: \${ANALYZER_HEAVY:+1}
+        WITH_BEAT_GRID: \${ANALYZER_HEAVY:+1}
     container_name: sub-wave-analyzer
     # 0 = don't create this container at all (see the off switch above).
     # 0 and 1 are the ONLY valid values: container_name is fixed above, and
@@ -702,6 +703,7 @@ services:
         # Local build mirrors the pulled image: lean unless ANALYZER_HEAVY set.
         WITH_CLAP: \${ANALYZER_HEAVY:+1}
         WITH_DEMUCS: \${ANALYZER_HEAVY:+1}
+        WITH_BEAT_GRID: \${ANALYZER_HEAVY:+1}
     container_name: sub-wave-analyzer
     # 0 = don't create this container at all (see the off switch above).
     # 0 and 1 are the ONLY valid values: container_name is fixed above, and
@@ -1000,6 +1002,7 @@ services:
         # Local build mirrors the pulled image: lean unless ANALYZER_HEAVY set.
         WITH_CLAP: \${ANALYZER_HEAVY:+1}
         WITH_DEMUCS: \${ANALYZER_HEAVY:+1}
+        WITH_BEAT_GRID: \${ANALYZER_HEAVY:+1}
     container_name: sub-wave-analyzer
     # 0 = don't create this container at all (see the off switch above).
     # 0 and 1 are the ONLY valid values: container_name is fixed above, and
@@ -1121,6 +1124,7 @@ services:
       args:
         WITH_CLAP: 1
         WITH_DEMUCS: 1
+        WITH_BEAT_GRID: 1
         WITH_CUDA: 1
     # The deploy.resources reservation is the modern (CDI) path. On hosts where
     # the NVIDIA runtime is registered in LEGACY mode it fails with "could not

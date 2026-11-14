@@ -16,6 +16,7 @@ import {
 // re-attempted forever (#1300).
 import { analysisFailureExclusion, forgetVectorSoundIfMoved, markTextVectorDirtyIfSoundChanged } from './tracks.js';
 import { deleteFacetRows } from './facets.js';
+import { deleteGridRow } from './grid.js';
 import { touchGenreInputs } from './genre-inputs.js';
 
 // Phase one of a calibrated pass: raw cosines only, since the per-mood
@@ -226,6 +227,7 @@ export function pruneMissingTracks(liveIds: ReadonlySet<string>): number {
       delVec.run(id);
       delAudioVec.run(id);
       deleteFacetRows(id);
+      deleteGridRow(d, id);
     }
     touchGenreInputs(d);
   });
