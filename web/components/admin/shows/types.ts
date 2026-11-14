@@ -1,4 +1,5 @@
 
+import type { HotMixConfig } from '@/lib/schemas.generated';
 import {
   ALBUM_KINDS,
   ALBUM_KIND_LABELS,
@@ -93,6 +94,10 @@ export interface Show {
   excludeExplicit: boolean;
   /** Album kinds (Library → Era) never played on this show, e.g. 'dj-mix'. */
   excludedAlbumKinds: string[];
+  /** DJ Hot Mix: consecutive picks stay within `maxStepPct` of each other's
+   *  tempo, steered along the optional curve; requests close unless
+   *  `closeRequests` is off. Off = the show picks as it always did. */
+  hotMix: HotMixConfig;
   /** The show airs as a produced episode: intro, feature segment, sign-off. */
   programme: boolean;
   /** Pin the feature segment to one skill. Empty = producer picks per episode.

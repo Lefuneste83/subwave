@@ -180,3 +180,45 @@ export function nextShowBoundaryMs(fromMs: number, horizonSec: number): number |
     extra: ov ? [Number(ov.startedAt), Number(ov.expiresAt)] : [],
   });
 }
+
+// How far back a show run is looked for. A show longer than this has no known
+// start, so it has no position: the curve then simply does not steer.
+export const SHOW_SPAN_MAX_HORIZON_SEC = 12 * 3600;
+
+/** The previous show change at or before `atMs`, within `horizonSec`: the instant
+ *  the show on air at `atMs` began. Pure over its inputs, like nextShowChangeMs. */
+export function prevShowChangeMs(input: {
+  atMs: number;
+  horizonMs: number;
+  keyAt: (ms: number) => string;
+  minuteAt: (ms: number) => number;
+  extra?: number[];
+}): number | null {
+  const { atMs, horizonMs, keyAt, minuteAt } = input;
+  if (!Number.isFinite(atMs) || !(horizonMs > 0)) return null;
+  const key = keyAt(atMs);
+  const fromMs = atMs - horizonMs;
+  const candidates = [
+    ...stationHourBoundaries(fromMs, atMs, minuteAt),
+    ...(input.extra ?? []).filter((ms) => Number.isFinite(ms) && ms > fromMs && ms <= atMs),
+  ].sort((a, b) => b - a);
+  for (const c of candidates) {
+    if (keyAt(c - 1) !== key) return c;
+  }
+  return null;
+}
+
+/** Where `atMs` sits in the run of the show on air then, 0 at its start and 1 at
+ *  its end, or null when either end is unknown (no show, or a run longer than
+ *  the horizon). Read by the Hot Mix curve (music/hot-mix-policy.ts). */
+export function showRunPosition(atMs: number): number | null {
+  if (!Number.isFinite(atMs) || showKeyAt(atMs) === 'default') return null;
+  const ov = settings.get()?.scheduleOverride;
+  const extra = ov ? [Number(ov.startedAt), Number(ov.expiresAt)] : [];
+  const minuteAt = (ms: number) => zonedParts(new Date(ms)).minute;
+  const horizonMs = SHOW_SPAN_MAX_HORIZON_SEC * 1000;
+  const start = prevShowChangeMs({ atMs, horizonMs, keyAt: showKeyAt, minuteAt, extra });
+  const end = nextShowChangeMs({ fromMs: atMs, horizonMs, keyAt: showKeyAt, minuteAt, extra });
+  if (start == null || end == null || end <= start) return null;
+  return Math.min(1, Math.max(0, (atMs - start) / (end - start)));
+}

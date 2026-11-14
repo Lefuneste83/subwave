@@ -22,6 +22,8 @@ import { applyTrackFloor } from './track-floor.js';
 import { AIRING_RANK_WEIGHT, freshness, freshnessBiasedOrder, lastAiredMsOf, unairedFlag, type AiredIndex } from './airing.js';
 import { normGenre, genreMatches, genreResolutionWarningOnce, preferGenre, preferEra, inYearRange, preferEnergy, preferEnergyStrict, preferMood, preferVocals, applyStrictLocks, hasEraBound, eraSpan, type YearRange, type VocalMode } from './show-filter.js';
 import { explicitGate } from './explicit-policy.js';
+import { describeTempoWindow, hotMixOf, nearestTempoFallback, tempoWindowFor, type TempoWindow } from './hot-mix-policy.js';
+import { showRunPosition } from '../broadcast/show-boundary.js';
 import { resolveShowPlaylistPool, resolveExcludedPlaylistIds, type PlaylistPool } from './show-playlist.js';
 import { allowsMoodPlaylistDiscovery } from './discovery-policy.js';
 import { episodeUnderSteer, openingArtistSpan, spaceOpeningList, steeredShow } from './steer.js';
@@ -172,7 +174,7 @@ function softRankByCompat(pool: Candidate[], current: { bpm: number | null; key:
 // Show music-steering filters, never-starve by default; `strict`
 // (show.filtersStrict) filters discovery sources too. Lists are OR within an
 // attribute, AND across them (#929); empty list = no constraint.
-type ShowFilter = { moods: string[]; genres: string[]; eras: YearRange[]; energies: string[]; vocals: VocalMode; strict?: boolean; excludeExplicit?: boolean } | null;
+type ShowFilter = { moods: string[]; genres: string[]; eras: YearRange[]; energies: string[]; vocals: VocalMode; strict?: boolean; excludeExplicit?: boolean; tempoWindow?: TempoWindow | null } | null;
 export type StrictGenreResolution = { genres: string[]; warnings: string[] };
 
 // Exported for the in-order walk (music/playlist-order-next.ts), which needs the
@@ -568,7 +570,22 @@ async function buildCandidates(mood: string | null | undefined, recentIds: Set<s
   // Minimum track length (#1573) — a SELECTION filter, unlike the max cap's
   // cue_out cut. never-starve here: the wider scope behind the agent's hard floor.
   const longEnough = applyTrackFloor(applyKnownTrackCeiling(selectionPool, maxTrackSec), minTrackSec, { starve: false });
-  const final = filterPickerCandidates(softRankByCompat(longEnough, curAnalysis, library.lastAiredInfo()), {
+  // Hot Mix: the window, or never-starve to the nearest tempos (compatible key
+  // first among near-equals). This is the wider scope behind the agent's hard
+  // window, so it keeps the music going rather than leaving the slot empty.
+  const tempoWindow = showFilter?.tempoWindow ?? null;
+  let mixable = longEnough;
+  let tempoRelaxed = false;
+  if (tempoWindow) {
+    const anchorKey = currentTrack?.id ? (analysisFor(currentTrack).keyEnd ?? analysisFor(currentTrack).key) : null;
+    const fit = nearestTempoFallback(longEnough, tempoWindow, (t) => {
+      const a = analysisFor(t);
+      return { bpm: a.bpm, key: a.keyStart ?? a.key };
+    }, anchorKey);
+    mixable = fit.tracks;
+    tempoRelaxed = fit.relaxed && longEnough.length > 0;
+  }
+  const final = filterPickerCandidates(softRankByCompat(mixable, curAnalysis, library.lastAiredInfo()), {
     recentIds,
     recentKeys,
     recentArtistRoots,
@@ -607,7 +624,7 @@ async function buildCandidates(mood: string | null | undefined, recentIds: Set<s
     };
   }
 
-  return { candidates: final, sources, strictInfo, playlistInfo, explicitHeld: clean.held().length };
+  return { candidates: final, sources, strictInfo, playlistInfo, explicitHeld: clean.held().length, tempoRelaxed };
 }
 
 // The on-air track and the last HISTORY_DEPTH plays, most recent first, with
@@ -642,6 +659,18 @@ function slimAlbum(album: string | null | undefined, title: string | null | unde
 // Build a candidate pool, ask the LLM to choose one; null when it can't.
 // Guard-rescue artist exclusions (#1187) hold through the whole starvation
 // cascade. Preserve the anchor as well as the rejected credit.
+// The Hot Mix window for a pool pick, or null when the show is not mixed. The
+// position scan runs only for a show that draws a curve.
+function hotMixWindow(show: any, anchor: any, at: Date): TempoWindow | null {
+  const hm = hotMixOf(show);
+  if (!hm) return null;
+  return tempoWindowFor(
+    show,
+    anchor?.id || anchor?.bpm ? analysisFor(anchor).bpm : null,
+    hm.curve.length ? showRunPosition(at.getTime()) : null,
+  );
+}
+
 export async function pickViaPool(queue, ctx, rankTarget: { bpm: number | null; key: string | null } | null = null, audioWaypoint: number[] | null = null, opts: { avoidArtist?: string | null; avoidAnchorArtist?: string | null; preview?: { steer: Steer; count: number; episode?: boolean; startNow?: boolean } } = {}): Promise<any> {
   await library.load();
   // A preview works out a steer's opening tracks without airing anything: it
@@ -689,6 +718,9 @@ export async function pickViaPool(queue, ctx, rankTarget: { bpm: number | null; 
         vocals: (activeShow.vocals ?? '') as VocalMode,
         strict: activeShow.filtersStrict,
         excludeExplicit: activeShow.excludeExplicit,
+        // Hot Mix: measured from the predecessor this pick follows, steered by
+        // the curve at the pick's air time (music/hot-mix-policy.ts).
+        tempoWindow: hotMixWindow(activeShow, currentTrack, pickAt),
       }
     : null;
   const playlistPool = activeShow ? await resolveShowPlaylistPool(activeShow) : null;
@@ -735,7 +767,12 @@ export async function pickViaPool(queue, ctx, rankTarget: { bpm: number | null; 
     const key = artistRootKey({ artist });
     if (key) blockedArtists.add(key);
   }
-  const { candidates: rawCandidates, sources, strictInfo, playlistInfo, explicitHeld } = await buildCandidates(ctx.dominantMood, recentIds, recentKeys, recentArtistRoots, recentAlbums, currentTrack, rankTarget, audioWaypoint, showFilter, hardRecentIds, hardRecentKeys, playlistPool, playlistStrict, blockedArtists, strictGenreResolution, { minTrackSec, maxTrackSec }, noRepeat.exhaustive, excludedIds, episodeSource, !!activeShow?.playlistIds?.length);
+  const { candidates: rawCandidates, sources, strictInfo, playlistInfo, explicitHeld, tempoRelaxed } = await buildCandidates(ctx.dominantMood, recentIds, recentKeys, recentArtistRoots, recentAlbums, currentTrack, rankTarget, audioWaypoint, showFilter, hardRecentIds, hardRecentKeys, playlistPool, playlistStrict, blockedArtists, strictGenreResolution, { minTrackSec, maxTrackSec }, noRepeat.exhaustive, excludedIds, episodeSource, !!activeShow?.playlistIds?.length);
+  if (showFilter?.tempoWindow && !preview) {
+    queue.log('picker', tempoRelaxed
+      ? `Hot Mix "${activeShow?.name}": nothing inside ${describeTempoWindow(showFilter.tempoWindow)} — taking the nearest tempos, compatible key first`
+      : `Hot Mix "${activeShow?.name}": tempo window ${describeTempoWindow(showFilter.tempoWindow)}`);
+  }
 
   // Excluded playlists: hard drop, no never-starve fallback.
   const candidates = excludedIds

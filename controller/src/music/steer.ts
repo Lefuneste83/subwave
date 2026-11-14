@@ -38,6 +38,10 @@ export function steeredShow<T extends Record<string, any>>(show: T | null | unde
     energies: [],
     vocals: '',
     filtersStrict: false,
+    // The steered playlist is the operator's own choice, so the Hot Mix tempo
+    // window stands aside like the music filters above. Requests still follow
+    // the show on air (routes/request.ts reads resolveActiveShow).
+    hotMix: null,
   };
 }
 

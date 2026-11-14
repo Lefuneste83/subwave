@@ -8,6 +8,7 @@ const SECTIONS = [
   { id: 'episode', label: 'Episode', hint: 'Brief, preparation and speech' },
   { id: 'music', label: 'Music', hint: 'Mood, genre and era' },
   { id: 'playlists', label: 'Playlists', hint: 'Sources and exclusions' },
+  { id: 'hotmix', label: 'Hot Mix', hint: 'Tempo steps and requests' },
   { id: 'timing', label: 'Timing', hint: 'Track lengths and handoff' },
   { id: 'appearance', label: 'Appearance', hint: 'The player on air' },
 ] as const;

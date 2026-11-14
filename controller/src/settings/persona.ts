@@ -18,6 +18,7 @@ import {
   personaToneDirectives,
   takeoverShowId,
 } from './vocab.js';
+import { repairHotMix } from '../schemas/show.js';
 import { steerActiveAt, type Steer } from '../schemas/steer.js';
 import { steeredShow } from '../music/steer.js';
 import { DEFAULTS, coerceMaxTrackSeconds, coerceMinTrackLengthSeconds } from './defaults.js';
@@ -302,6 +303,10 @@ function resolveShowShape(show, s) {
     // same resolveExcludedPlaylistIds, so omitting it here would be the #779
     // no-op on every pick path.
     excludedAlbumKinds: Array.isArray(show.excludedAlbumKinds) ? show.excludedAlbumKinds.filter((v: unknown) => typeof v === 'string') : [],
+    // DJ Hot Mix: read off the RESOLVED show by music/hot-mix-policy.ts on every
+    // pick path and by the request route, so a missing line here is the #779
+    // no-op again. Repaired, never trusted: malformed reads as off.
+    hotMix: repairHotMix(show.hotMix),
     // Empty string means "fall back to the station-wide default". The route
     // layer is responsible for resolving an empty/stale id against the live
     // theme registry; we just surface what the show declares.

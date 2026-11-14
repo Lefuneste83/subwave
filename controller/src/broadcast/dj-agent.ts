@@ -19,6 +19,8 @@ import { withTrace, logEvent, timePhase } from '../observability/events.js';
 import { artistRootKey, recencyWindowsForLibrary, type CandidateLike } from '../music/recency.js';
 import { hardRecentFor, showNoRepeatGuard, strictShowLibraryPool } from '../music/show-recency.js';
 import { excludesExplicit } from '../music/explicit-policy.js';
+import { describeTempoWindow, hotMixOf, tempoWindowFor } from '../music/hot-mix-policy.js';
+import { showRunPosition } from './show-boundary.js';
 import { isInOrderShow } from '../music/playlist-order.js';
 import { commitInOrderPick, resolveInOrderNext } from '../music/playlist-order-next.js';
 import { EXPLORE_SEED_PROBABILITY } from '../music/airing.js';
@@ -279,7 +281,9 @@ async function steerAwayCandidates<T>(
 // Build the exact discovery scope used by a live next-track pick. Diagnostics
 // call this too, so a tool run sees the same recency, show and playlist policy
 // as the DJ rather than a convenient-but-different approximation.
-export async function livePickerScope(queue: any, { audioWaypoint = null, showAt = null, context = null }: { audioWaypoint?: number[] | null; showAt?: Date | null; context?: any } = {}) {
+// `pickAnchor` is the track this pick follows, the one a Hot Mix tempo step is
+// measured from; absent, the track on air.
+export async function livePickerScope(queue: any, { audioWaypoint = null, showAt = null, context = null, pickAnchor }: { audioWaypoint?: number[] | null; showAt?: Date | null; context?: any; pickAnchor?: any } = {}) {
   const preparedContext = context ? await prepareEpisodeContext(context) : null;
   // A steered playlist sets the prepared episode aside, with its brief.
   const { episodeSource, context: pickContext } = preparedContext
@@ -406,6 +410,19 @@ export async function livePickerScope(queue: any, { audioWaypoint = null, showAt
     queue.log('picker', `show "${activeShow.name}" pins ${activeShow.playlistIds.length} playlist(s) but none resolved to tracks — anchor ignored${activeShow.playlistStrict ? ' (STRICT toggle has no effect)' : ''}. Stale playlist id (deleted/recreated in Navidrome?) or a Navidrome error; re-select the playlists in the show editor.`);
   }
 
+  // DJ Hot Mix: the tempo window around the track this pick follows, steered by
+  // the show's curve at the pick's own air time. The position scan runs only
+  // for a show that draws a curve.
+  const hotMix = hotMixOf(activeShow);
+  const anchorTrack = pickAnchor !== undefined ? pickAnchor : (queue.current?.track ?? null);
+  const tempoWindow = hotMix
+    ? tempoWindowFor(
+      activeShow,
+      anchorTrack ? library.bpmKeyFor(anchorTrack).bpm : null,
+      hotMix.curve.length ? showRunPosition((showAt ?? new Date()).getTime()) : null,
+    )
+    : null;
+
   // Listener favourites (#991): the same opt-in list the Agentic pick event
   // names, resolved once so the tool, the Shortlist plan and its selection
   // context all read one snapshot.
@@ -440,6 +457,8 @@ export async function livePickerScope(queue: any, { audioWaypoint = null, showAt
     maxTrackSec,
     // A clean show. Like the floor, not gated on `strict`.
     excludeExplicit: excludesExplicit(activeShow),
+    // Hot Mix. Like the clean show, not gated on `strict`.
+    tempoWindow,
     playlistLock,
     playlistTracks,
     // A strict playlist or a prepared episode already names its own source.
@@ -579,7 +598,8 @@ export function shouldExplore({ inRun, audioWaypoint, strictPlaylist }: {
 // the caller counts a breaker failure even though a track was queued.
 async function pickViaSelectionRoute(queue, ctx, { wantLink, audioWaypoint = null, pickAnchor = null, predecessor, showAt = null, rankTarget = null, editorialLeanings, explore = false, health = { modelFailed: false } }: { wantLink: boolean; audioWaypoint?: number[] | null; pickAnchor?: any; predecessor?: ReturnType<typeof predecessorContext>; showAt?: Date | null; rankTarget?: { bpm: number | null; key: string | null } | null; editorialLeanings: EditorialLeaningsContext; explore?: boolean; health?: { modelFailed: boolean } }): Promise<boolean> {
   const pickStarted = performance.now();
-  const { scope, playlistTracks, activeShow, episodeSource, context: pickContext } = await livePickerScope(queue, { audioWaypoint, showAt, context: ctx });
+  const { scope, playlistTracks, activeShow, episodeSource, context: pickContext } = await livePickerScope(queue, { audioWaypoint, showAt, context: ctx, pickAnchor });
+  if (scope.tempoWindow) queue.log('picker', `Hot Mix "${activeShow?.name}": tempo window ${describeTempoWindow(scope.tempoWindow)}`);
   // livePickerScope prepared the episode context (#1802). Every later use in
   // this pick, the link writer and the pool rescue included, must see that
   // prepared copy, not the raw one this function was handed.

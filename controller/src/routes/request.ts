@@ -32,6 +32,7 @@ import { requestWaitClause } from '../broadcast/queue/pure.js';
 import { matchedRequestLookups, matchedRequestStandIn } from '../util/request-claim.js';
 import { ARTIST_VARIETY_WINDOW, drawRequestCandidate } from '../broadcast/dj-agent/artist-guard.js';
 import { heldBackFromShow } from '../music/explicit-policy.js';
+import { takesRequests } from '../music/hot-mix-policy.js';
 
 export const router = express.Router();
 
@@ -648,6 +649,13 @@ router.post('/request', validatePublicBody(listenerRequestSchema), async (req, r
   const cfg = (settings.get() as any)?.requests || {};
   if (REQUESTS_DISABLED || cfg.enabled === false) {
     return res.status(503).json({ success: false, message: 'Requests are temporarily closed.' });
+  }
+  // A DJ Hot Mix show closes requests unless its operator opened them
+  // (music/hot-mix-policy.ts). Judged on the show on air now, like the clean
+  // show's hold below; the operator's own pushes never come through here.
+  const onAir = settings.resolveActiveShow();
+  if (!takesRequests(onAir)) {
+    return res.status(503).json({ success: false, message: `Requests are closed during ${onAir?.name || 'this show'}: it's a continuous mix.` });
   }
 
   // Zero-listener pause.

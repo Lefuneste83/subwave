@@ -18,7 +18,7 @@ import { useAdminAuth } from '../../lib/adminAuth';
 import { notify, errorMessage } from '../../lib/notify';
 import { AdminResponseError, adminJson, useAdminMutation } from '../../lib/admin-query';
 import { useZodForm, applyServerFieldErrors } from '@/lib/form';
-import { showSchema, type ShowSchemaContext } from '@/lib/schemas.generated';
+import { HOT_MIX_STEP_PCT_DEFAULT, showSchema, type ShowSchemaContext } from '@/lib/schemas.generated';
 import { Button } from '../ui/button';
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '../ui/select';
 import { Card, Btn, Pill, Eyebrow, Metric } from './ui';
@@ -281,6 +281,7 @@ export default function ShowsPanel() {
       fadeAtShowEnd: null,
       playlistIds: [], playlistStrict: false, playlistExhaust: false, playlistInOrder: false, excludedPlaylistIds: [], excludedAlbumKinds: [],
       excludeExplicit: false,
+      hotMix: { enabled: false, maxStepPct: HOT_MIX_STEP_PCT_DEFAULT, curve: [], closeRequests: true },
       programme: false, segmentSkill: '', preparationSkill: '', tags: [],
     });
     // errors populate only once a field is touched, so without this the new

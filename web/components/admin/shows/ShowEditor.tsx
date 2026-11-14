@@ -49,6 +49,7 @@ import {
 import type { EraWindow, Persona, PlaylistIndexStatus, Show, ShowsFormValues, SkillOption, ThemeOption } from './types';
 import { hasAnyMusicFilter, showPayload } from './lib';
 import { ChipRow } from './ChipRow';
+import { HotMixFields } from './HotMixFields';
 import { PlaylistPosition } from './PlaylistPosition';
 import { displayedMatchingTracks, type CandidateDiagnostic } from './candidate-diagnostic';
 import { fetchShowCandidates, useShowBlocklistQuery } from './queries';
@@ -66,6 +67,7 @@ const FIELD_LABELS: Record<string, string> = {
   playlistIds: 'playlists',
   excludedPlaylistIds: 'excluded playlists',
   excludedAlbumKinds: 'album kinds left out',
+  hotMix: 'Hot Mix',
 };
 
 // Some rules root on an ARRAY field (`eras.0.fromYear`), so walk down to the
@@ -957,6 +959,14 @@ export function ShowEditor({
               .
             </span>
           )}
+        </ShowEditorSection>
+
+        <ShowEditorSection
+          section="hotmix"
+          title="Hot Mix"
+          description="Mix the show like a DJ set: tempo steps between tracks, a tempo curve, and requests."
+        >
+          <HotMixFields control={control} index={index} />
         </ShowEditorSection>
 
         <ShowEditorSection

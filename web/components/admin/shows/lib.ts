@@ -4,7 +4,9 @@ import { SHOW_COLORS } from '../schedule/lib';
 import { eraLabelOf } from './types';
 import type { Persona, Schedule, Show } from './types';
 import {
+  HOT_MIX_STEP_PCT_DEFAULT,
   migrateLegacyShowFields,
+  repairHotMix,
   type ShowSchemaContext,
 } from '@/lib/schemas.generated';
 
@@ -46,6 +48,9 @@ export function hydrateShow(s: Partial<Show>): Show {
     excludedPlaylistIds: Array.isArray(m.excludedPlaylistIds) ? m.excludedPlaylistIds : [],
     excludeExplicit: m.excludeExplicit ?? false,
     excludedAlbumKinds: Array.isArray(m.excludedAlbumKinds) ? m.excludedAlbumKinds : [],
+    // The controller's own load repair, so the editor reads a saved show exactly
+    // as the pick paths do: malformed is off, a bad point is dropped.
+    hotMix: repairHotMix(m.hotMix),
     programme: m.programme ?? false,
     segmentSkill: m.segmentSkill ?? '',
     preparationSkill: m.preparationSkill ?? '',
@@ -127,6 +132,14 @@ export function showPayload(s: Show) {
     // No conditional: unlike Strict it needs no other filter to act on.
     excludeExplicit: s.excludeExplicit === true,
     excludedAlbumKinds: s.excludedAlbumKinds || [],
+    // The whole block rides through even when off, so turning the switch back
+    // on finds the step and curve the operator set before.
+    hotMix: {
+      enabled: s.hotMix?.enabled === true,
+      maxStepPct: s.hotMix?.maxStepPct ?? HOT_MIX_STEP_PCT_DEFAULT,
+      curve: [...(s.hotMix?.curve ?? [])].sort((a, b) => a.at - b.at),
+      closeRequests: s.hotMix?.closeRequests !== false,
+    },
     programme: s.programme ?? false,
     // A skill pin only means something in programme mode.
     segmentSkill: s.programme ? (s.segmentSkill || '') : '',
@@ -162,6 +175,7 @@ export function showFacets(s: Show): ShowFacet[] {
   const nEx = s.excludedPlaylistIds?.length ?? 0;
   if (nEx) facets.push({ key: 'excluded', label: `${nEx} excluded` });
   if (s.excludeExplicit) facets.push({ key: 'clean', label: 'clean', accent: true });
+  if (s.hotMix?.enabled) facets.push({ key: 'hot-mix', label: `hot mix ±${s.hotMix.maxStepPct}%${s.hotMix.curve.length ? ' · curve' : ''}${s.hotMix.closeRequests ? ' · no requests' : ''}`, accent: true });
   const nKinds = s.excludedAlbumKinds?.length ?? 0;
   if (nKinds) facets.push({ key: 'excluded-kinds', label: nKinds === 1 && s.excludedAlbumKinds[0] === 'dj-mix' ? 'no DJ mixes' : `${nKinds} album kind${nKinds > 1 ? 's' : ''} left out` });
   if (s.maxTrackSeconds != null) {

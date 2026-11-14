@@ -4673,6 +4673,22 @@ export const SHOW_MIN_TRACK_LENGTH_MAX = 3600;
 export const SHOW_ENERGY = ['low', 'medium', 'high'] as const;
 export const SHOW_VOCALS = ['instrumental', 'vocal'] as const;
 
+// DJ Hot Mix (music/hot-mix-policy.ts owns what the switch does). The step is
+// the widest tempo gap, in %, between two consecutive tracks of the show; the
+// default is the rendered blend's stretch window. The curve is a few
+// (position %, BPM) points over the show's running time.
+export const HOT_MIX_STEP_PCT_DEFAULT = 6;
+export const HOT_MIX_STEP_PCT_MIN = 1;
+export const HOT_MIX_STEP_PCT_MAX = 20;
+export const HOT_MIX_CURVE_POINTS_MAX = 8;
+export const HOT_MIX_BPM_MIN = 40;
+export const HOT_MIX_BPM_MAX = 220;
+export type HotMixCurvePoint = { at: number; bpm: number };
+// `closeRequests` is the show's own toggle, on by default: an ask is a tempo jump
+// or an unmixable pair by nature, so a mixed show starts closed and the operator
+// may open it.
+export type HotMixConfig = { enabled: boolean; maxStepPct: number; curve: HotMixCurvePoint[]; closeRequests: boolean };
+
 // What an era-suspect album IS, set (or confirmed) by the operator in Library →
 // Era and pre-filled from the title (music/album-kind.ts). Declared here, not
 // there, because a show can leave out whole kinds (`excludedAlbumKinds`) and
@@ -4857,6 +4873,57 @@ const showTags = z
     }
   })
   .transform((toks) => [...new Set(toks)]);
+
+// A number field the editor may send as a numeric string (<input type=number>).
+const numberLike = (v: unknown) => (typeof v === 'string' && v.trim() !== '' ? Number(v) : v);
+
+// Curve points: ordered by position, one per position. A point outside the
+// bounds is REFUSED on save, like any other typed value; the load twin
+// (repairHotMix) drops it instead.
+const hotMixCurve = z.preprocess(
+  nullToUndefined,
+  z
+    .array(z.object({
+      at: z.preprocess(numberLike, z.number({ error: 'curve position must be a number' })
+        .min(0, 'curve position must be between 0 and 100 %').max(100, 'curve position must be between 0 and 100 %')),
+      bpm: z.preprocess(numberLike, z.number({ error: 'curve tempo must be a number' })
+        .min(HOT_MIX_BPM_MIN, `curve tempo must be between ${HOT_MIX_BPM_MIN} and ${HOT_MIX_BPM_MAX} BPM`)
+        .max(HOT_MIX_BPM_MAX, `curve tempo must be between ${HOT_MIX_BPM_MIN} and ${HOT_MIX_BPM_MAX} BPM`)),
+    }))
+    .max(HOT_MIX_CURVE_POINTS_MAX, `must have at most ${HOT_MIX_CURVE_POINTS_MAX} curve points`)
+    .default([])
+    .transform(orderCurve),
+);
+
+function orderCurve(points: HotMixCurvePoint[]): HotMixCurvePoint[] {
+  const byAt = new Map<number, number>();
+  for (const p of points) byAt.set(p.at, p.bpm);
+  return [...byAt.entries()].sort((a, b) => a[0] - b[0]).map(([at, bpm]) => ({ at, bpm }));
+}
+
+const HOT_MIX_OFF: HotMixConfig = { enabled: false, maxStepPct: HOT_MIX_STEP_PCT_DEFAULT, curve: [], closeRequests: true };
+
+// Absent is off with the defaults, so a show saved before the field reads as it
+// always did.
+const hotMixField = z.preprocess(
+  nullToUndefined,
+  z
+    .object({
+      enabled: showBool(),
+      maxStepPct: z.preprocess(
+        (v) => numberLike(nullToUndefined(v)),
+        z.number({ error: 'step must be a number' })
+          .min(HOT_MIX_STEP_PCT_MIN, `step must be between ${HOT_MIX_STEP_PCT_MIN} and ${HOT_MIX_STEP_PCT_MAX} %`)
+          .max(HOT_MIX_STEP_PCT_MAX, `step must be between ${HOT_MIX_STEP_PCT_MIN} and ${HOT_MIX_STEP_PCT_MAX} %`)
+          .default(HOT_MIX_STEP_PCT_DEFAULT),
+      ),
+      curve: hotMixCurve,
+      // Tri-state on the wire, boolean once parsed: absent reads as the default
+      // (closed), only an explicit false opens requests.
+      closeRequests: z.unknown().optional().transform((v) => v !== false),
+    })
+    .default(() => ({ ...HOT_MIX_OFF, curve: [] })),
+);
 
 export function showSchema(ctx: ShowSchemaContext) {
   // Migration must run BEFORE the object parse: z.object strips unknown keys, so
@@ -5069,6 +5136,10 @@ function showObjectSchema(ctx: ShowSchemaContext) {
       // a tag is typed by hand and must not vanish on save. The load twin
       // (repairShowTags) drops instead.
       tags: showTags,
+      // DJ Hot Mix: tempo-stepped picks and no listener requests (music/
+      // hot-mix-policy.ts). After tags, so the persisted key order before it is
+      // unchanged.
+      hotMix: hotMixField,
     })
     // Needs two fields at once, so it cannot live on guestPersonaIds.
     .check((c) => {
@@ -5162,6 +5233,33 @@ export function repairShowTags(raw: unknown): string[] | undefined {
   return out;
 }
 
+/** The Hot Mix block, repaired: anything malformed reads as off, an
+ *  out-of-bounds step as the default, and an invalid curve point is dropped.
+ *  Also how the pick paths read a resolved show (music/hot-mix-policy.ts), so
+ *  the two can never disagree about what a saved show means. */
+export function repairHotMix(raw: unknown): HotMixConfig {
+  if (!raw || typeof raw !== 'object') return { ...HOT_MIX_OFF, curve: [] };
+  const rec = raw as { enabled?: unknown; maxStepPct?: unknown; curve?: unknown; closeRequests?: unknown };
+  const step = Number(numberLike(rec.maxStepPct));
+  const points: HotMixCurvePoint[] = [];
+  if (Array.isArray(rec.curve)) {
+    for (const p of rec.curve) {
+      const at = Number(numberLike((p as { at?: unknown })?.at));
+      const bpm = Number(numberLike((p as { bpm?: unknown })?.bpm));
+      if (!Number.isFinite(at) || at < 0 || at > 100) continue;
+      if (!Number.isFinite(bpm) || bpm < HOT_MIX_BPM_MIN || bpm > HOT_MIX_BPM_MAX) continue;
+      points.push({ at, bpm });
+    }
+  }
+  return {
+    enabled: rec.enabled === true,
+    maxStepPct: rec.maxStepPct != null && Number.isFinite(step) && step >= HOT_MIX_STEP_PCT_MIN && step <= HOT_MIX_STEP_PCT_MAX
+      ? step : HOT_MIX_STEP_PCT_DEFAULT,
+    curve: orderCurve(points).slice(0, HOT_MIX_CURVE_POINTS_MAX),
+    closeRequests: rec.closeRequests !== false,
+  };
+}
+
 /**
  * Every per-field repair the load path applies before parsing. `undefined` lets
  * the schema's own default apply; each repair lands on a value the strict path
@@ -5230,6 +5328,8 @@ export function repairShowForLoad(
     excludedPlaylistIds: repairShowStringList(raw.excludedPlaylistIds, {
       max: EXCLUDED_PLAYLISTS_PER_SHOW,
     }),
+    // Absent stays absent, so the schema's default (off) applies.
+    hotMix: raw.hotMix == null ? undefined : repairHotMix(raw.hotMix),
   };
 }
 

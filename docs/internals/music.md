@@ -9,7 +9,7 @@ Covers: Subsonic ingest, multi-value genres, scene consolidation, era-year
 resolution, the similarity/embedding text, audio-mood calibration and propagated
 energy, LLM provider wiring, the tagging stamp, library coverage, the
 artist-variety guard, the album cooldown, full playlist rotation, minimum
-track length, clean shows, seed-vs-pick,
+track length, clean shows, DJ Hot Mix, seed-vs-pick,
 dead-air trim, festivals, listener request hardening, likes, and the blocklist
 rules.
 
@@ -1028,6 +1028,20 @@ S−1 held identities counting the on-air and queued tracks, so one always survi
 and the guard cannot empty an episode; the never-starve fallback is unchanged.
 The coast does not take the episode's rotation (`scheduler.ts` asks the guard only
 without an episode), since its coast is the episode source itself.
+
+## DJ Hot Mix (per show)
+
+`show.hotMix` mixes a show like a DJ set. Off (absent, malformed, or `enabled` not `true`) is the show as it always picked, so an upgrade is byte-identical; the block is `{ enabled, maxStepPct, curve, closeRequests }`, its limits and lenient repair (`repairHotMix`) live in `schemas/show.ts`, and every decision is `music/hot-mix-policy.ts`. Step 1 of the feature: it decides WHAT plays next. How the transition is played (Liquidsoap time-stretch, exit/entry points, per-transition filter recipes) is later work.
+
+- **The step.** A pick may move at most `maxStepPct` (default 6, the blend stretch window; 1–20) from the tempo of the track it follows, **octave-safe**: the candidate is moved by whole octaves to the side of the anchor first, so 64 sits next to 128 and 70 reads as 140, 9 % from 128, never 45 % slower. The anchor is the pick's own predecessor (the queued tail or the track on air, `pickAnchor` on the agent path, `currentTrack` in the pool), its tempo through `library.bpmKeyFor`.
+- **The curve.** Up to 8 `(at %, bpm)` points over the show's running time, linear between them and flat beyond. **It never widens the step**: it only names the direction, so candidates on the curve's side of the anchor are offered first (within 1.5 % of the curve both sides are equal). A set therefore walks a curve one step at a time, and a curve that asks for a jump bigger than the step is walked, not jumped. The position is the pick's air time within the show's run (`showRunPosition`: the last show change before it and the next after it, both through `showKeyAt`, takeover edges included, within 12 h); unknown ends mean no position, and the curve stands aside. The scan runs only for a show that draws a curve.
+- **Failure directions, deliberately different.** A candidate with no usable tempo is OUT (the switch promises mixable neighbours, and an unknown tempo is the one thing a mix cannot plan around). An anchor with no usable tempo (show start after an unmeasured track, the coast, an operator push) cannot anchor a step: the window centres on the curve's tempo at that point, and with no curve there is no window, so the next measured pick restarts the chain. The discovery tools are **HARD** (`scope.tempoWindow` in `collect()`, so the Agentic route, the Track Shortlist's searches, guard re-picks and the journey companions all see only the window, and an empty tool says it is the tempo window), while **the pool picker never starves**: inside the window if anything is, else the 8 nearest tempos with a compatible Camelot key first among gaps within 1 %, and a booth line says so (`Hot Mix "…": nothing inside … taking the nearest tempos`). Unknown tempos reach the pool's model only when nothing measured exists. **Only the `auto.m3u` coast ignores tempo**: it is the dead-air guard and has no predecessor to measure from.
+- **Requests close by default** (`closeRequests`, true unless explicitly `false`): `POST /request` answers 503 naming the show while it is on air, before any resolution or model call, because an ask is a tempo jump or an unmixable pair by nature. Turning the toggle off opens them, and a request then plays as any request does (exempt from the step); the DJ's own picks still follow it. Judged on the show on air at that moment, like the clean show's hold.
+- **Manual choices are exempt.** Operator pushes (`/dj/queue-track`, `/dj/queue-block`) never pass through any of this. A playlist steer is the operator's own choice too, so `steeredShow` sets `hotMix: null` beside the music filters it clears; a prompt-only steer changes nothing. Requests still follow the show on air, which a steer does not change.
+- **Beside DJ mode, not instead of it.** A persona's DJ-mode mini-run (a soft tempo/key target for 2–3 picks) and the sonic journey still run; the window bounds whatever they lean toward. The soft `bpmCompat`/`keyCompat` re-rank in the pool is unchanged and runs on the windowed pool.
+- **The editor** (Show editor → Hot Mix) hydrates through the same `repairHotMix`, so it reads a saved show as the pick paths do, and keeps the step and curve when the switch is off. The card shows `hot mix ±N% · curve · no requests`.
+
+Pinned by `scripts/hot-mix-policy.test.ts` (the rules and the saved shape), `scripts/hot-mix-pick-paths.test.ts` (the real pick paths, the request route, a steer, a cold load) and `web/components/admin/shows/hot-mix.test.ts`.
 
 ## Scheduled tagging (#2282)
 
