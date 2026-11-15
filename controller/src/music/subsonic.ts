@@ -16,6 +16,7 @@ import { libraryMountProven } from './library-mount.js';
 import { STALE_SOCKET_RETRY_MS } from '../util/fetch-timeout.js';
 import { fileTitle, MAX_REPORTED_TITLE_BYTES, normalizeTitle, titleVerdict } from './tag-title.js';
 import { firstAlbumArtistId } from './artist-credit.js';
+import type { MixInStamps, MixOutStamps } from './hot-mix-seam.js';
 
 function buildAuth() {
   const salt = crypto.randomBytes(8).toString('hex');
@@ -1186,7 +1187,7 @@ export function getPlayableUri(song, resolveProbeId: string | null = null) {
 export function escAnnotate(s) {
   return String(s ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
-export function getAnnotatedUri(song, opts: { maxDurationSec?: number | null; cueOutSec?: number | null; cueInSec?: number | null; resolveProbeId?: string | null; clipLeadSec?: number | null; clipCueLateSec?: number | null; localPath?: string | null } = {}) {
+export function getAnnotatedUri(song, opts: { maxDurationSec?: number | null; cueOutSec?: number | null; cueInSec?: number | null; resolveProbeId?: string | null; clipLeadSec?: number | null; clipCueLateSec?: number | null; localPath?: string | null; mixOut?: MixOutStamps | null; mixIn?: MixInStamps | null; mixCueLateSec?: number | null } = {}) {
   const fields = [
     `title="${escAnnotate(song.title)}"`,
     `artist="${escAnnotate(song.artist)}"`,
@@ -1218,6 +1219,33 @@ export function getAnnotatedUri(song, opts: { maxDurationSec?: number | null; cu
   if (opts.clipCueLateSec != null && Number.isFinite(opts.clipCueLateSec) && opts.clipCueLateSec !== 0
     && opts.clipCueLateSec > -CUE_EARLY_MAX_SEC && opts.clipCueLateSec < CUE_LATE_MAX_SEC) {
     fields.push(`liq_clip_cue_late="${opts.clipCueLateSec.toFixed(6)}"`);
+  }
+  // DJ Hot Mix seam (music/hot-mix-seam.ts, radio.liq HOT MIX SEAMS). The
+  // outgoing track carries the pair id, the overlap and, on a split seam, its
+  // end ramp; the incoming one the same id and its start stretch. Times are
+  // output seconds since the track started, factors to six decimals. An older
+  // mixer ignores every key and crossfades over liq_cross_duration.
+  if (opts.mixOut) {
+    fields.push(`liq_mix_out="${escAnnotate(opts.mixOut.id)}"`);
+    fields.push(`liq_mix_lead="${opts.mixOut.leadSec.toFixed(4)}"`);
+    if (opts.mixOut.end) {
+      fields.push(`liq_mix_end_tempo="${opts.mixOut.end.tempo.toFixed(6)}"`);
+      fields.push(`liq_mix_end_from="${opts.mixOut.end.fromSec.toFixed(4)}"`);
+      fields.push(`liq_mix_end_ramp="${opts.mixOut.end.rampSec.toFixed(4)}"`);
+    }
+  }
+  if (opts.mixIn) {
+    fields.push(`liq_mix_in="${escAnnotate(opts.mixIn.id)}"`);
+    fields.push(`liq_mix_tempo="${opts.mixIn.tempo.toFixed(6)}"`);
+    fields.push(`liq_mix_hold="${opts.mixIn.holdSec.toFixed(4)}"`);
+    fields.push(`liq_mix_glide="${opts.mixIn.glideSec.toFixed(4)}"`);
+    // Its downbeat cue-in's landing, as the clip seam's (six decimals, the
+    // reader's bounds), under its own key: radio.liq reads each key on its own
+    // seam only.
+    if (opts.mixCueLateSec != null && Number.isFinite(opts.mixCueLateSec) && opts.mixCueLateSec !== 0
+      && opts.mixCueLateSec > -CUE_EARLY_MAX_SEC && opts.mixCueLateSec < CUE_LATE_MAX_SEC) {
+      fields.push(`liq_mix_cue_late="${opts.mixCueLateSec.toFixed(6)}"`);
+    }
   }
   // Per-track loudness gain offset, in the "<n> dB" form Liquidsoap's amplify
   // override parses. Applied before the ducking layers. Absent = unity.

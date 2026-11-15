@@ -13,6 +13,8 @@ import { DEFAULTS } from './defaults.js';
 import { mixerJingleRatioFile } from '../broadcast/jingle-rotate.js';
 // Hosted stations: the station's bitrate ceiling (SUBWAVE_MAX_BITRATE).
 import { capStreamBitrates } from '../setup/hosted.js';
+// zod-only, like this module's other imports: no settings cycle.
+import { repairHotMix } from '../schemas/show.js';
 
 export const LIQ_JINGLE_RATIO_PATH = `${STATE_DIR}/liquidsoap_jingle_ratio.txt`;
 export const LIQ_CROSSFADE_PATH = `${STATE_DIR}/liquidsoap_crossfade.txt`;
@@ -22,6 +24,32 @@ export const LIQ_DUCK_INTRO_PATH = `${STATE_DIR}/liquidsoap_duck_intro.txt`;
 // Plain crossfade curve (transitions.equalPowerCrossfade). Same read-once lifecycle.
 export const LIQ_EQUAL_POWER_CROSSFADE_PATH = `${STATE_DIR}/liquidsoap_equal_power_crossfade.txt`;
 export const LIQ_ARCHIVE_ENABLED_PATH = `${STATE_DIR}/liquidsoap_archive_enabled.txt`;
+// DJ Hot Mix: whether radio.liq builds its tempo stretch (HOT MIX SEAMS).
+// Derived, not a setting: "true" while any show has Hot Mix on, through the
+// load path's own repair, so a malformed block reads as off here too.
+export const LIQ_HOTMIX_PATH = `${STATE_DIR}/liquidsoap_hotmix.txt`;
+export function hotMixStretchWanted(s: { shows?: unknown }): boolean {
+  return Array.isArray(s?.shows) && s.shows.some((show) => repairHotMix((show as { hotMix?: unknown })?.hotMix).enabled);
+}
+
+// Boot (settings.ensureLiquidsoapSettingsFile): the stretch switch follows the
+// saved shows, so a file that disagrees (a hand edit, or an upgrade that has
+// never written it) is rewritten. True when it was, so the caller can say the
+// mixer needs a restart to build or drop the stretch.
+export async function reconcileHotMixFile(s): Promise<boolean> {
+  const want = hotMixStretchWanted(s) ? 'true' : 'false';
+  let onDisk: string | null;
+  try {
+    onDisk = (await readFile(LIQ_HOTMIX_PATH, 'utf8')).trim();
+  } catch {
+    onDisk = null;
+  }
+  // Absent reads as off in radio.liq: a station that never had Hot Mix gets
+  // no new file and no restart notice.
+  if (onDisk === want || (onDisk === null && want === 'false')) return false;
+  await writeFile(LIQ_HOTMIX_PATH, want);
+  return true;
+}
 export const LIQ_ARCHIVE_BITRATE_PATH = `${STATE_DIR}/liquidsoap_archive_bitrate.txt`;
 export const LIQ_OPUS_ENABLED_PATH = `${STATE_DIR}/liquidsoap_opus_enabled.txt`;
 const LIQ_OPUS_BITRATE_PATH = `${STATE_DIR}/liquidsoap_opus_bitrate.txt`;
@@ -95,6 +123,7 @@ export async function writeLiquidsoapSettings(s) {
   await writeFile(LIQ_DUCK_INTRO_PATH, String(s.ducking?.intro ?? DEFAULTS.ducking.intro));
   // Only an explicit true writes "true": absent or malformed stays linear.
   await writeFile(LIQ_EQUAL_POWER_CROSSFADE_PATH, String(s.transitions?.equalPowerCrossfade === true));
+  await writeFile(LIQ_HOTMIX_PATH, hotMixStretchWanted(s) ? 'true' : 'false');
   await writeFile(LIQ_ARCHIVE_ENABLED_PATH, s.archive.enabled ? 'true' : 'false');
   await writeFile(LIQ_ARCHIVE_BITRATE_PATH, String(s.archive.bitrate));
   // The listener-facing mounts, under a hosted station's bitrate ceiling.

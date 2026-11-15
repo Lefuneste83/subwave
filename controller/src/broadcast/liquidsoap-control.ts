@@ -237,6 +237,25 @@ export async function streamStatus() {
   return streamStatusCache.get();
 }
 
+// Whether the running mixer built the DJ Hot Mix tempo stretch (radio.liq
+// reads liquidsoap_hotmix.txt once, at startup). Fails closed: an older mixer
+// answers "unknown command" and an unreachable one throws, and both mean no
+// beat-mixed seam, only the plain crossfade the pair would have had. Cached for
+// a minute and dropped on every restart, which is the only time it changes.
+const hotMixStretchCache = cachedAsync(
+  async () => (await sendCommand('hotmix_status', 2000)).trim().split(/\s+/)[0] === 'true',
+  { ttlMs: 60_000 },
+);
+onMixerRestart(() => hotMixStretchCache.invalidate());
+
+export async function hotMixStretchBuilt(): Promise<boolean> {
+  try {
+    return await hotMixStretchCache.get();
+  } catch {
+    return false;
+  }
+}
+
 // Guaranteed real telnet round-trip: invalidating first drops any in-flight
 // take too. Operator-triggered surfaces only (Doctor) — putting this on a poll
 // reinstates the per-request connection the cache exists to remove.

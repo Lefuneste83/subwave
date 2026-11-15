@@ -1,0 +1,279 @@
+// DJ Hot Mix seams: how one pair of tracks is beat-mixed (radio.liq, HOT MIX
+// SEAMS). Pure: grids and numbers in, a plan (or the reason there is none) out.
+// broadcast/queue.ts asks once per pair, when the outgoing track is drained
+// with its successor known, and stamps the plan on both tracks.
+//
+// Who moves (the operator's rule, mix-design.md §2e). Below the sync limit,
+// which is the show's own step (the gap the picker keeps, default 3 %), only
+// the INCOMING track is synced to the outgoing one: the outgoing track plays
+// untouched, as a DJ leaves it. Up to twice that, the gap is split: the
+// outgoing track also ramps over its last bars, halfway in tempo, so neither
+// moves more than the limit. Past that no beat mix sounds smooth, and the seam
+// is the station's ordinary crossfade. The limit itself never exceeds
+// SYNC_MAX_PCT, whatever the step: a 20 % step is a picker setting, never a
+// stretch.
+//
+// Where. The incoming track starts on its first downbeat, at a downbeat of the
+// outgoing one, and the outgoing track is cut OVERLAP_BEATS later, on a bar
+// line, so both fade over the same eight bars (the overlap, `leadSec`). The
+// incoming one holds the outgoing tempo while that lasts, then glides back to
+// its own over GLIDE_SEC. Every window sits inside ONE grid segment whose
+// period agrees with the track's tempo: a seam laid across a segment change,
+// or on a double-time stretch of the grid, has no beat to trust, and gets the
+// plain crossfade instead.
+//
+// Timelines. Liquidsoap stretches by OUTPUT seconds since the track started
+// (the factor is a function of what the stretch has emitted, never of input
+// time, which soundtouch reads ahead). An outgoing track that was itself the
+// incoming side of the previous seam starts stretched, so its downbeats sit
+// later in output time than in its file: `profileOf` and `outAt` replay that
+// rule exactly, so the ramp and the overlap land where the mixer will play
+// them.
+import type { GridSegment } from './library-db/grid.js';
+
+export const SYNC_MAX_PCT = 6;
+export const OVERLAP_BEATS = 32;
+export const RAMP_BEATS = 16;
+export const GLIDE_SEC = 16;
+// The incoming track's first usable downbeat must come within this of where
+// it would otherwise start: past it the seam would skip the record's opening.
+export const IN_DOWNBEAT_MAX_SEC = 30;
+// A segment's period must agree with the track's tempo to within this.
+const PERIOD_AGREE = 0.01;
+// The mixer refuses a factor outside [0.85, 1.15]; stay well inside it.
+const FACTOR_MIN = 0.88;
+const FACTOR_MAX = 1.12;
+
+// The stamps of one track's tempo, in output seconds since it started.
+export interface StartStretch { tempo: number; holdSec: number; glideSec: number }
+export interface EndStretch { tempo: number; fromSec: number; rampSec: number }
+
+export interface SeamSide {
+  segments: GridSegment[];
+  beatsPerBar: number | null;
+  bpm: number | null;
+}
+
+export interface SeamInput {
+  stepPct: number;
+  a: SeamSide & {
+    cueInSec: number;           // where the outgoing track started (its own trim)
+    endSec: number;             // its effective end: duration, trim, cap
+    start: StartStretch | null; // its own start stretch, if it was mixed in
+  };
+  b: SeamSide & {
+    cueInSec: number;           // where the incoming track would start (its trim)
+    durationSec: number;
+  };
+}
+
+export interface SeamPlan {
+  kind: 'incoming' | 'split';
+  gapPct: number;
+  aBpm: number;
+  bBpm: number;
+  outCueSec: number;  // A's liq_cue_out, on a bar line
+  inCueSec: number;   // B's liq_cue_in, a downbeat
+  leadSec: number;    // the overlap, output seconds
+  bStart: StartStretch;
+  aEnd: EndStretch | null;
+  // The grid beats each side plays through the overlap, in file seconds: what
+  // the kick-phase check (music/kick-phase.ts) measures.
+  aOverlapBeats: number[];
+  bOverlapBeats: number[];
+}
+
+export type SeamVerdict = { ok: true; plan: SeamPlan } | { ok: false; reason: string };
+
+// ─── Tempo profile: radio.liq's hot_mix_tempo, replayed ─────────────────────
+
+// Breakpoints (output second, factor), linear between them, the last held.
+type Profile = Array<{ e: number; f: number }>;
+
+export function profileOf(start: StartStretch | null, end: EndStretch | null): Profile {
+  const p: Profile = [{ e: 0, f: 1 }];
+  if (start && start.tempo !== 1) {
+    p[0] = { e: 0, f: start.tempo };
+    p.push({ e: start.holdSec, f: start.tempo });
+    p.push({ e: start.holdSec + Math.max(0, start.glideSec), f: 1 });
+  }
+  if (end && end.tempo !== 1) {
+    const last = p[p.length - 1].e;
+    if (end.fromSec > last) p.push({ e: end.fromSec, f: 1 });
+    p.push({ e: Math.max(end.fromSec, last) + Math.max(0, end.rampSec), f: end.tempo });
+  }
+  return p;
+}
+
+// Source seconds advanced after `e` output seconds.
+export function srcAt(p: Profile, e: number): number {
+  let s = 0;
+  for (let i = 0; i < p.length; i++) {
+    const a = p[i];
+    const b = p[i + 1];
+    if (!b) return s + (e - a.e) * a.f;
+    if (e <= b.e) {
+      const x = e - a.e;
+      const slope = b.e > a.e ? (b.f - a.f) / (b.e - a.e) : 0;
+      return s + a.f * x + (slope * x * x) / 2;
+    }
+    s += ((a.f + b.f) / 2) * (b.e - a.e);
+  }
+  return s;
+}
+
+// Output seconds at which `src` source seconds have played: srcAt's inverse.
+export function outAt(p: Profile, src: number): number {
+  let s = 0;
+  for (let i = 0; i < p.length; i++) {
+    const a = p[i];
+    const b = p[i + 1];
+    const span = b ? ((a.f + b.f) / 2) * (b.e - a.e) : Infinity;
+    if (src <= s + span) {
+      const need = src - s;
+      const slope = b && b.e > a.e ? (b.f - a.f) / (b.e - a.e) : 0;
+      if (Math.abs(slope) < 1e-12) return a.e + need / a.f;
+      // a.f x + slope x² / 2 = need
+      return a.e + (-a.f + Math.sqrt(a.f * a.f + 2 * slope * need)) / slope;
+    }
+    s += span;
+  }
+  return Infinity;
+}
+
+// ─── Grids ──────────────────────────────────────────────────────────────────
+
+const periodOf = (seg: GridSegment) => seg.periodUs / 1e6;
+const segStart = (seg: GridSegment) => seg.anchorMs / 1000;
+const segEnd = (seg: GridSegment) => segStart(seg) + (seg.beats - 1) * periodOf(seg);
+
+// Segments whose beat is the track's beat, with a known bar phase.
+function trustedSegments(side: SeamSide): GridSegment[] {
+  if (!side.bpm || side.bpm <= 0) return [];
+  const main = 60 / side.bpm;
+  return side.segments.filter((seg) => seg.downbeatMs != null && seg.beats >= 8 && seg.periodUs > 0
+    && Math.abs(periodOf(seg) / main - 1) <= PERIOD_AGREE);
+}
+
+// Downbeats of a segment, in file seconds, ascending.
+function downbeats(seg: GridSegment, beatsPerBar: number): number[] {
+  const p = periodOf(seg);
+  const db = seg.downbeatMs! / 1000;
+  const first = db - Math.floor((db - segStart(seg)) / (p * beatsPerBar) + 1e-9) * p * beatsPerBar;
+  const out: number[] = [];
+  for (let t = first; t <= segEnd(seg) + 1e-6; t += p * beatsPerBar) out.push(t);
+  return out;
+}
+
+// B's tempo folded to the octave nearest A's: 64 BPM against 128 reads as 128.
+function foldTo(bpm: number, ref: number): number {
+  let x = bpm;
+  while (x / ref > Math.SQRT2) x /= 2;
+  while (ref / x > Math.SQRT2) x *= 2;
+  return x;
+}
+
+const round = (x: number, d: number) => Math.round(x * 10 ** d) / 10 ** d;
+
+// ─── The plan ───────────────────────────────────────────────────────────────
+
+export function planHotMixSeam(input: SeamInput): SeamVerdict {
+  const syncPct = Math.min(Math.max(0, input.stepPct), SYNC_MAX_PCT);
+  const aSegs = trustedSegments(input.a);
+  const bSegs = trustedSegments(input.b);
+  if (!aSegs.length) return { ok: false, reason: 'no trusted beat grid on the outgoing track' };
+  if (!bSegs.length) return { ok: false, reason: 'no trusted beat grid on the incoming track' };
+  const aBar = input.a.beatsPerBar && input.a.beatsPerBar > 0 ? input.a.beatsPerBar : 4;
+  const bBar = input.b.beatsPerBar && input.b.beatsPerBar > 0 ? input.b.beatsPerBar : 4;
+
+  // The incoming side first: its first trusted downbeat at or after its cue-in.
+  const bCue = Math.max(0, input.b.cueInSec);
+  let bPick: { seg: GridSegment; at: number } | null = null;
+  for (const seg of bSegs) {
+    const at = downbeats(seg, bBar).find((t) => t >= bCue - 1e-6);
+    if (at != null && at - bCue <= IN_DOWNBEAT_MAX_SEC && (!bPick || at < bPick.at)) bPick = { seg, at };
+  }
+  if (!bPick) return { ok: false, reason: 'no downbeat near the incoming track\'s start' };
+  const pB = periodOf(bPick.seg);
+  const bBpmNative = 60 / pB;
+
+  // The outgoing tempo at its end: the last trusted segment before its end.
+  const aEnd = input.a.endSec;
+  const aSegsBefore = aSegs.filter((seg) => segStart(seg) < aEnd).sort((x, y) => segStart(y) - segStart(x));
+  if (!aSegsBefore.length) return { ok: false, reason: 'no trusted beat grid before the outgoing track\'s end' };
+
+  for (const aSeg of aSegsBefore) {
+    const pA = periodOf(aSeg);
+    const aBpm = 60 / pA;
+    const bBpm = foldTo(bBpmNative, aBpm);
+    const gapPct = (bBpm / aBpm - 1) * 100;
+    const kind: SeamPlan['kind'] | null = Math.abs(gapPct) <= syncPct + 1e-9
+      ? 'incoming'
+      : Math.abs(gapPct) <= 2 * syncPct + 1e-9 ? 'split' : null;
+    if (!kind) return { ok: false, reason: `tempo gap ${round(gapPct, 1)} % is past twice the ${syncPct} % sync limit` };
+    // Factors: the outgoing track ends at q, the incoming one starts at r, and
+    // both then play one beat every pA / q output seconds.
+    const q = kind === 'split' ? Math.sqrt(bBpm / aBpm) : 1;
+    const pBfold = 60 / bBpm;
+    const r = (q * pBfold) / pA;
+    if (r < FACTOR_MIN || r > FACTOR_MAX || q < FACTOR_MIN || q > FACTOR_MAX) {
+      return { ok: false, reason: 'stretch past the mixer\'s range' };
+    }
+    const overlapSrc = OVERLAP_BEATS * pA;
+    const leadSec = overlapSrc / q;
+    const rampOut = kind === 'split' ? RAMP_BEATS * pA : 0;
+    const rampSrc = rampOut * (1 + q) / 2;
+    const startProfile = profileOf(input.a.start, null);
+    const startDoneOut = startProfile[startProfile.length - 1].e;
+    // The latest downbeat D of this segment whose window fits: the ramp and
+    // the overlap inside the segment, the cut before the track's end, the ramp
+    // after the outgoing track's own start stretch.
+    const dbs = downbeats(aSeg, aBar).reverse();
+    for (const D of dbs) {
+      if (D + overlapSrc > aEnd + 1e-6) continue;
+      if (D + overlapSrc > segEnd(aSeg) + pA + 1e-6) continue;
+      if (D - rampSrc < segStart(aSeg) - 1e-6) break;
+      const relD = D - input.a.cueInSec;
+      if (relD - rampSrc <= 0) break;
+      let end: EndStretch | null = null;
+      if (kind === 'split') {
+        const fromSec = outAt(startProfile, relD - rampSrc);
+        if (!Number.isFinite(fromSec) || fromSec < startDoneOut) break;
+        end = { tempo: round(q, 6), fromSec: round(fromSec, 4), rampSec: round(rampOut, 4) };
+      } else if (outAt(startProfile, relD) < startDoneOut) {
+        break;
+      }
+      // The incoming track must outlast the hold and the glide.
+      const bNeedsSrc = leadSec * r + GLIDE_SEC;
+      if (input.b.durationSec > 0 && bPick.at + bNeedsSrc > input.b.durationSec) {
+        return { ok: false, reason: 'the incoming track is too short for the mix' };
+      }
+      if (bPick.at + leadSec * r > segEnd(bPick.seg) + pB + 1e-6) {
+        return { ok: false, reason: 'the incoming track\'s grid changes inside the overlap' };
+      }
+      return {
+        ok: true,
+        plan: {
+          kind,
+          gapPct: round(gapPct, 2),
+          aBpm: round(aBpm, 2),
+          bBpm: round(bBpmNative, 2),
+          outCueSec: round(D + overlapSrc, 4),
+          inCueSec: round(bPick.at, 4),
+          leadSec: round(leadSec, 4),
+          bStart: { tempo: round(r, 6), holdSec: round(leadSec, 4), glideSec: GLIDE_SEC },
+          aEnd: end,
+          aOverlapBeats: Array.from({ length: OVERLAP_BEATS + 1 }, (_, k) => round(D + k * pA, 4)),
+          bOverlapBeats: Array.from({ length: Math.floor((leadSec * r) / pB) + 1 }, (_, k) => round(bPick!.at + k * pB, 4)),
+        },
+      };
+    }
+  }
+  return { ok: false, reason: 'no downbeat window for the overlap in the outgoing track\'s grid' };
+}
+
+// Each side's stamps, as getAnnotatedUri writes them (radio.liq reads these
+// names). `id` ties the pair: the mixer applies B's start only after the A
+// that names it.
+export interface MixOutStamps { id: string; leadSec: number; end: EndStretch | null }
+export interface MixInStamps extends StartStretch { id: string }

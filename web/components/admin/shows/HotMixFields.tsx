@@ -65,8 +65,15 @@ export function HotMixFields({ control, index }: { control: Control<ShowsFormVal
         control={control}
         name={`${base}.enabled`}
         label="DJ Hot Mix"
-        description="Mixes this show like a DJ set: each track the DJ picks stays close in tempo to the one before it, so the transitions can be beat-matched. Meant for electronic shows."
+        description="Mixes this show like a DJ set: each track the DJ picks stays close in tempo to the one before it, and the mixer beat-matches each transition. Meant for electronic shows."
       />
+      <ShowFieldHelp title="How the transitions are mixed">
+        The incoming track starts on a downbeat, on a downbeat of the outgoing one, and both play together for eight
+        bars. Up to the step, only the incoming track is synced and the outgoing one plays untouched; up to twice the
+        step, both meet halfway; past that, and for any track without a measured beat grid, it is a plain crossfade.
+        The incoming track then glides back to its own tempo. The first show to turn Hot Mix on (or the last to turn
+        it off) needs a mixer restart: Settings, then restart mixer.
+      </ShowFieldHelp>
 
       <div className="grid items-start gap-6 xl:grid-cols-2">
         <div className="field">

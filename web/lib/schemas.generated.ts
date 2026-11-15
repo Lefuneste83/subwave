@@ -5967,6 +5967,7 @@ export const MIX_DROP_REASONS = [
   'bed',             // an instrumental bed replaced the seam it was chosen for
   'pause-talk',      // a pause-and-talk break replaced the seam it was chosen for
   'jingle-seam',     // a jingle aired between the two tracks; the mixer stood down
+  'hot-mix',         // a DJ Hot Mix seam beat-mixes the pair (music/hot-mix-seam.ts)
 ] as const;
 
 export type MixDropReason = (typeof MIX_DROP_REASONS)[number];
@@ -5984,6 +5985,7 @@ export const MIX_DROP_REASON_LABELS: Record<MixDropReason, string> = {
   'bed': 'Bed took the seam',
   'pause-talk': 'Pause-and-talk break',
   'jingle-seam': 'Jingle in between',
+  'hot-mix': 'Hot Mix seam',
 };
 
 // ─── from controller/src/schemas/webhook.ts ──────────────────────────────

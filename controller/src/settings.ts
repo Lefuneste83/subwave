@@ -163,6 +163,8 @@ import {
   LIQ_OPUS_ENABLED_PATH,
   LIQ_STREAM_BITRATE_PATH,
   LIQ_STREAM_BUFFER_SECONDS_PATH,
+  hotMixStretchWanted,
+  reconcileHotMixFile,
   reconcileStreamMountFiles,
   writeLiquidsoapSettings,
 } from './settings/liquidsoap.js';
@@ -2791,6 +2793,12 @@ export async function prepareUpdate(patch, { themeIds }: { themeIds?: ReadonlySe
 
   }
 
+  // DJ Hot Mix: the first show to turn it on, or the last to turn it off,
+  // changes whether the mixer builds its tempo stretch (liquidsoap_hotmix.txt,
+  // read once at startup). Judged on the swept shows, after the integrity
+  // sweep above, so a show deleted with its persona counts too.
+  if (hotMixStretchWanted(cur) !== hotMixStretchWanted(next)) restart = true;
+
   return { saved: next, requiresRestart: restart };
 }
 
@@ -2872,7 +2880,7 @@ export async function update(patch) {
 // reconciled with the saved stream settings under a hosted station's ceiling
 // (settings/liquidsoap.ts reconcileStreamMountFiles). Returns the mount files
 // that boot rewrote, so the caller can say the mixer needs a restart.
-export async function ensureLiquidsoapSettingsFile(): Promise<{ rewroteMountFiles: string[] }> {
+export async function ensureLiquidsoapSettingsFile(): Promise<{ rewroteMountFiles: string[]; rewroteHotMix: boolean }> {
   const s = await load();
   if (
     !existsSync(LIQ_JINGLE_RATIO_PATH) ||
@@ -2885,7 +2893,7 @@ export async function ensureLiquidsoapSettingsFile(): Promise<{ rewroteMountFile
     !existsSync(ICECAST_LISTENER_AUTH_PATH)
   ) {
     await writeLiquidsoapSettings(s);
-    return { rewroteMountFiles: [] };
+    return { rewroteMountFiles: [], rewroteHotMix: false };
   }
-  return { rewroteMountFiles: await reconcileStreamMountFiles(s) };
+  return { rewroteMountFiles: await reconcileStreamMountFiles(s), rewroteHotMix: await reconcileHotMixFile(s) };
 }

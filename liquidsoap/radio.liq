@@ -147,6 +147,17 @@ end
 crossfade_curve_name = if equal_power_crossfade() then "equal-power" else "linear" end
 log(label="crossfade", "plain crossfade curve: #{crossfade_curve_name}")
 
+# DJ Hot Mix tempo stretch (HOT MIX SEAMS, below). The controller writes "true"
+# while any show has Hot Mix on; absent or anything else builds no stretch, so
+# a station without it streams exactly what it did before.
+hot_mix_stretch = ref(false)
+if file.exists("#{state_dir}/liquidsoap_hotmix.txt") then
+  raw = string.trim(file.contents("#{state_dir}/liquidsoap_hotmix.txt"))
+  hot_mix_stretch := (raw == "true")
+end
+hot_mix_stretch_name = if hot_mix_stretch() then "built" else "off" end
+log(label="hotmix", "tempo stretch: #{hot_mix_stretch_name}")
+
 # Duck depths. `p` is the fraction of the music LEFT UP under a voice channel:
 # range [0, 1], smaller is deeper, 1.0 no duck, 0.0 a full mute under the voice.
 # Out-of-range is refused, not clamped — the controller already bounds it on save
@@ -595,6 +606,11 @@ def cross_stamps(m) =
     own = if own < 0. then crossfade_duration() else own end
     lead = float_of_string(default=-1., m["liq_clip_lead"])
     own = if lead >= 0. then lead + clip_seam_slack else own end
+    # A Hot Mix seam buffers past its lead exactly like a clip seam (HOT MIX
+    # SEAMS). Only while the stretch is built: without it the seam is the plain
+    # crossfade the controller's own liq_cross_duration already sizes.
+    mix_lead = if hot_mix_stretch() then float_of_string(default=-1., m["liq_mix_lead"]) else -1. end
+    own = if mix_lead >= 0. then mix_lead + clip_seam_slack else own end
     stamps = [
       ("liq_cross_start_duration", string(cross_prev_end())),
       ("liq_cross_end_duration", string(own)),
@@ -731,9 +747,41 @@ def dj_transition(a, b) =
   # from the clip's own lead: a landing moves the aligned lead by less than
   # the slack, so it never needs a bigger buffer.
   clip_max_d = clip_lead + clip_seam_slack + frame.duration()
+  # HOT MIX SEAM. The controller planned this pair beat for beat: A carries
+  # `liq_mix_out` and the overlap `liq_mix_lead` (output seconds), B the same id
+  # as `liq_mix_in` and its tempo stamps. B's first sample is a downbeat, and
+  # it must play exactly `lead` before A ends, which is the clip seam's
+  # alignment again: cross_stamps buffered lead + slack, so B waits d - lead.
+  # B's cue-in lands on a codec frame (CUE-IN LANDING above); the controller
+  # probes it for this seam too and stamps it as its own key, liq_mix_cue_late
+  # (never the clip seam's, so neither seam reads the other's), and B waits
+  # late / r more, r being the factor
+  # B starts at (the late part of B's audio plays stretched). The ids must
+  # match: a jingle or a coast track between A and B leaves a plain crossfade
+  # (the stretch block below keeps B's tempo at 1 then too). Bounded like the
+  # clip seam, logged and left plain otherwise.
+  mix_out = a.metadata["liq_mix_out"]
+  mixing = hot_mix_stretch() and mix_out != "" and mix_out == b.metadata["liq_mix_in"]
+    and a.metadata["subwave_jingle"] != "true" and b.metadata["subwave_jingle"] != "true"
+    and a.metadata["liq_show_fade"] != "true"
+    and a.metadata["subwave_clip"] != "1" and b.metadata["subwave_clip"] != "1"
+  mix_lead = if mixing then float_of_string(default=-1., a.metadata["liq_mix_lead"]) else -1. end
+  mix_r = float_of_string(default=1., b.metadata["liq_mix_tempo"])
+  mix_r = if mix_r < 0.85 or mix_r > 1.15 then 1. else mix_r end
+  mix_late = if mixing then float_of_string(default=0., b.metadata["liq_mix_cue_late"]) else 0. end
+  mix_late = if mix_late > 0. - cue_early_max and mix_late < 0.15 then mix_late else 0. end
+  mix_seam_lead = mix_lead - mix_late / mix_r
+  mix_max_d = mix_lead + clip_seam_slack + frame.duration()
   b_delay =
     if clip_lead >= 0. and d > seam_lead and d <= clip_max_d then d - seam_lead
+    elsif mix_lead >= 0. and d > mix_seam_lead and d <= mix_max_d then d - mix_seam_lead
     else 0. end
+  if mix_lead >= 0. then
+    log(label="hotmix", level=3, "buffered #{d}s, lead #{mix_lead}s, cue-in landing #{mix_late}s at x#{mix_r}: incoming waits #{b_delay}s")
+    if b_delay == 0. then
+      log(label="hotmix", level=2, "buffer #{d}s does not fit the lead #{mix_lead}s + slack: not aligned, plain crossfade")
+    end
+  end
   if clip_lead >= 0. then
     log(label="clip.seam", level=3, "buffered #{d}s, cue lead #{clip_lead}s, cue-in landing #{cue_late}s: incoming waits #{b_delay}s")
     if d < seam_lead then
@@ -769,13 +817,16 @@ def dj_transition(a, b) =
   # They cannot merely be left alone: forcing washing/looping false would ARM
   # the `b` gestures on seams where the outgoing one used to suppress them.
   boundary_fading = a.metadata["liq_show_fade"] == "true"
+  # A Hot Mix seam is the beat-matched blend itself: no gesture on either side.
+  # The controller strips them first; this keeps an old stamp from arming one.
+  mixed = mix_lead >= 0.
   jingle_out = a.metadata["subwave_jingle"] == "true"
   jingle_in = b.metadata["subwave_jingle"] == "true"
-  washing = a.metadata["liq_washout"] == "true" and not boundary_fading
-  looping = a.metadata["liq_loop"] == "true" and not washing and not boundary_fading
-  sweeping = b.metadata["liq_sweep"] == "true" and not looping and not boundary_fading and not jingle_out
-  dissolving = b.metadata["liq_dissolve"] == "true" and not washing and not looping and not boundary_fading and not jingle_out
-  chopping = b.metadata["liq_chop"] == "true" and not washing and not looping and not boundary_fading and not jingle_out
+  washing = a.metadata["liq_washout"] == "true" and not boundary_fading and not mixed
+  looping = a.metadata["liq_loop"] == "true" and not washing and not boundary_fading and not mixed
+  sweeping = b.metadata["liq_sweep"] == "true" and not looping and not boundary_fading and not jingle_out and not mixed
+  dissolving = b.metadata["liq_dissolve"] == "true" and not washing and not looping and not boundary_fading and not jingle_out and not mixed
+  chopping = b.metadata["liq_chop"] == "true" and not washing and not looping and not boundary_fading and not jingle_out and not mixed
   # A plain song-to-song seam: no gesture flag on either side (a flag the queue
   # stripped as a loser never reaches here, so any flag present means a gesture
   # owns the fades), no jingle, no stem-blend clip, no bed or pause break
@@ -906,7 +957,7 @@ def dj_transition(a, b) =
   # incoming arrives lows-first (b-side block further down). Armed only between
   # COMPATIBLE tracks (mix.effectAllowedFor). At e=0 the HPF sits at 30 Hz, i.e.
   # transparent, so the engage is seamless.
-  blending = b.metadata["liq_blend"] == "true" and not looping and not boundary_fading and not jingle_out
+  blending = b.metadata["liq_blend"] == "true" and not looping and not boundary_fading and not jingle_out and not mixed
   a_source =
     if blending then
       log("DJ blend: spectral handover into the next track (d=#{d}s)")
@@ -1307,9 +1358,10 @@ def dj_transition(a, b) =
   # d <= 10, chop_dd == d and the render is byte-identical.
   b_fade = if chopping then chop_dd else d end
   # A clip seam's incoming side waits b_delay (CLIP SEAM ALIGNMENT above) and
-  # fades over the lead, so both fades still end together. b_delay > 0 only on
-  # a clip seam, which equal_power_seam never takes, so the equal-power branch
-  # always spans the full d.
+  # fades over the lead, so both fades still end together. A Hot Mix seam
+  # waits too and may take the equal-power curve, whose outgoing side still
+  # spans the full d: one slack (0.1 s) longer than the incoming fade over an
+  # eight-bar overlap, inaudible, and every other seam stays as it was.
   b_fade = if b_delay > 0. then d - b_delay else b_fade end
   b_source =
     if equal_power_seam then
@@ -1616,6 +1668,60 @@ music.on_track(synchronous=true, fun (m) ->
 # ("<n> dB") on any track with a measured LUFS. BEFORE the cross so each track
 # carries its own gain into the crossfade, and AFTER the music_meta capture.
 music = amplify(override="liq_amplify", 1., music)
+
+# HOT MIX SEAMS — the tempo stretch (DJ Hot Mix, music/hot-mix-seam.ts). One
+# soundtouch on the music chain, BEFORE cross: inside the transition it is
+# refused ("may control its own latency"), and the incoming track has to stay
+# stretched after the transition anyway, while it glides back to its own tempo.
+# Built only while a show has Hot Mix on (liquidsoap_hotmix.txt): at 1.0 it is
+# not byte-identical (within 11 LSB, measured), and an upgrade must be.
+#
+# The factor is per track, from the stamps the controller planned for the pair:
+#   start (B): liq_mix_tempo for liq_mix_hold s, then a linear glide to 1 over
+#              liq_mix_glide s. Applied only when the previous track's
+#              liq_mix_out names this track's liq_mix_in, so a jingle or a
+#              coast track between A and B leaves B at its own tempo.
+#   end (A, split seams): from liq_mix_end_from s, a linear ramp to
+#              liq_mix_end_tempo over liq_mix_end_ramp s, then held.
+# Every time is OUTPUT seconds since the track started: soundtouch reads its
+# input ahead in chunks, so input time ran early and a glide meant to last 16 s
+# finished in 6.5 (measured). The controller computes each track's output
+# timeline with the same rule, so B lands on A's beat (within ~5 ms, measured).
+def hot_mix_tempo(s) =
+  cur = ref([])
+  prev_out = ref("")
+  start_ok = ref(false)
+  t0 = ref(0.)
+  now = ref(0.)
+  def num(m, k, dflt) = float_of_string(default=dflt, m[k]) end
+  def tempo() =
+    m = cur()
+    e = now() - t0()
+    r = if start_ok() then num(m, "liq_mix_tempo", 1.) else 1. end
+    hold = num(m, "liq_mix_hold", 0.)
+    glide = num(m, "liq_mix_glide", 0.)
+    q = num(m, "liq_mix_end_tempo", 1.)
+    from = num(m, "liq_mix_end_from", -1.)
+    ramp = num(m, "liq_mix_end_ramp", 0.)
+    f =
+      if r != 1. and e < hold then r
+      elsif r != 1. and glide > 0. and e < hold + glide then r + (1. - r) * (e - hold) / glide
+      elsif q != 1. and from >= 0. and e >= from then
+        if ramp > 0. and e < from + ramp then 1. + (q - 1.) * (e - from) / ramp else q end
+      else 1. end
+    if f < 0.85 or f > 1.15 then 1. else f end
+  end
+  s.on_track(synchronous=true, fun (m) -> begin
+    start_ok := (m["liq_mix_in"] != "" and m["liq_mix_in"] == prev_out())
+    prev_out := m["liq_mix_out"]
+    cur := m
+    t0 := now()
+  end)
+  st = soundtouch(tempo=tempo, s)
+  st.on_frame(before=false, synchronous=true, fun () -> now := st.time())
+  st
+end
+music = if hot_mix_stretch() then hot_mix_tempo(music) else music end
 
 # persist_override=true (2.4): with the new default the liq_cross_duration
 # override is reset before it sizes the stamped track's own end-of-track buffer
@@ -2559,6 +2665,16 @@ server.register(
     remainingSeconds = source.remaining(music_meta),
     crossfadeSeconds = crossfade_duration()
   })
+)
+
+# The controller plans a Hot Mix seam only for a mixer that built the stretch
+# (liquidsoap_hotmix.txt is read once, at startup): without it the seam would
+# be cut on a bar line and overlap at two tempos.
+server.register(
+  "hotmix_status",
+  description="Whether this mixer built the DJ Hot Mix tempo stretch",
+  usage="hotmix_status",
+  fun(_) -> if hot_mix_stretch() then "true" else "false" end
 )
 
 # Off air / back on air on demand — the mounts go away entirely. Contrast the

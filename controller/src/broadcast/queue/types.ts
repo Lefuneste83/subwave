@@ -8,6 +8,7 @@ import type { HostSpeechStamp } from '../session.js';
 import type { ClipSeamCues } from '../stem-seam.js';
 import type { TransitionEffect } from '../../settings/vocab.js';
 import type { MixDropReason } from '../../schemas/transitions.js';
+import type { MixInStamps, MixOutStamps } from '../../music/hot-mix-seam.js';
 
 // A persona as it flows through the queue's voice path — only `id`/`name`/
 // `djMode` are read here; the rest rides through to tts.speak()/voiceGainDb().
@@ -212,6 +213,13 @@ export interface QueueItem {
     originalExit?: Pick<Track, 'washout' | 'washoutAuto' | 'washoutDelay' | 'loop' | 'loopBar' | 'crossSec'>;
   } | null;
   stemSeam?: boolean;
+  // DJ Hot Mix seam (music/hot-mix-seam.ts). `mixOut` rides the OUTGOING item:
+  // its cut on a bar line, the overlap and, on a split seam, its end ramp.
+  // `mixIn` rides the INCOMING one: its downbeat cue-in and its start stretch.
+  // Both carry the pair's id, which radio.liq matches before it stretches the
+  // incoming track; planned when the outgoing item drains with its successor.
+  mixOut?: (MixOutStamps & { outCueSec: number }) | null;
+  mixIn?: (MixInStamps & { inCueSec: number }) | null;
   // Outgoing music already committed an early ending into this clip/track.
   lengthPolicyCommitted?: boolean;
   stemCueInSec?: number;

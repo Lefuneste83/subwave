@@ -212,7 +212,14 @@ app.listen(config.server.port, async (err?: Error) => {
   try {
     await settings.load();
     const s = settings.get();
-    const { rewroteMountFiles } = await settings.ensureLiquidsoapSettingsFile();
+    const { rewroteMountFiles, rewroteHotMix } = await settings.ensureLiquidsoapSettingsFile();
+    // DJ Hot Mix's tempo stretch follows the saved shows; a mixer started
+    // before this file said so has not built it, and Hot Mix seams wait.
+    if (rewroteHotMix) {
+      const line = '[settings] DJ Hot Mix tempo stretch switched to match the saved shows; it takes effect when the mixer next restarts';
+      console.log(line);
+      queue.log('scheduler', line);
+    }
     // A ceiling change (or a hand edit) reached the mount files at boot; the
     // running mixer still has the old ones until it restarts.
     if (rewroteMountFiles.length) {
