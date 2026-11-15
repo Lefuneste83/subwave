@@ -2050,6 +2050,7 @@ class Queue {
     // overlap's own beats and move B's cue-in by it. Unknown on either side
     // (no time, no source, beats too unlike to compare) aligns on the grids.
     let phaseNote = 'kick phase unchecked';
+    let waitSec = 0;
     const budgetMs = kickPhaseBudgetMs(this.remainingUntilItemAirs(item));
     if (budgetMs > 0) {
       const sourceOf = (t: Track) => {
@@ -2068,8 +2069,12 @@ class Queue {
         if (rel) {
           const pB = plan.bOverlapBeats[1] - plan.bOverlapBeats[0];
           const shift = rel.beats * pB;
-          plan.inCueSec = Math.max(0, Math.round((plan.inCueSec + shift) * 10000) / 10000);
-          phaseNote = `kicks ${shift >= 0 ? '+' : ''}${Math.round(shift * 1000)} ms apart on the grids, cue-in moved (match ${rel.corr})`;
+          const moved = hotMixSeam.shiftInCue(plan.inCueSec, shift);
+          plan.inCueSec = moved.inCueSec;
+          waitSec = moved.waitSec;
+          phaseNote = `kicks ${shift >= 0 ? '+' : ''}${Math.round(shift * 1000)} ms apart on the grids, ${waitSec
+            ? `cue-in at the file's start and the incoming side waits ${Math.round(waitSec * 1000)} ms`
+            : 'cue-in moved'} (match ${rel.corr})`;
         } else {
           phaseNote = `kick phase unknown (${!ta.template ? ta.reason : !tb.template ? tb.reason : 'the two beats are too unlike'}): aligned on the grids`;
         }
@@ -2078,7 +2083,7 @@ class Queue {
     if (!this.upcoming.includes(item) || !this.upcoming.includes(successor) || successor.sent) return;
     const id = randomBytes(4).toString('hex');
     item.mixOut = { id, leadSec: plan.leadSec, end: plan.aEnd, outCueSec: plan.outCueSec };
-    successor.mixIn = { id, ...plan.bStart, inCueSec: plan.inCueSec };
+    successor.mixIn = { id, ...plan.bStart, inCueSec: plan.inCueSec, ...(waitSec ? { waitSec } : {}) };
     // An older mixer ignores the mix stamps: it crossfades over the overlap.
     item.track.crossSec = plan.leadSec;
     for (const k of ['washout', 'loop'] as const) {
@@ -2526,13 +2531,18 @@ class Queue {
         // failure is fail-open (no stamp = the seam aligns on the cue as before).
         // Budgeted against the same clock as the intro render: the probe is a
         // garnish on the seam and must never eat the commit reserve.
-        let clipCueLate: { cueSec: number; lateSec: number; seam: 'stem seam' | 'Hot Mix' } | null = null;
+        let clipCueLate: { cueSec: number; lateSec: number; seam: 'stem seam' | 'Hot Mix' | 'Hot Mix exit' } | null = null;
         // A Hot Mix seam's incoming downbeat needs the same probe: its cue-in
         // landing a codec frame off is a flam against the outgoing beat (an
         // MP3 measured 24 ms early, a FLAC 48 ms late, both corrected by it).
+        // So does a track leaving by a Hot Mix seam, whatever set its cue-in:
+        // its cue_out counts from where the cue-in was asked, so a landing
+        // moves its end, and the incoming downbeat with it (13 ms early on
+        // air, 15 Nov).
         const seamCue = item.stemSeam && item.stemCueInSec && item.cueInSec === item.stemCueInSec
           ? 'stem seam'
-          : mixInLive && item.cueInSec === mixInLive.inCueSec ? 'Hot Mix' : null;
+          : hotMixSeam.incomingStamps(mixInLive, item.cueInSec, null).mixIn ? 'Hot Mix'
+            : item.mixOut ? 'Hot Mix exit' : null;
         if (seamCue && item.cueInSec != null) {
           const cueSec = item.cueInSec;
           let source: string | null = null;
@@ -2550,9 +2560,11 @@ class Queue {
           if (landing.ok) {
             clipCueLate = { cueSec, lateSec: landing.lateSec, seam: seamCue };
             const ms = Math.abs(landing.lateSec * 1000).toFixed(1);
-            this.log('mix', landing.lateSec < 0
-              ? `${seamCue} cue-in lands ${ms}ms early (${landing.codec}) — the incoming side starts that much sooner`
-              : `${seamCue} cue-in lands +${ms}ms late (${landing.codec}) — the incoming side waits that much longer`);
+            this.log('mix', seamCue === 'Hot Mix exit'
+              ? `${seamCue} cue-in lands ${landing.lateSec < 0 ? `${ms}ms early` : `+${ms}ms late`} (${landing.codec}) — "${item.track.title}" ends that much ${landing.lateSec < 0 ? 'early' : 'late'}, and the next downbeat moves with it`
+              : landing.lateSec < 0
+                ? `${seamCue} cue-in lands ${ms}ms early (${landing.codec}) — the incoming side starts that much sooner`
+                : `${seamCue} cue-in lands +${ms}ms late (${landing.codec}) — the incoming side waits that much longer`);
           } else {
             this.log('mix', `cue landing unknown (${landing.codec ?? 'n/a'}: ${landing.reason}) — ${seamCue} aligned on the stamped cue`);
           }
@@ -2571,6 +2583,13 @@ class Queue {
           const liveMixIn = this.liveMixIn(item);
           const liveCueIns = positiveCues([item.stemSeam ? item.stemCueInSec : null, liveMixIn?.inCueSec, trim.cueInSec]);
           item.cueInSec = liveCueIns.length ? Math.max(...liveCueIns) : undefined;
+          // The seam into it stands only while its planned downbeat is still
+          // the start (no cue-in is a start at 0 s, hot-mix-seam.incomingStamps).
+          // The landing measured for the cue-in that is still live, whichever
+          // seam asked for it.
+          const landedLate = clipCueLate && item.cueInSec === clipCueLate.cueSec ? clipCueLate.lateSec : null;
+          const mixInNow = hotMixSeam.incomingStamps(liveMixIn, item.cueInSec,
+            clipCueLate?.seam === 'stem seam' ? null : landedLate);
           // The write waited on the previous handoff: a restart or a lost proof
           // since the mixer said yes streams the pick, with a probe to chase.
           if (localPath && !libraryMount.libraryMountStands()) {
@@ -2587,11 +2606,11 @@ class Queue {
             resolveProbeId: item.resolveProbeId,
             clipLeadSec: item.stemBlend ? stemBlend.CLIP_SEAM_CROSS_SEC : null,
             // Only while the cue it was probed for is still the live one.
-            clipCueLateSec: clipCueLate?.seam === 'stem seam' && item.cueInSec === clipCueLate.cueSec ? clipCueLate.lateSec : null,
-            mixCueLateSec: clipCueLate?.seam === 'Hot Mix' && item.cueInSec === clipCueLate.cueSec ? clipCueLate.lateSec : null,
+            clipCueLateSec: clipCueLate?.seam === 'stem seam' ? landedLate : null,
+            mixCueLateSec: mixInNow.cueLateSec,
             mixOut: item.mixOut ?? null,
-            // Only while the downbeat it was planned on is still the cue-in.
-            mixIn: liveMixIn && item.cueInSec === liveMixIn.inCueSec ? liveMixIn : null,
+            mixOutLateSec: item.mixOut ? landedLate : null,
+            mixIn: mixInNow.mixIn,
           });
         };
         if (trim.cueInSec != null || trim.cueOutSec != null) {

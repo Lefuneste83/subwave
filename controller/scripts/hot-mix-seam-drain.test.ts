@@ -17,6 +17,7 @@ const settings = await import('../src/settings.js');
 const db = await import('../src/music/library-db.js');
 const { queue } = await import('../src/broadcast/queue.js');
 const { getAnnotatedUri } = await import('../src/music/subsonic.js');
+const { incomingStamps } = await import('../src/music/hot-mix-seam.js');
 const liq = await import('../src/settings/liquidsoap.js');
 await db.open({ embeddingDim: 8, adoptStoredDim: true });
 
@@ -42,6 +43,7 @@ function track(id: string, bpm: number, anchorMs: number) {
 const A = track('out-120', 120, 500);
 const B = track('in-123', 123, 200);
 const C = track('far-131', 131, 200);
+const Z = track('top-121', 121, 0);
 
 async function onAir(hotMix: Record<string, unknown> | undefined) {
   await settings.load();
@@ -95,9 +97,15 @@ test('a Hot Mix show stamps both sides of the seam, tied by one id', async () =>
   const landed = getAnnotatedUri(successor.track, { mixIn: successor.mixIn, mixCueLateSec: -0.0239 });
   assert.match(landed, /liq_mix_cue_late="-0\.023900"/);
   assert.doesNotMatch(landed, /liq_clip_cue_late/);
+  // The outgoing side's OWN cue-in landing moves its end (cue_out counts from
+  // the asked cue-in): stamped with its exit, never without one.
+  const outLanded = getAnnotatedUri(item.track, { mixOut: item.mixOut, mixOutLateSec: -0.013108 });
+  assert.match(outLanded, /liq_mix_out_late="-0\.013108"/);
+  assert.doesNotMatch(getAnnotatedUri(item.track, { mixOutLateSec: -0.013108 }), /liq_mix_out_late/);
+  assert.doesNotMatch(getAnnotatedUri(item.track, { mixOut: item.mixOut, mixOutLateSec: -0.2 }), /liq_mix_out_late/, 'outside the reader bounds');
   // Every key it writes is one radio.liq reads.
   for (const key of ['liq_mix_out', 'liq_mix_in', 'liq_mix_lead', 'liq_mix_tempo', 'liq_mix_hold', 'liq_mix_glide',
-    'liq_mix_end_tempo', 'liq_mix_end_from', 'liq_mix_end_ramp', 'liq_mix_cue_late']) {
+    'liq_mix_end_tempo', 'liq_mix_end_from', 'liq_mix_end_ramp', 'liq_mix_cue_late', 'liq_mix_out_late']) {
     assert.ok(RADIO_LIQ.includes(`"${key}"`), `radio.liq reads ${key}`);
   }
 });
@@ -170,4 +178,33 @@ test('the stretch switch follows the shows, and its flip asks for a mixer restar
   assert.equal(readFileSync(liq.LIQ_HOTMIX_PATH, 'utf8'), 'false');
   // Malformed reads as off, as everywhere else.
   assert.equal(liq.hotMixStretchWanted({ shows: [{ hotMix: 'on' }] }), false);
+});
+
+test('a successor whose downbeat is its first sample keeps the seam into it', async () => {
+  // On air, 15 Nov: B's planned cue-in was 0 s, the drain keeps no zero cue,
+  // and the handoff dropped every incoming stamp: B aired unstretched, its
+  // start not held for the downbeat.
+  await onAir({ enabled: true });
+  const { item, successor } = pairOf(A, Z);
+  await plan(item, successor);
+  assert.ok(successor.mixIn, queue.djLog.map((l) => l.message).join('\n'));
+  assert.equal(successor.mixIn.inCueSec, 0);
+  const stamps = incomingStamps(queue.liveMixIn(successor), undefined, null);
+  assert.equal(stamps.mixIn, successor.mixIn);
+  const inn = getAnnotatedUri(successor.track, { mixIn: stamps.mixIn, mixCueLateSec: stamps.cueLateSec });
+  assert.match(inn, new RegExp(`liq_mix_in="${item.mixOut!.id}"`));
+  assert.match(inn, /liq_mix_tempo="/);
+  assert.doesNotMatch(inn, /liq_cue_in/);
+});
+
+test('the stretch is timed by the audio it has produced, never the stream clock', () => {
+  // st.time() follows the stream clock, which cross re-syncs after reading a
+  // transition's opening in one burst: on air it jumped by the whole overlap
+  // and the glide back to the incoming track's own tempo never ran.
+  const body = RADIO_LIQ.slice(RADIO_LIQ.indexOf('def hot_mix_tempo(s) ='), RADIO_LIQ.indexOf('music = if hot_mix_stretch() then hot_mix_tempo(music)'));
+  assert.ok(body.length > 0);
+  assert.match(body, /st\.on_frame\(before=false, synchronous=true, fun \(\) -> now := now\(\) \+ frame\.duration\(\)\)/);
+  assert.doesNotMatch(body.replace(/#.*$/gm, ''), /st\.time\(\)/);
+  // The incoming wait follows the outgoing track's own landing too.
+  assert.match(RADIO_LIQ, /mix_seam_lead = mix_lead - mix_late \/ mix_r \+ mix_a_late \/ mix_a_q/);
 });

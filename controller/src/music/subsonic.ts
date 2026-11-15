@@ -1187,7 +1187,7 @@ export function getPlayableUri(song, resolveProbeId: string | null = null) {
 export function escAnnotate(s) {
   return String(s ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
-export function getAnnotatedUri(song, opts: { maxDurationSec?: number | null; cueOutSec?: number | null; cueInSec?: number | null; resolveProbeId?: string | null; clipLeadSec?: number | null; clipCueLateSec?: number | null; localPath?: string | null; mixOut?: MixOutStamps | null; mixIn?: MixInStamps | null; mixCueLateSec?: number | null } = {}) {
+export function getAnnotatedUri(song, opts: { maxDurationSec?: number | null; cueOutSec?: number | null; cueInSec?: number | null; resolveProbeId?: string | null; clipLeadSec?: number | null; clipCueLateSec?: number | null; localPath?: string | null; mixOut?: MixOutStamps | null; mixIn?: MixInStamps | null; mixCueLateSec?: number | null; mixOutLateSec?: number | null } = {}) {
   const fields = [
     `title="${escAnnotate(song.title)}"`,
     `artist="${escAnnotate(song.artist)}"`,
@@ -1232,6 +1232,13 @@ export function getAnnotatedUri(song, opts: { maxDurationSec?: number | null; cu
       fields.push(`liq_mix_end_tempo="${opts.mixOut.end.tempo.toFixed(6)}"`);
       fields.push(`liq_mix_end_from="${opts.mixOut.end.fromSec.toFixed(4)}"`);
       fields.push(`liq_mix_end_ramp="${opts.mixOut.end.rampSec.toFixed(4)}"`);
+    }
+    // Its OWN cue-in's landing: cue_out counts from where the cue-in was asked,
+    // so the track ends that much early or late, and the incoming side's wait
+    // moves with it (radio.liq, HOT MIX SEAM).
+    if (opts.mixOutLateSec != null && Number.isFinite(opts.mixOutLateSec) && opts.mixOutLateSec !== 0
+      && opts.mixOutLateSec > -CUE_EARLY_MAX_SEC && opts.mixOutLateSec < CUE_LATE_MAX_SEC) {
+      fields.push(`liq_mix_out_late="${opts.mixOutLateSec.toFixed(6)}"`);
     }
   }
   if (opts.mixIn) {

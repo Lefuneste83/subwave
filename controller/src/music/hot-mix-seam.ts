@@ -277,3 +277,32 @@ export function planHotMixSeam(input: SeamInput): SeamVerdict {
 // that names it.
 export interface MixOutStamps { id: string; leadSec: number; end: EndStretch | null }
 export interface MixInStamps extends StartStretch { id: string }
+
+// ─── The incoming side at handoff ───────────────────────────────────────────
+
+// B's cue-in once the kick phase has moved it. The cue cannot go before the
+// file's first sample, and a downbeat there is common (an extended mix opens
+// on its kick): what the cue cannot absorb becomes `waitSec`, file seconds B
+// starts too early, which the mixer turns into a wait like a late codec-frame
+// landing (liq_mix_cue_late) rather than the correction being lost.
+export function shiftInCue(inCueSec: number, shiftSec: number): { inCueSec: number; waitSec: number } {
+  const want = inCueSec + shiftSec;
+  if (want >= 0) return { inCueSec: Math.round(want * 10000) / 10000, waitSec: 0 };
+  return { inCueSec: 0, waitSec: Math.round(-want * 1e6) / 1e6 };
+}
+
+// Whether the seam into B still stands at its handoff, and what it stamps.
+// It stands while B starts on the downbeat it was planned on. No cue-in is a
+// start at 0 s: the queue keeps only positive cues, so a downbeat at the top
+// of the file arrives as `cueInSec` absent, and is the planned start all the
+// same. `probedLateSec` is the codec-frame landing measured for this cue (none
+// for a start at 0 s, which decodes from its first sample).
+export function incomingStamps(
+  mixIn: (MixInStamps & { inCueSec: number; waitSec?: number }) | null | undefined,
+  cueInSec: number | null | undefined,
+  probedLateSec: number | null,
+): { mixIn: MixInStamps | null; cueLateSec: number | null } {
+  if (!mixIn || (cueInSec ?? 0) !== mixIn.inCueSec) return { mixIn: null, cueLateSec: null };
+  const late = (probedLateSec ?? 0) + (mixIn.waitSec ?? 0);
+  return { mixIn, cueLateSec: late !== 0 ? Math.round(late * 1e6) / 1e6 : null };
+}

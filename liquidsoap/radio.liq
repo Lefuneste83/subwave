@@ -756,7 +756,12 @@ def dj_transition(a, b) =
   # probes it for this seam too and stamps it as its own key, liq_mix_cue_late
   # (never the clip seam's, so neither seam reads the other's), and B waits
   # late / r more, r being the factor
-  # B starts at (the late part of B's audio plays stretched). The ids must
+  # B starts at (the late part of B's audio plays stretched). A's own cue-in
+  # landed on a codec frame too, and its cue_out counts from where the cue-in
+  # was asked, not where it landed, so A ends that much early or late (13 ms
+  # early on air, 15 Nov, B 13 ms ahead of the downbeat): the controller stamps
+  # that landing on A as liq_mix_out_late, and B's wait moves with A's end
+  # (in output seconds at A's closing tempo). The ids must
   # match: a jingle or a coast track between A and B leaves a plain crossfade
   # (the stretch block below keeps B's tempo at 1 then too). Bounded like the
   # clip seam, logged and left plain otherwise.
@@ -770,14 +775,18 @@ def dj_transition(a, b) =
   mix_r = if mix_r < 0.85 or mix_r > 1.15 then 1. else mix_r end
   mix_late = if mixing then float_of_string(default=0., b.metadata["liq_mix_cue_late"]) else 0. end
   mix_late = if mix_late > 0. - cue_early_max and mix_late < 0.15 then mix_late else 0. end
-  mix_seam_lead = mix_lead - mix_late / mix_r
+  mix_a_late = if mixing then float_of_string(default=0., a.metadata["liq_mix_out_late"]) else 0. end
+  mix_a_late = if mix_a_late > 0. - cue_early_max and mix_a_late < 0.15 then mix_a_late else 0. end
+  mix_a_q = float_of_string(default=1., a.metadata["liq_mix_end_tempo"])
+  mix_a_q = if mix_a_q < 0.85 or mix_a_q > 1.15 then 1. else mix_a_q end
+  mix_seam_lead = mix_lead - mix_late / mix_r + mix_a_late / mix_a_q
   mix_max_d = mix_lead + clip_seam_slack + frame.duration()
   b_delay =
     if clip_lead >= 0. and d > seam_lead and d <= clip_max_d then d - seam_lead
     elsif mix_lead >= 0. and d > mix_seam_lead and d <= mix_max_d then d - mix_seam_lead
     else 0. end
   if mix_lead >= 0. then
-    log(label="hotmix", level=3, "buffered #{d}s, lead #{mix_lead}s, cue-in landing #{mix_late}s at x#{mix_r}: incoming waits #{b_delay}s")
+    log(label="hotmix", level=3, "buffered #{d}s, lead #{mix_lead}s, cue-in landing #{mix_late}s at x#{mix_r}, outgoing cue-in landing #{mix_a_late}s: incoming waits #{b_delay}s")
     if b_delay == 0. then
       log(label="hotmix", level=2, "buffer #{d}s does not fit the lead #{mix_lead}s + slack: not aligned, plain crossfade")
     end
@@ -1718,7 +1727,13 @@ def hot_mix_tempo(s) =
     t0 := now()
   end)
   st = soundtouch(tempo=tempo, s)
-  st.on_frame(before=false, synchronous=true, fun () -> now := st.time())
+  # The clock is the audio the stretch has PRODUCED, counted a frame at a
+  # time: st.time() follows the stream clock, which cross re-syncs after it
+  # reads a transition's opening in one burst, so it jumped 15.8 s at the end
+  # of every Hot Mix overlap and the glide back to tempo never ran (measured
+  # on air, 15 Nov). A frame's slack at a track mark costs a tempo error times
+  # a frame, well under a millisecond.
+  st.on_frame(before=false, synchronous=true, fun () -> now := now() + frame.duration())
   st
 end
 music = if hot_mix_stretch() then hot_mix_tempo(music) else music end
