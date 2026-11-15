@@ -98,13 +98,16 @@ export interface RequestDrawerProps {
   onClose?: () => void;
   nowPlaying: NowPlayingTrack | null;
   context: StationContext | null;
+  /** Requests are closed right now (lib/requestsOpen.ts): the line shown in
+   *  place of the slip, so a listener learns it before writing one. */
+  closedMessage?: string | null;
 }
 
 export default function RequestDrawer({
   requestText, setRequestText,
   requesterName, setRequesterName,
   isSubmitting, onSubmit, onPoll, onClose,
-  nowPlaying, context,
+  nowPlaying, context, closedMessage = null,
 }: RequestDrawerProps) {
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   // Null while idle. On accept it holds a `pending` success card with the
@@ -207,6 +210,33 @@ export default function RequestDrawer({
             transition={{ duration: 0.12 }}
           >
             <SuccessCard result={result} />
+          </m.div>
+        ) : closedMessage ? (
+          <m.div
+            key="closed"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.12 }}
+          >
+            <div className="border border-ink bg-field/40 shadow-[3px_3px_0_var(--separator-strong)]">
+              <div className="flex items-center justify-between border-b border-ink px-3.5 py-2">
+                <span className="inline-flex items-center gap-2">
+                  <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-muted" />
+                  <span className="v3-tab-num text-[9px] tracking-[0.34em] text-ink uppercase">Line closed</span>
+                </span>
+                <span className="v3-tab-num inline-flex items-center gap-1.5 text-[9px] tracking-[0.34em] text-muted uppercase">
+                  <Radio size={11} strokeWidth={1.75} />
+                  Request slip
+                </span>
+              </div>
+              <p
+                role="status"
+                className="px-3.5 py-4 [font-family:var(--font-display),Georgia,serif] text-[16px] leading-snug text-ink italic"
+              >
+                {closedMessage}
+              </p>
+            </div>
           </m.div>
         ) : (
           <m.div

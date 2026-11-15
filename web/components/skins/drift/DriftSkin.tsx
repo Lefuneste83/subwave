@@ -484,13 +484,15 @@ export default function DriftSkin(_props: SkinProps) {
             {slip.ack ? (
               <div className="flex items-baseline gap-2.5">
                 <span className="min-w-0 flex-1 text-[13px] italic">{slip.ack}</span>
-                <button
-                  type="button"
-                  onClick={slip.reset}
-                  className="v3-focus cursor-pointer border-0 bg-transparent p-0 font-mono text-[10px] tracking-[0.2em] text-muted uppercase hover:text-ink"
-                >
-                  again
-                </button>
+                {!slip.closed && (
+                  <button
+                    type="button"
+                    onClick={slip.reset}
+                    className="v3-focus cursor-pointer border-0 bg-transparent p-0 font-mono text-[10px] tracking-[0.2em] text-muted uppercase hover:text-ink"
+                  >
+                    again
+                  </button>
+                )}
               </div>
             ) : (
               <>

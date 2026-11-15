@@ -10,6 +10,7 @@ import { useReducedMotion } from 'motion/react';
 import { usePlayerActions, usePlayerFeed } from '@/components/player/PlayerCore';
 import { useLiteMode } from '@/hooks/useLiteMode';
 import { isRefusedOutcome } from '@/lib/request-outcome';
+import { requestsClosedMessage } from '@/lib/requestsOpen';
 import { lastVoiceLine, voiceOnAirMs } from './shared';
 import { crossfadeSettled, crossfadeStart, crossfadeTo, type Crossfade } from './crossfade';
 import { fitSvgTexts } from './svgTextFit';
@@ -73,14 +74,20 @@ export interface RequestSlip {
   reset: () => void;
   sending: boolean;
   /** Submit the current text, or `text` when a skin keeps its own (Cipher's
-   *  tape). No-op while empty or already sending. */
+   *  tape). No-op while empty or already sending, and while closed. */
   send: (text?: string) => Promise<void>;
+  /** Requests are closed on the station right now (lib/requestsOpen.ts):
+   *  `ack` already carries the reason and `outcome` reads 'refused', so a skin
+   *  that shows its ack in place of the form says so before anyone types.
+   *  A skin hides its "send another" control while this holds. */
+  closed: boolean;
 }
 
 /** The shared request-slip state machine: compose → send → show the
  *  controller's ack (or the skin's fallback copy) → reset. */
 export function useRequestSlip(copy: RequestSlipCopy): RequestSlip {
   const { submitRequest, pollRequest } = usePlayerActions();
+  const closedMessage = requestsClosedMessage(usePlayerFeed().state);
   const [text, setText] = useState('');
   const [name, setName] = useState('');
   const [ack, setAck] = useState<string | null>(null);
@@ -134,7 +141,7 @@ export function useRequestSlip(copy: RequestSlipCopy): RequestSlip {
 
   const send = async (override?: string) => {
     const trimmed = (override ?? text).trim();
-    if (!trimmed || sending) return;
+    if (!trimmed || sending || closedMessage) return;
     stopPolling();
     setSending(true);
     try {
@@ -160,7 +167,12 @@ export function useRequestSlip(copy: RequestSlipCopy): RequestSlip {
     setAck(null);
     setOutcome(null);
   }, [stopPolling]);
-  return { text, setText, name, setName, ack, outcome, reset, sending, send };
+  // Closed wins over a finished slip too: an answer to an earlier request is
+  // stale once the station has closed, and the form must not come back.
+  if (closedMessage && !sending) {
+    return { text, setText, name, setName, ack: closedMessage, outcome: 'refused', reset, sending, send, closed: true };
+  }
+  return { text, setText, name, setName, ack, outcome, reset, sending, send, closed: false };
 }
 
 export interface TrackLike {

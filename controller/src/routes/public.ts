@@ -22,6 +22,7 @@ import { advertisedMounts } from '../setup/hosted.js';
 import { clockDisplay, getStationTimezone, zonedParts } from '../time.js';
 import { composeBoothFeed } from '../broadcast/booth-carry.js';
 import { publicQueueState, publicSessionTurn } from '../util/public-feed.js';
+import { requestsClosureNow } from '../util/requests-open.js';
 import { listThemesAnnotated, DEFAULT_THEME_ID, themeAssetMime, themeAssetsDir } from '../themes.js';
 import { listCommunitySkills } from '../skills/loader.js';
 import { listCommunityPersonas } from '../personas/community.js';
@@ -521,6 +522,14 @@ router.get('/state', (req, res) => {
       skin: s?.ui?.skin || 'classic',
       tuneInOverlay: s?.ui?.tuneInOverlay ?? true,
     },
+    // Whether listener requests are open now, so a player can say so before a
+    // listener types one (util/requests-open.ts, the decision POST /request
+    // refuses on). `message` only when closed. Absent on an older controller,
+    // which players read as open.
+    requests: (() => {
+      const c = requestsClosureNow();
+      return c.open ? { open: true } : { open: false, message: c.message };
+    })(),
     // Whether a skin offers the Lyrics panel; GET /lyrics/current refuses when off.
     lyrics: { enabled: s?.lyrics?.enabled === true },
     // For rendering timestamps in station-local time (#418).

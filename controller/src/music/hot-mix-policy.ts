@@ -149,7 +149,8 @@ export function withinTempoWindow<T>(tracks: readonly T[], w: TempoWindow, bpmOf
 }
 
 // Never-starve, for the pool picker: the window's tracks when it has any, else
-// the nearest tempos, compatible key first among near-equal gaps. Tracks with no
+// the nearest tempos (within one step of the nearest there is, at most eight),
+// compatible key first among near-equal gaps. Tracks with no
 // tempo stay out unless nothing else exists. Always a fresh array.
 export function nearestTempoFallback<T>(
   tracks: readonly T[],
@@ -168,7 +169,10 @@ export function nearestTempoFallback<T>(
     if (a.key !== b.key) return b.key - a.key;
     return a.i - b.i;
   });
-  return { tracks: measured.slice(0, NEAREST_KEEP).map((x) => x.t), relaxed: true };
+  // The window moves out only as far as the nearest tempo there is, plus one
+  // step: "the nearest tempos", not the nearest eight whatever their distance.
+  const reach = measured[0].step + w.maxStepPct;
+  return { tracks: measured.filter((x) => x.step <= reach + 1e-9).slice(0, NEAREST_KEEP).map((x) => x.t), relaxed: true };
 }
 
 // A short booth-log description of a window.

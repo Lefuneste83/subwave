@@ -35,6 +35,8 @@ const { buildPickerTools } = await import('../src/llm/internal/tools/picker/inde
 const { steeredShow } = await import('../src/music/steer.js');
 const { hotMixOf } = await import('../src/music/hot-mix-policy.js');
 const { router: requestRouter } = await import('../src/routes/request.js');
+const { router: publicRouter } = await import('../src/routes/public.js');
+const { requestsClosure } = await import('../src/util/requests-open.js');
 
 type Song = { id: string; title: string; artist: string; duration: number; genre: string; genres: Array<{ name: string }>; bpm?: number };
 let seq = 0;
@@ -50,6 +52,7 @@ const realFetch = globalThis.fetch;
 const app = express();
 app.use(express.json());
 app.use(requestRouter);
+app.use(publicRouter);
 const server = app.listen(0, '127.0.0.1');
 await new Promise((resolve) => server.once('listening', resolve));
 const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -205,8 +208,9 @@ test('pool: with nothing inside the window it never starves, it takes the neares
   const { q, logs } = stubQueue(124);
   const picked = await pool(q, show);
   assert.ok(picked);
-  assert.equal(offered[0][0].id, 'nearest');
-  assert.ok(!offered[0].some((c) => c.id === 'unknown'));
+  // 140 is the nearest (13 %); 170 reads as 85, 31 % away, past one step
+  // beyond it, so only the nearest reaches the model.
+  assert.deepEqual(offered[0].map((c) => c.id), ['nearest']);
   assert.ok(logs.some((l) => /nothing inside .* taking the nearest tempos/.test(l)), logs.join('\n'));
 });
 
@@ -243,6 +247,41 @@ test('requests: the toggle opens them, and a show without Hot Mix is untouched',
     const body: any = await res.json().catch(() => ({}));
     assert.doesNotMatch(String(body.message ?? ''), /continuous mix/);
   }
+});
+
+// ─── Telling the listener first ─────────────────────────────────────────────
+
+const stateRequests = async () => ((await (await realFetch(`${base}/state`)).json()) as any).requests;
+
+test('/state publishes the closure before anyone sends, with the same line the route refuses with', async () => {
+  await onAir(MIX);
+  assert.deepEqual(await stateRequests(), { open: false, message: "Requests are closed during Future Frequencies: it's a continuous mix." });
+  await onAir({ hotMix: { enabled: true, closeRequests: false } });
+  assert.deepEqual(await stateRequests(), { open: true });
+  await onAir({});
+  assert.deepEqual(await stateRequests(), { open: true });
+});
+
+test('the station switch closes them too, and outranks a show that would open them', async () => {
+  await onAir({});
+  await settings.update({ requests: { enabled: false } } as never);
+  try {
+    assert.deepEqual(await stateRequests(), { open: false, message: 'Requests are temporarily closed.' });
+    const res = await ask();
+    assert.equal(res.status, 503);
+    assert.equal(((await res.json()) as any).message, 'Requests are temporarily closed.');
+  } finally {
+    await settings.update({ requests: { enabled: true } } as never);
+  }
+});
+
+test('requestsClosure: the one decision, pure', () => {
+  const mix = { name: 'Late Mix', hotMix: { enabled: true } };
+  assert.deepEqual(requestsClosure({ disabledByEnv: false, stationEnabled: undefined, show: null }), { open: true });
+  assert.deepEqual(requestsClosure({ disabledByEnv: true, stationEnabled: true, show: null }), { open: false, reason: 'station', message: 'Requests are temporarily closed.' });
+  assert.equal((requestsClosure({ disabledByEnv: false, stationEnabled: false, show: mix }) as any).reason, 'station');
+  assert.deepEqual(requestsClosure({ disabledByEnv: false, stationEnabled: true, show: mix }), { open: false, reason: 'hot-mix', message: "Requests are closed during Late Mix: it's a continuous mix." });
+  assert.match((requestsClosure({ disabledByEnv: false, stationEnabled: true, show: { hotMix: { enabled: true } } }) as any).message, /during this show/);
 });
 
 // ─── The saved show ─────────────────────────────────────────────────────────

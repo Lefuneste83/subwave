@@ -115,7 +115,8 @@ test('with nothing in the window: nearest tempo first, a compatible key breaks n
   ];
   const fit = nearestTempoFallback(tracks, w, (t) => t, '8A');
   assert.equal(fit.relaxed, true);
-  assert.deepEqual(fit.tracks.map((t) => t.id), ['near-match', 'near-clash', 'far']);
+  // 150 is 17 % away, beyond one step past the nearest (4.7 % + 2 %): left out.
+  assert.deepEqual(fit.tracks.map((t) => t.id), ['near-match', 'near-clash']);
 });
 
 test('the fallback never returns its input, and only offers unknown tempos when nothing else exists', () => {

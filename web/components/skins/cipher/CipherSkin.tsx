@@ -221,6 +221,12 @@ export default function CipherSkin({ contained }: SkinProps) {
 
   const pressKey = (ch: string, hold?: boolean) => {
     if (!live) return;
+    // Requests closed (lib/requestsOpen.ts): the first key shows why on the
+    // tape instead of letting a note be typed that cannot be sent.
+    if (slip.closed) {
+      setSent('');
+      return;
+    }
     if (sent != null && ch !== ' ') {
       setSent(null);
       slip.reset();
@@ -229,7 +235,7 @@ export default function CipherSkin({ contained }: SkinProps) {
   };
   const send = () => {
     const text = plain.trim();
-    if (!live || !text || slip.sending) return;
+    if (!live || !text || slip.sending || slip.closed) return;
     setSent(groups(machine.cipher));
     machine.clear();
     void slip.send(text);
@@ -351,12 +357,12 @@ export default function CipherSkin({ contained }: SkinProps) {
         : mode === 'compose'
           ? `outgoing · to ${djName}`
           : mode === 'sent'
-            ? (slip.sending || !slip.outcome ? 'sending · enciphered' : SENT_EYEBROW[slip.outcome])
+            ? (slip.closed ? 'requests closed' : slip.sending || !slip.outcome ? 'sending · enciphered' : SENT_EYEBROW[slip.outcome])
             : mode === 'talk'
               ? `${djName} · on air`
               : muted
                 ? 'receiving · muted'
-                : `receiving · ${showName || 'on air'}`;
+                : `receiving · ${showName || 'on air'}${slip.closed ? ' · requests closed' : ''}`;
   const eyebrowR = mode === 'compose'
     ? `${plain.length} / ${MSG_MAX}`
     : phase === 'connecting'
@@ -381,7 +387,7 @@ export default function CipherSkin({ contained }: SkinProps) {
     },
     talk: talkText,
     compose: { plain, cipher: groups(machine.cipher) },
-    sent: { line: sentLine, cipher: sent ?? '', outcome: slip.sending ? null : slip.outcome },
+    sent: { line: sentLine, cipher: sent ?? '', outcome: slip.sending ? null : slip.outcome, closed: slip.closed },
   };
 
   const rotorI = (
@@ -837,7 +843,7 @@ interface TapeProps {
   compose: { plain: string; cipher: string };
   /** The note on the wire: the booth's line, its cipher groups, and how it
    *  ended (null while it is still sending). */
-  sent: { line: string; cipher: string; outcome: RequestOutcome | null };
+  sent: { line: string; cipher: string; outcome: RequestOutcome | null; closed?: boolean };
 }
 
 /** Title sizes that keep a long name inside the tape: [size, lines]. */
@@ -982,7 +988,9 @@ function Tape({ variant, mode, eyebrow, eyebrowR, keyText, store, song, talk, co
           </div>
           {desk && (
             <div className="mt-auto font-mono text-[10px] tracking-[0.16em] text-muted uppercase">
-              {sent.outcome === 'refused' || sent.outcome === 'failed'
+              {sent.closed
+                ? 'requests closed · nothing was sent'
+                : sent.outcome === 'refused' || sent.outcome === 'failed'
                 ? SENT_FOOT[sent.outcome]
                 : <>sent enciphered · {keyText}</>}
             </div>

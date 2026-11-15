@@ -223,6 +223,10 @@ export interface StationState {
   ui?: { boothBuddy?: boolean; skin?: string; tuneInOverlay?: boolean };
   /** Whether the operator has the Lyrics panel on. Absent on an older controller. */
   lyrics?: { enabled?: boolean };
+  /** Whether listener requests are open now (station switch, or a DJ Hot Mix
+   *  show that closes them). `message` is the line to show instead of the
+   *  form. Absent on an older controller = open (lib/requestsOpen.ts). */
+  requests?: { open?: boolean; message?: string };
   /** Private-station flags (#478) — booleans only, never credentials.
    *  `privatePlayer` swaps the player pages for a "private station" screen;
    *  `listenerAuth` means the mounts demand the shared listener password

@@ -722,13 +722,15 @@ export default function PlatterSkin(_props: SkinProps) {
             {slip.ack ? (
               <div className="flex flex-col gap-2">
                 <div className="text-[13px] leading-relaxed italic">{slip.ack}</div>
-                <button
-                  type="button"
-                  onClick={slip.reset}
-                  className="v3-focus cursor-pointer self-start border-0 bg-transparent p-0 font-mono text-[10px] font-bold tracking-[0.14em] text-muted uppercase hover:text-ink"
-                >
-                  new slip
-                </button>
+                {!slip.closed && (
+                  <button
+                    type="button"
+                    onClick={slip.reset}
+                    className="v3-focus cursor-pointer self-start border-0 bg-transparent p-0 font-mono text-[10px] font-bold tracking-[0.14em] text-muted uppercase hover:text-ink"
+                  >
+                    new slip
+                  </button>
+                )}
               </div>
             ) : (
               <div className="flex flex-col gap-2">

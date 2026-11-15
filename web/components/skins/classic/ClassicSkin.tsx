@@ -32,6 +32,7 @@ import {
 import { useTuneInGate } from '@/components/player/useTuneInGate';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { useLyricsPreference, useTrackLyrics } from '@/components/skins/lyrics';
+import { requestsClosedMessage } from '@/lib/requestsOpen';
 import { useStationClient } from '@/lib/stationClient';
 import type { SkinProps } from '@/components/skins/types';
 import type { QueueEntry, RequestResult } from '@/lib/types';
@@ -281,6 +282,7 @@ export default function ClassicSkin({ portalNode }: SkinProps) {
             onClose={() => setDrawer(null)}
             nowPlaying={nowPlaying}
             context={context}
+            closedMessage={requestsClosedMessage(state)}
           />
         )}
         {drawer === 'schedule' && <ScheduleDrawer activeShow={activeShow} context={context} />}

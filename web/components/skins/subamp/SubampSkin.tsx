@@ -429,13 +429,15 @@ export default function SubampSkin(_props: SkinProps) {
                 {slip.ack ? (
                   <>
                     <span className="min-w-0 flex-1 truncate text-[11px] italic">{slip.ack}</span>
-                    <button
-                      type="button"
-                      onClick={slip.reset}
-                      className="v3-focus cursor-pointer border-0 bg-transparent p-0 text-[10px] font-bold tracking-[0.14em] text-muted uppercase hover:text-ink"
-                    >
-                      new
-                    </button>
+                    {!slip.closed && (
+                      <button
+                        type="button"
+                        onClick={slip.reset}
+                        className="v3-focus cursor-pointer border-0 bg-transparent p-0 text-[10px] font-bold tracking-[0.14em] text-muted uppercase hover:text-ink"
+                      >
+                        new
+                      </button>
+                    )}
                   </>
                 ) : (
                   <>

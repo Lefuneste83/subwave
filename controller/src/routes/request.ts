@@ -23,7 +23,6 @@ import {
 } from '../util/request-guard.js';
 import {
   checkRateLimit, checkGlobalRateLimit, commitRateLimit, commitGlobalRateLimit, clientIp,
-  REQUESTS_DISABLED,
 } from '../middleware/ratelimit.js';
 import { validatePublicBody } from '../middleware/validate.js';
 import { listenerRequestSchema } from '../schemas/request.js';
@@ -32,7 +31,7 @@ import { requestWaitClause } from '../broadcast/queue/pure.js';
 import { matchedRequestLookups, matchedRequestStandIn } from '../util/request-claim.js';
 import { ARTIST_VARIETY_WINDOW, drawRequestCandidate } from '../broadcast/dj-agent/artist-guard.js';
 import { heldBackFromShow } from '../music/explicit-policy.js';
-import { takesRequests } from '../music/hot-mix-policy.js';
+import { requestsClosureNow } from '../util/requests-open.js';
 
 export const router = express.Router();
 
@@ -647,15 +646,12 @@ async function resolveRequest(entry) {
 // carries an unprefixed message plus the success/message keys the native app reads.
 router.post('/request', validatePublicBody(listenerRequestSchema), async (req, res) => {
   const cfg = (settings.get() as any)?.requests || {};
-  if (REQUESTS_DISABLED || cfg.enabled === false) {
-    return res.status(503).json({ success: false, message: 'Requests are temporarily closed.' });
-  }
-  // A DJ Hot Mix show closes requests unless its operator opened them
-  // (music/hot-mix-policy.ts). Judged on the show on air now, like the clean
-  // show's hold below; the operator's own pushes never come through here.
-  const onAir = settings.resolveActiveShow();
-  if (!takesRequests(onAir)) {
-    return res.status(503).json({ success: false, message: `Requests are closed during ${onAir?.name || 'this show'}: it's a continuous mix.` });
+  // Station off, or a DJ Hot Mix show that closes them on air: one decision,
+  // also published on GET /state so players say so before anyone types
+  // (util/requests-open.ts).
+  const closure = requestsClosureNow();
+  if (!closure.open) {
+    return res.status(503).json({ success: false, message: closure.message });
   }
 
   // Zero-listener pause.

@@ -620,16 +620,18 @@ function RequestCard({
       {slip.ack ? (
         <div className={cn('flex flex-col gap-2.5', mob ? 'px-4 pt-3.5 pb-5' : 'p-3.5')}>
           <span className="font-display text-[16px] leading-normal italic">{slip.ack}</span>
-          <button
-            type="button"
-            onClick={slip.reset}
-            className={cn(
-              'v3-focus cursor-pointer self-start border-0 bg-transparent p-0 font-mono text-[10px] font-bold tracking-[0.14em] text-muted uppercase hover:text-ink',
-              mob && 'min-h-11',
-            )}
-          >
-            another
-          </button>
+          {!slip.closed && (
+            <button
+              type="button"
+              onClick={slip.reset}
+              className={cn(
+                'v3-focus cursor-pointer self-start border-0 bg-transparent p-0 font-mono text-[10px] font-bold tracking-[0.14em] text-muted uppercase hover:text-ink',
+                mob && 'min-h-11',
+              )}
+            >
+              another
+            </button>
+          )}
         </div>
       ) : (
         <form

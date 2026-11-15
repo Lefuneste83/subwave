@@ -535,13 +535,15 @@ export function RequestWindow({
               <div className="font-display text-[20px] leading-[1.45] text-[#e6e0d4] italic">
                 {slip.ack}
               </div>
-              <button
-                type="button"
-                onClick={slip.reset}
-                className="v3-focus cursor-pointer self-start border-0 bg-transparent p-0 font-mono text-[10px] font-bold tracking-[0.2em] text-[var(--accent)] uppercase hover:opacity-80"
-              >
-                new request
-              </button>
+              {!slip.closed && (
+                <button
+                  type="button"
+                  onClick={slip.reset}
+                  className="v3-focus cursor-pointer self-start border-0 bg-transparent p-0 font-mono text-[10px] font-bold tracking-[0.2em] text-[var(--accent)] uppercase hover:opacity-80"
+                >
+                  new request
+                </button>
+              )}
             </div>
           ) : (
             <>
