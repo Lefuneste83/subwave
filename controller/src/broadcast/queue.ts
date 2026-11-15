@@ -16,7 +16,6 @@ import { aboveKnownTrackCeiling } from '../music/track-duration.js';
 import { anyCleanShow, heldBackFromShow } from '../music/explicit-policy.js';
 import * as silenceTrim from '../music/silence-trim.js';
 import * as hotMixSeam from '../music/hot-mix-seam.js';
-import * as kickPhase from '../music/kick-phase.js';
 import { hotMixOf } from '../music/hot-mix-policy.js';
 import { getGrid } from '../music/library-db.js';
 import * as cueLanding from '../music/cue-landing.js';
@@ -93,7 +92,6 @@ import * as scrobble from './scrobble.js';
 import * as liquidsoapControl from './liquidsoap-control.js';
 import {
   cueProbeBudgetMs,
-  kickPhaseBudgetMs,
   drainAction,
   introRenderBudgetSec,
   mountCheckBudgetMs,
@@ -2044,46 +2042,14 @@ class Queue {
     });
     if (!verdict.ok) return plain(verdict.reason);
     const plan = verdict.plan;
-    // Kick against kick (music/kick-phase.ts): a grid sits a track-specific
-    // few to ~45 ms before its kicks, so two grids aligned beat for beat flam
-    // by the difference. Measure where B's kick sits against A's over the
-    // overlap's own beats and move B's cue-in by it. Unknown on either side
-    // (no time, no source, beats too unlike to compare) aligns on the grids.
-    let phaseNote = 'kick phase unchecked';
-    let waitSec = 0;
-    const budgetMs = kickPhaseBudgetMs(this.remainingUntilItemAirs(item));
-    if (budgetMs > 0) {
-      const sourceOf = (t: Track) => {
-        try {
-          return subsonic.findLibraryFile(t) || (t.id ? subsonic.getRawStreamUrl(t.id) : null);
-        } catch { return null; }
-      };
-      const aSrc = sourceOf(item.track);
-      const bSrc = sourceOf(successor.track);
-      if (aSrc && bSrc) {
-        const [ta, tb] = await Promise.all([
-          kickPhase.measureBeatTemplate(aSrc, plan.aOverlapBeats, { timeoutMs: budgetMs }),
-          kickPhase.measureBeatTemplate(bSrc, plan.bOverlapBeats, { timeoutMs: budgetMs }),
-        ]);
-        const rel = ta.template && tb.template ? kickPhase.relativePhase(ta.template, tb.template) : null;
-        if (rel) {
-          const pB = plan.bOverlapBeats[1] - plan.bOverlapBeats[0];
-          const shift = rel.beats * pB;
-          const moved = hotMixSeam.shiftInCue(plan.inCueSec, shift);
-          plan.inCueSec = moved.inCueSec;
-          waitSec = moved.waitSec;
-          phaseNote = `kicks ${shift >= 0 ? '+' : ''}${Math.round(shift * 1000)} ms apart on the grids, ${waitSec
-            ? `cue-in at the file's start and the incoming side waits ${Math.round(waitSec * 1000)} ms`
-            : 'cue-in moved'} (match ${rel.corr})`;
-        } else {
-          phaseNote = `kick phase unknown (${!ta.template ? ta.reason : !tb.template ? tb.reason : 'the two beats are too unlike'}): aligned on the grids`;
-        }
-      }
-    }
+    // B lines up grid on grid. The beat tracker's grid is where a listener
+    // hears the beat, kick shape and all: re-aligning on the kicks' attacks
+    // was tried and moved a soft-attack kick 27 ms off what the ear locks to
+    // (music.md, the seam).
     if (!this.upcoming.includes(item) || !this.upcoming.includes(successor) || successor.sent) return;
     const id = randomBytes(4).toString('hex');
     item.mixOut = { id, leadSec: plan.leadSec, end: plan.aEnd, outCueSec: plan.outCueSec };
-    successor.mixIn = { id, ...plan.bStart, inCueSec: plan.inCueSec, ...(waitSec ? { waitSec } : {}) };
+    successor.mixIn = { id, ...plan.bStart, inCueSec: plan.inCueSec };
     // An older mixer ignores the mix stamps: it crossfades over the overlap.
     item.track.crossSec = plan.leadSec;
     for (const k of ['washout', 'loop'] as const) {
@@ -2097,7 +2063,7 @@ class Queue {
     const moves = plan.kind === 'split'
       ? `split: out ×${plan.aEnd!.tempo.toFixed(4)}, in ×${plan.bStart.tempo.toFixed(4)}`
       : `in ×${plan.bStart.tempo.toFixed(4)}, out untouched`;
-    this.log('mix', `Hot Mix seam ${pairTitle}: ${plan.aBpm} → ${plan.bBpm} BPM (${plan.gapPct > 0 ? '+' : ''}${plan.gapPct} %), ${moves}; overlap ${plan.leadSec}s, cut ${plan.outCueSec}s, cue-in ${plan.inCueSec}s; ${phaseNote}`);
+    this.log('mix', `Hot Mix seam ${pairTitle}: ${plan.aBpm} → ${plan.bBpm} BPM (${plan.gapPct > 0 ? '+' : ''}${plan.gapPct} %), ${moves}; overlap ${plan.leadSec}s, cut ${plan.outCueSec}s, cue-in ${plan.inCueSec}s, grid on grid`);
   }
 
   // Basenames of rendered transition clips that haven't AIRED yet — the clip

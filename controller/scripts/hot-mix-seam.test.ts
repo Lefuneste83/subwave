@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   GLIDE_SEC, OVERLAP_BEATS, RAMP_BEATS, SYNC_MAX_PCT,
-  incomingStamps, outAt, planHotMixSeam, profileOf, shiftInCue, srcAt,
+  incomingStamps, outAt, planHotMixSeam, profileOf, srcAt,
   type SeamInput, type StartStretch, type EndStretch,
 } from '../src/music/hot-mix-seam.js';
 
@@ -152,15 +152,6 @@ test('an outgoing track that was mixed in: its ramp and overlap land on its own 
   assert.ok(Math.abs(liqSrcAt(start, p.aEnd, overlapStartOut) - dRel) < 3e-3);
 });
 
-test('a kick shift the cue-in cannot take before the file starts becomes a wait', () => {
-  assert.deepEqual(shiftInCue(0.2, -0.015), { inCueSec: 0.185, waitSec: 0 });
-  assert.deepEqual(shiftInCue(0.2, 0.03), { inCueSec: 0.23, waitSec: 0 });
-  // A downbeat on the first sample, the kick wanting B 15 ms sooner (on air,
-  // 15 Nov): the cue stays at 0 and B waits the 15 ms instead.
-  assert.deepEqual(shiftInCue(0, -0.015), { inCueSec: 0, waitSec: 0.015 });
-  assert.deepEqual(shiftInCue(0.01, -0.025), { inCueSec: 0, waitSec: 0.015 });
-});
-
 test('the seam into B stands on a downbeat at the top of the file, where the queue keeps no cue-in', () => {
   const mixIn = { id: 'ab12', tempo: 1.0083, holdSec: 16, glideSec: 16, inCueSec: 0 };
   // The queue keeps only positive cues: a start at 0 s arrives as no cue-in.
@@ -172,9 +163,7 @@ test('the seam into B stands on a downbeat at the top of the file, where the que
   const deep = { ...mixIn, inCueSec: 0.2 };
   assert.equal(incomingStamps(deep, 0.2, null).mixIn, deep);
   assert.equal(incomingStamps(deep, undefined, null).mixIn, null);
-  // The wait the cue could not take rides the landing stamp, added to a probe.
-  assert.equal(incomingStamps({ ...mixIn, waitSec: 0.015 }, undefined, null).cueLateSec, 0.015);
-  assert.equal(incomingStamps({ ...deep, waitSec: 0.01 }, 0.2, -0.024).cueLateSec, -0.014);
+  // The probed landing rides the stamp.
   assert.equal(incomingStamps(deep, 0.2, 0.021).cueLateSec, 0.021);
   assert.deepEqual(incomingStamps(null, 0, null), { mixIn: null, cueLateSec: null });
 });

@@ -86,16 +86,6 @@ export function cueProbeBudgetMs(remaining: number | null): number {
   return preCommitBudgetMs(remaining, CUE_PROBE_TIMEOUT_MS);
 }
 
-// The Hot Mix kick-phase check's ceiling (music/kick-phase.ts): two ffmpeg
-// decodes in parallel, the outgoing one sequential from its first sample
-// (about 2-3 s on a local file, a download over HTTP). Zero skips the check:
-// the seam aligns on the two grids.
-export const KICK_PHASE_TIMEOUT_MS = 10_000;
-
-export function kickPhaseBudgetMs(remaining: number | null): number {
-  return preCommitBudgetMs(remaining, KICK_PHASE_TIMEOUT_MS);
-}
-
 // Budget for asking the mixer whether it can read the pick's own file, in ms
 // (music/library-mount.ts mixerReadablePath). Zero asks nothing and the pick
 // streams, the side that never loses the music.
