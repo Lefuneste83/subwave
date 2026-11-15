@@ -49,9 +49,10 @@ export const SHOW_VOCALS = ['instrumental', 'vocal'] as const;
 
 // DJ Hot Mix (music/hot-mix-policy.ts owns what the switch does). The step is
 // the widest tempo gap, in %, between two consecutive tracks of the show; the
-// default is the rendered blend's stretch window. The curve is a few
+// default is the gap a DJ closes by syncing the incoming track alone, leaving
+// the outgoing one untouched. The curve is a few
 // (position %, BPM) points over the show's running time.
-export const HOT_MIX_STEP_PCT_DEFAULT = 6;
+export const HOT_MIX_STEP_PCT_DEFAULT = 3;
 export const HOT_MIX_STEP_PCT_MIN = 1;
 export const HOT_MIX_STEP_PCT_MAX = 20;
 export const HOT_MIX_CURVE_POINTS_MAX = 8;

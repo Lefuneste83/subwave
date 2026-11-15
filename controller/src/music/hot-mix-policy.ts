@@ -5,9 +5,11 @@
 //
 // The step limit. A pick may move at most `maxStepPct` away from the tempo of
 // the track it follows, octave-safe: 64 BPM reads as 128, so a half-time
-// breakdown track is not "far" from a 128 groove. The default is the rendered
-// blend's stretch window (±6 %), the widest gap a beat-matched blend can close
-// without a whole-track stretch, which the station never does.
+// breakdown track is not "far" from a 128 groove. The default (±3 %) is the gap
+// a DJ closes by syncing the incoming track alone, leaving the outgoing one
+// untouched; past it a mix splits the difference between both, and past about
+// twice it no beat mix sounds smooth (mix-design.md, the operator's rule). The
+// station never stretches a whole track.
 //
 // The curve. A show may name its tempo over its running time as a few points
 // (position in %, BPM). It never widens the step: it only says which way the

@@ -58,11 +58,12 @@ test('off, malformed or absent is no window: the show picks as it always did', (
 
 test('the window is the step around the anchor, the default when the step is bad', () => {
   const w = tempoWindowFor(ON(), 125, null)!;
+  assert.equal(HOT_MIX_STEP_PCT_DEFAULT, 3);
   assert.deepEqual(w, { anchorBpm: 125, maxStepPct: HOT_MIX_STEP_PCT_DEFAULT, targetBpm: null, toward: null });
   assert.equal(tempoWindowFor(ON({ maxStepPct: 400 }), 125, null)!.maxStepPct, HOT_MIX_STEP_PCT_DEFAULT);
   assert.equal(tempoWindowFor(ON({ maxStepPct: 3 }), 125, null)!.maxStepPct, 3);
-  assert.equal(fitsTempoWindow(132.5, w), true);
-  assert.equal(fitsTempoWindow(133, w), false);
+  assert.equal(fitsTempoWindow(128.75, w), true);
+  assert.equal(fitsTempoWindow(129, w), false);
   assert.equal(fitsTempoWindow(64, w), true);
   assert.equal(fitsTempoWindow(null, w), false);
 });
@@ -76,14 +77,14 @@ test('an anchor with no tempo falls back to the curve, and with no curve there i
 
 test('the curve says which way to move; it never widens the step', () => {
   const curve = [{ at: 0, bpm: 120 }, { at: 100, bpm: 140 }];
-  const up = tempoWindowFor(ON({ curve }), 120, 1)!;
+  const up = tempoWindowFor(ON({ curve, maxStepPct: 6 }), 120, 1)!;
   assert.equal(up.toward, 'up');
   assert.equal(up.maxStepPct, 6);
   const tracks = [{ id: 'down', bpm: 116 }, { id: 'far', bpm: 140 }, { id: 'up', bpm: 125 }, { id: 'none', bpm: null }];
   const offered = withinTempoWindow(tracks, up, (t) => t.bpm).map((t) => t.id);
   assert.deepEqual(offered, ['up', 'down']);
   // On the curve: both sides equally welcome, in the order they came.
-  const level = tempoWindowFor(ON({ curve }), 130, 0.5)!;
+  const level = tempoWindowFor(ON({ curve, maxStepPct: 6 }), 130, 0.5)!;
   assert.equal(level.toward, null);
   assert.deepEqual(withinTempoWindow([{ bpm: 126 }, { bpm: 134 }], level, (t) => t.bpm).map((t) => t.bpm), [126, 134]);
 });
@@ -146,8 +147,8 @@ const parse = (extra: Record<string, unknown>) => showSchema(ctx).safeParse({ na
 test('a show saved before the field reads as off, with the defaults', () => {
   const r = parse({});
   assert.ok(r.success);
-  assert.deepEqual(r.data.hotMix, { enabled: false, maxStepPct: 6, curve: [], closeRequests: true });
-  assert.deepEqual(parse({ hotMix: null }).data?.hotMix, { enabled: false, maxStepPct: 6, curve: [], closeRequests: true });
+  assert.deepEqual(r.data.hotMix, { enabled: false, maxStepPct: 3, curve: [], closeRequests: true });
+  assert.deepEqual(parse({ hotMix: null }).data?.hotMix, { enabled: false, maxStepPct: 3, curve: [], closeRequests: true });
 });
 
 test('save: numeric strings are read, the curve is ordered and de-duplicated by position', () => {
@@ -162,15 +163,15 @@ test('save REFUSES an out-of-bounds step or curve point; load drops or defaults 
   assert.equal(parse({ hotMix: { enabled: true, curve: [{ at: 50, bpm: 400 }] } }).success, false);
   assert.equal(parse({ hotMix: { enabled: true, curve: Array.from({ length: 9 }, (_, i) => ({ at: i * 10, bpm: 120 })) } }).success, false);
   assert.deepEqual(repairHotMix({ enabled: true, maxStepPct: 50, curve: [{ at: 120, bpm: 128 }, { at: 50, bpm: 126 }, 'x'] }),
-    { enabled: true, maxStepPct: 6, curve: [{ at: 50, bpm: 126 }], closeRequests: true });
-  assert.deepEqual(repairHotMix('on'), { enabled: false, maxStepPct: 6, curve: [], closeRequests: true });
+    { enabled: true, maxStepPct: 3, curve: [{ at: 50, bpm: 126 }], closeRequests: true });
+  assert.deepEqual(repairHotMix('on'), { enabled: false, maxStepPct: 3, curve: [], closeRequests: true });
 });
 
 test('the load path repairs before the schema, so a stale block costs the value, not the show', () => {
   const repaired = repairShowForLoad({ name: 'Mix', personaId: 'p', hotMix: { enabled: true, maxStepPct: 99, curve: [{ at: 'x', bpm: 1 }] } }, null);
   const r = showSchema(ctx).safeParse(repaired);
   assert.ok(r.success);
-  assert.deepEqual(r.data.hotMix, { enabled: true, maxStepPct: 6, curve: [], closeRequests: true });
+  assert.deepEqual(r.data.hotMix, { enabled: true, maxStepPct: 3, curve: [], closeRequests: true });
   assert.equal(repairShowForLoad({ name: 'Mix', personaId: 'p' }, null).hotMix, undefined);
 });
 

@@ -11,7 +11,7 @@ import { showSchema } from '@/lib/schemas.generated';
 
 const schema = showSchema({ personaIds: null, moodNames: null, themeIds: null, minTrackSeconds: null });
 const stored = { id: 's_mix', name: 'Future Frequencies', personaId: 'host' };
-const OFF = { enabled: false, maxStepPct: 6, curve: [], closeRequests: true };
+const OFF = { enabled: false, maxStepPct: 3, curve: [], closeRequests: true };
 // A stored show as it may sit on disk: partial or malformed, which is what
 // hydrateShow exists to repair.
 const fromDisk = (hotMix: unknown) => hydrateShow({ ...stored, hotMix } as never);
@@ -51,7 +51,7 @@ test('the payload orders the curve; the schema refuses a point the operator type
 
 test('a mixed show says so on its card, and only then', () => {
   const facet = showFacets(fromDisk({ enabled: true, curve: [{ at: 0, bpm: 120 }] })).find(f => f.key === 'hot-mix');
-  assert.equal(facet?.label, 'hot mix ±6% · curve · no requests');
+  assert.equal(facet?.label, 'hot mix ±3% · curve · no requests');
   assert.ok(!showFacets(hydrateShow(stored)).some(f => f.key === 'hot-mix'));
 });
 
