@@ -590,6 +590,20 @@ cross_prev_end = ref(crossfade_duration())
 # the buffer always covers the lead, and dj_transition delays the incoming
 # side by the excess (CLIP SEAM ALIGNMENT). Five frames of margin.
 clip_seam_slack = 0.1
+
+# A Hot Mix seam's outgoing track whose own cue-in landed LATE ends that much
+# later in its file (cue_out counts from where the cue-in was asked), so the
+# incoming side must start that much earlier against the buffer, in output
+# seconds at its closing tempo. The slack alone (0.1 s) also has to cover the
+# incoming side landing early: a FLAC outgoing 80-95 ms late plus an MP3
+# incoming 14-25 ms early overran it, and those seams fell back to a plain
+# crossfade (measured on air, 16 Nov). This much more is buffered on top.
+def mix_out_late_room(m) =
+  late = float_of_string(default=0., m["liq_mix_out_late"])
+  q = float_of_string(default=1., m["liq_mix_end_tempo"])
+  q = if q < 0.85 or q > 1.15 then 1. else q end
+  if late > 0. and late < 0.15 then late / q else 0. end
+end
 cross_last_file = ref("")
 cross_last_rid = ref("")
 cross_last_stamps = ref([])
@@ -610,7 +624,7 @@ def cross_stamps(m) =
     # SEAMS). Only while the stretch is built: without it the seam is the plain
     # crossfade the controller's own liq_cross_duration already sizes.
     mix_lead = if hot_mix_stretch() then float_of_string(default=-1., m["liq_mix_lead"]) else -1. end
-    own = if mix_lead >= 0. then mix_lead + clip_seam_slack else own end
+    own = if mix_lead >= 0. then mix_lead + clip_seam_slack + mix_out_late_room(m) else own end
     stamps = [
       ("liq_cross_start_duration", string(cross_prev_end())),
       ("liq_cross_end_duration", string(own)),
@@ -780,7 +794,7 @@ def dj_transition(a, b) =
   mix_a_q = float_of_string(default=1., a.metadata["liq_mix_end_tempo"])
   mix_a_q = if mix_a_q < 0.85 or mix_a_q > 1.15 then 1. else mix_a_q end
   mix_seam_lead = mix_lead - mix_late / mix_r + mix_a_late / mix_a_q
-  mix_max_d = mix_lead + clip_seam_slack + frame.duration()
+  mix_max_d = mix_lead + clip_seam_slack + mix_out_late_room(a.metadata) + frame.duration()
   b_delay =
     if clip_lead >= 0. and d > seam_lead and d <= clip_max_d then d - seam_lead
     elsif mix_lead >= 0. and d > mix_seam_lead and d <= mix_max_d then d - mix_seam_lead

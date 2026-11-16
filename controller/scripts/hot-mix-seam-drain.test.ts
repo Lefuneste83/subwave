@@ -208,3 +208,11 @@ test('the stretch is timed by the audio it has produced, never the stream clock'
   // The incoming wait follows the outgoing track's own landing too.
   assert.match(RADIO_LIQ, /mix_seam_lead = mix_lead - mix_late \/ mix_r \+ mix_a_late \/ mix_a_q/);
 });
+
+test('an outgoing track whose cue-in landed late buffers that much more, on both bounds', () => {
+  // A FLAC outgoing 80-95 ms late plus an incoming 14-25 ms early overran the
+  // 0.1 s slack, and the mixer fell back to a plain crossfade (on air, 16 Nov).
+  assert.match(RADIO_LIQ, /def mix_out_late_room\(m\) =/);
+  assert.match(RADIO_LIQ, /own = if mix_lead >= 0\. then mix_lead \+ clip_seam_slack \+ mix_out_late_room\(m\) else own end/);
+  assert.match(RADIO_LIQ, /mix_max_d = mix_lead \+ clip_seam_slack \+ mix_out_late_room\(a\.metadata\) \+ frame\.duration\(\)/);
+});
