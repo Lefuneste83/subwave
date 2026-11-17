@@ -219,7 +219,8 @@ export interface QueueItem {
   // Both carry the pair's id, which radio.liq matches before it stretches the
   // incoming track; planned when the outgoing item drains with its successor.
   mixOut?: (MixOutStamps & { outCueSec: number }) | null;
-  mixIn?: (MixInStamps & { inCueSec: number }) | null;
+  // `waitSec`: the beat-phase shift its cue-in could not take (hotMixSeam.shiftInCue).
+  mixIn?: (MixInStamps & { inCueSec: number; waitSec?: number }) | null;
   // Outgoing music already committed an early ending into this clip/track.
   lengthPolicyCommitted?: boolean;
   stemCueInSec?: number;
