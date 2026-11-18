@@ -189,7 +189,8 @@ interface GridRow {
   head_outro_json: string | null; grid_outro_json: string | null;
 }
 
-function parseSegments(json: string | null): GridSegment[] {
+// The stored segments, malformed ones dropped (also read by structure.ts).
+export function parseSegments(json: string | null): GridSegment[] {
   if (!json) return [];
   try {
     const v = JSON.parse(json);

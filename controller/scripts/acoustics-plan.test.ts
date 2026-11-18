@@ -160,7 +160,7 @@ after(async () => {
 
 test('--where needs agrees with facetNeedsIds for every facet', () => {
   for (const f of db.FACETS) {
-    const p = plan(f, undefined, { clap: true, demucs: true, tailVocal: true, grid: true });
+    const p = plan(f, undefined, { clap: true, demucs: true, tailVocal: true, grid: true, structure: true });
     assert.deepEqual(planned(p), db.facetNeedsIds(f), f);
   }
 });

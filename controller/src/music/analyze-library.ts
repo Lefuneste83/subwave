@@ -136,6 +136,7 @@ async function buildFacetPlan(args: string[], limit: number | undefined): Promis
       loudnessCurve: available ? analyzer.loudnessCurveAvailable() : null,
       tailLoudnessCurve: available ? analyzer.tailLoudnessCurveAvailable() : null,
       grid: available ? analyzer.gridAvailable() : null,
+      structure: available ? analyzer.structureAvailable() : null,
     },
     limit,
   });

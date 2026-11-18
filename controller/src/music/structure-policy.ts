@@ -38,6 +38,11 @@ export const FULL_RUN_BARS = 16;
 export const DIP_LOOKBACK_BARS = 24;
 export const DIP_MIN_BARS = 4;
 export const PHRASE_BARS = 8;
+// A bar whose whole band sits this far below the loud bars is silent (the
+// prototype's test; stored as `level`).
+export const SILENT_DB = -35;
+
+export const isSilentBar = (level: number): boolean => level < SILENT_DB;
 
 // The per-bar arrays the rules read (library-db/structure.ts StructureBars).
 export interface StructureRuleInput {

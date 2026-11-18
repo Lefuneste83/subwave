@@ -38,6 +38,9 @@ test('the constants are the approved ones', () => {
   assert.equal(P.DIP_LOOKBACK_BARS, 24);
   assert.equal(P.DIP_MIN_BARS, 4);
   assert.equal(P.PHRASE_BARS, 8);
+  assert.equal(P.SILENT_DB, -35);
+  assert.equal(P.isSilentBar(-35.5), true);
+  assert.equal(P.isSilentBar(-35), false);
 });
 
 test('a full bar needs all four conditions; a lone gap is tolerated, two are not', () => {

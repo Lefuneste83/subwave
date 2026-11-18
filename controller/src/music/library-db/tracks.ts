@@ -7,6 +7,9 @@ import {
   PLACED_TAIL_STAMP, SQL_PLACED_TAIL_STAMP, isPlacedTailStamp, isWholeFileLoudnessVersion, placedTailMovedBy,
   restampFacetRows, syncTrackFacets, tailEndsAtMusic, type Facet, type FacetSource,
 } from './facets.js';
+import {
+  deleteStructureRow, recordStructureFailure, recordStructureUnmeasurable, writeStructure, type StructureAnswer,
+} from './structure.js';
 import { deleteGridRow, forgetGridHead, getGrid, recordGridFailure, recordGridUnmeasurable, setGridApplied, setGridOutro, writeGrid, type GridAnswer, type TrackGrid } from './grid.js';
 import { gridBarsWithin, gridBeatsWithin, gridDecision, gridTempoWithin, headWindowEndMs, type GridDecision } from '../grid-policy.js';
 import type { FileInfo, TagWrite, TrackEnrichment, TrackKeyRange, TrackMeta, TrackOutro, TrackPaceSpan, TrackRecord, TrackRow, TrackSection } from './types.js';
@@ -458,8 +461,9 @@ export function clearTrackAudio(id: string, fileSize?: number | null): void {
     // old file; the year row is not an audio measurement (a failed lookup's
     // attempt count lives only there).
     d.prepare(`DELETE FROM track_facet_status WHERE track_id = ? AND facet <> 'year'`).run(id);
-    // The beat grid was measured on the old file too.
+    // The beat grid was measured on the old file too, and the bars on it.
     deleteGridRow(d, id);
+    deleteStructureRow(d, id);
     syncTrackFacets(id);
   })();
 }
@@ -1547,6 +1551,25 @@ export function writeGridResult(id: string, r: GridResult, source: FacetSource =
     syncTrackFacets(id, { source });
     // A failed attempt keeps the grid it had, and what it wrote.
     if (!('failed' in r)) applyGridToTrack(id);
+  })();
+}
+
+// The `structure` facet's answer (library-db/structure.ts), written on its own
+// like the grid's and for the same reason: its failures are never the track's
+// analysis failures. `gridAt` is the measured_at of the grid the request
+// carried, so a grid re-measured since makes the row outdated.
+export type StructureResult =
+  | { structure: StructureAnswer }
+  | { unmeasurable: string; version: number }
+  | { failed: string };
+
+export function writeStructureResult(id: string, r: StructureResult, gridAt: string, source: FacetSource = 'url'): void {
+  const d = requireDb();
+  d.transaction(() => {
+    if ('structure' in r) writeStructure(id, r.structure, gridAt);
+    else if ('unmeasurable' in r) recordStructureUnmeasurable(id, r.version, r.unmeasurable, gridAt);
+    else recordStructureFailure(id, r.failed, gridAt);
+    syncTrackFacets(id, { source });
   })();
 }
 

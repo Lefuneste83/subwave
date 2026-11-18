@@ -16,6 +16,7 @@ import { envInt } from '../util/env.js';
 import { parseLoudnessCurve, type LoudnessCurve } from './loudness-curve.js';
 import { parseWholeLoudnessCurve, type WholeLoudnessCurve } from './whole-loudness-curve.js';
 import type { GridAnswer, GridSegment } from './library-db/grid.js';
+import { parseStructureBars, type StructureAnswer, type StructureGrid } from './library-db/structure.js';
 import { getDb, trackFileSize } from './library-db.js';
 
 // A structural span over the track, in ms. Contiguous over the analysed
@@ -291,6 +292,8 @@ interface WorkerMessage {
   // The whole-track beat grid (Beat This!, heavy images). Older workers never
   // emit the key.
   grid_capable?: boolean;
+  // The per-bar structure (numpy/scipy + ffmpeg). Older workers never emit it.
+  structure_capable?: boolean;
   // Tail answers carry the tail's short-term loudness curve (tail v3). Absent
   // on workers that predate it.
   tail_loudness_curve_capable?: boolean;
@@ -358,6 +361,7 @@ let _localRangedTailCapable: boolean | null = null;
 let _localWholeFileCapable: boolean | null = null;
 let _localLoudnessCurveCapable: boolean | null = null;
 let _localGridCapable: boolean | null = null;
+let _localStructureCapable: boolean | null = null;
 let _localTailCurveCapable: boolean | null = null;
 let _localTextCapable: boolean | null = null;
 // Local twins of _sidecarAudioError / _sidecarVocalError — see there.
@@ -425,6 +429,7 @@ function startWorker(): Promise<void> {
           _localWholeFileCapable = typeof msg.whole_file_capable === 'boolean' ? msg.whole_file_capable : null;
           _localLoudnessCurveCapable = typeof msg.loudness_curve_capable === 'boolean' ? msg.loudness_curve_capable : null;
           _localGridCapable = typeof msg.grid_capable === 'boolean' ? msg.grid_capable : null;
+          _localStructureCapable = typeof msg.structure_capable === 'boolean' ? msg.structure_capable : null;
           _localTailCurveCapable = typeof msg.tail_loudness_curve_capable === 'boolean' ? msg.tail_loudness_curve_capable : null;
         }
         // After the ready assignments, so a reported loss always wins.
@@ -617,6 +622,7 @@ let _sidecarRangedTailCapable: boolean | null = null;
 let _sidecarWholeFileCapable: boolean | null = null;
 let _sidecarLoudnessCurveCapable: boolean | null = null;
 let _sidecarGridCapable: boolean | null = null;
+let _sidecarStructureCapable: boolean | null = null;
 let _sidecarTailCurveCapable: boolean | null = null;
 let _sidecarWholeFileConcurrency: number | null = null;
 // The sidecar's analysis pool size (ANALYZE_CONCURRENCY); null on a sidecar
@@ -649,6 +655,7 @@ async function probeSidecar(url: string): Promise<boolean> {
       analyze_whole_file_capable?: boolean | null;
       analyze_loudness_curve_capable?: boolean | null;
       analyze_grid_capable?: boolean | null;
+      analyze_structure_capable?: boolean | null;
       analyze_tail_loudness_curve_capable?: boolean | null;
       analyze_whole_file_concurrency?: number | null;
       analyze_concurrency?: number | null;
@@ -666,6 +673,7 @@ async function probeSidecar(url: string): Promise<boolean> {
       _sidecarWholeFileCapable = typeof body.analyze_whole_file_capable === 'boolean' ? body.analyze_whole_file_capable : null;
       _sidecarLoudnessCurveCapable = typeof body.analyze_loudness_curve_capable === 'boolean' ? body.analyze_loudness_curve_capable : null;
       _sidecarGridCapable = typeof body.analyze_grid_capable === 'boolean' ? body.analyze_grid_capable : null;
+      _sidecarStructureCapable = typeof body.analyze_structure_capable === 'boolean' ? body.analyze_structure_capable : null;
       _sidecarTailCurveCapable = typeof body.analyze_tail_loudness_curve_capable === 'boolean' ? body.analyze_tail_loudness_curve_capable : null;
       _sidecarWholeFileConcurrency = Number.isInteger(body.analyze_whole_file_concurrency) && (body.analyze_whole_file_concurrency as number) > 0
         ? (body.analyze_whole_file_concurrency as number) : null;
@@ -853,6 +861,15 @@ export function loudnessCurveAvailable(): boolean | null {
 export function gridAvailable(): boolean | null {
   if (_backend === 'sidecar') return _sidecarGridCapable;
   if (_backend === 'local') return _localGridCapable;
+  return null;
+}
+
+// The per-bar structure (`structure` facet, library-db/structure.ts). Planned
+// only on `=== true`, like the grid: an analyzer that predates the facet
+// refuses a request naming it.
+export function structureAvailable(): boolean | null {
+  if (_backend === 'sidecar') return _sidecarStructureCapable;
+  if (_backend === 'local') return _localStructureCapable;
   return null;
 }
 
@@ -1288,7 +1305,7 @@ export async function analyzePathWithUrlFallback(
 // the backend advertises it; callers fall back to the flat request otherwise.
 // ---------------------------------------------------------------------------
 
-export type FacetName = 'head' | 'loudness' | 'tail' | 'clap' | 'vocal' | 'stems' | 'edges' | 'grid';
+export type FacetName = 'head' | 'loudness' | 'tail' | 'clap' | 'vocal' | 'stems' | 'edges' | 'grid' | 'structure';
 // Read off one decode of the WHOLE file (the stream URL, or a staged copy
 // known to be complete), not the analysis windows.
 export const WHOLE_FILE_FACET_NAMES: readonly FacetName[] = ['loudness', 'edges'];
@@ -1298,7 +1315,10 @@ const readsWholeFile = (body: Record<string, unknown>) =>
 // reach it), so it needs the URL and the whole-file timeout too.
 // The whole-track beat grid streams the whole file too (its own decode).
 const readsGrid = (body: Record<string, unknown>) => Array.isArray(body.facets) && body.facets.includes('grid');
-const readsStream = (body: Record<string, unknown>) => readsWholeFile(body) || readsGrid(body) || body.tail_window != null;
+// So does the per-bar structure (its own mono decode of the whole file).
+const readsStructure = (body: Record<string, unknown>) => Array.isArray(body.facets) && body.facets.includes('structure');
+const readsStream = (body: Record<string, unknown>) =>
+  readsWholeFile(body) || readsGrid(body) || readsStructure(body) || body.tail_window != null;
 
 // THE deadline of an analyze request, flat or facet, local worker or sidecar.
 // One that may decode from the stream URL (readsStream: the whole-file facets,
@@ -1326,6 +1346,9 @@ export interface FacetAnswer {
   // grid: the fitted whole-track beat grid (parseGridAnswer), null when the
   // answer is not ok or malformed.
   grid?: GridAnswer | null;
+  // structure: the measured bars (parseStructureAnswer), null when the answer
+  // is not ok or malformed.
+  structure?: StructureAnswer | null;
 }
 
 export interface FacetSourceInfo {
@@ -1386,6 +1409,9 @@ export interface FacetRequestOpts {
   // stemsWindowsFor).
   stems_windows?: StemWindow[];
   complete?: boolean;
+  // Structure facet: the trusted-bars grid the bars are measured on
+  // (library-db/structure.ts structureGridOf). The worker never reads the DB.
+  structureGrid?: StructureGrid | null;
   // The request's deadline. Omitted, the pass's ANALYZE_REQUEST_TIMEOUT_MS. A
   // pick-time separation passes its own longer one (pick-stems-policy.ts).
   timeoutMs?: number;
@@ -1450,6 +1476,19 @@ export function parseGridAnswer(data: unknown): GridAnswer | null {
   };
 }
 
+// The worker's `structure` data (analyze_worker.facet_structure). Strict, with
+// the stored JSON's own parser (library-db/structure.ts parseStructureBars): a
+// malformed answer is null, recorded as a failed attempt.
+export function parseStructureAnswer(data: unknown): StructureAnswer | null {
+  if (!data || typeof data !== 'object') return null;
+  const d = data as Record<string, unknown>;
+  const version = typeof d.structure_version === 'number' && Number.isInteger(d.structure_version) ? d.structure_version : null;
+  const bars = parseStructureBars(d);
+  if (version == null || !bars) return null;
+  const decoded = typeof d.decoded_ms === 'number' && Number.isFinite(d.decoded_ms) ? Math.round(d.decoded_ms) : null;
+  return { version, bars, decodedMs: decoded };
+}
+
 export function parseFacetAnswer(msg: WorkerMessage): FacetAnalysis {
   const facets: Partial<Record<FacetName, FacetAnswer>> = {};
   for (const [name, cell] of Object.entries(msg.facets ?? {})) {
@@ -1464,6 +1503,7 @@ export function parseFacetAnswer(msg: WorkerMessage): FacetAnalysis {
       result: toAnalysisResult(data),
       tailVocalRanges: parseVocalRanges(data.tail_vocal_ranges),
       ...(name === 'grid' ? { grid: status === 'ok' ? parseGridAnswer(data) : null } : {}),
+      ...(name === 'structure' ? { structure: status === 'ok' ? parseStructureAnswer(data) : null } : {}),
     };
   }
   const src = (msg.source ?? {}) as Record<string, unknown>;
@@ -1522,6 +1562,13 @@ export async function analyzeFacets(
   if (opts.tailVocals) body.tail_vocals = true;
   if (opts.tailWindow && usesTailWindow(opts.facets)) {
     body.tail_window = { end_ms: opts.tailWindow.endMs, duration_ms: opts.tailWindow.durationMs };
+  }
+  if (opts.structureGrid && opts.facets.includes('structure')) {
+    const g = opts.structureGrid;
+    body.structure_grid = {
+      beats_per_bar: g.beatsPerBar, decoded_ms: g.decodedMs,
+      segments: g.segments.map((s) => ({ anchorMs: s.anchorMs, periodUs: s.periodUs, beats: s.beats, downbeatMs: s.downbeatMs })),
+    };
   }
   // A stems target always travels with stems_require_marker, as on the flat
   // path, so an unmounted share on the analyzer's machine is never written to.
