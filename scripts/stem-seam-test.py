@@ -297,6 +297,12 @@ def render_script(work, name, station_sec, fixture_path):
         m = re.search(r'^equal_power_crossfade = ref\((true|false)\)$', f.read(), re.M)
     if m:
         curve = f"equal_power_crossfade = ref({m.group(1)})\n"
+    # The same for the Hot Mix switch (`hot_mix_stretch`): the lifted cross
+    # stamps read it, and the harness keeps radio.liq's default (not built).
+    with open(os.path.join(work, "radio-source.liq")) as f:
+        m = re.search(r'^hot_mix_stretch = ref\((true|false)\)$', f.read(), re.M)
+    if m:
+        curve += f"hot_mix_stretch = ref({m.group(1)})\n"
     script = f'''settings.log.stdout := true
 settings.log.level := 3
 settings.init.allow_root := true

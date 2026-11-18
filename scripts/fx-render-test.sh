@@ -647,6 +647,13 @@ LIQ
   echo "XDUR PASS — the outgoing track owns its stamped end-of-track buffer"
 }
 
+# The lifted cross-stamp region reads radio.liq's Hot Mix switch, a top-level
+# ref outside it: define it at radio.liq's own default (stretch not built), and
+# only when radio.liq declares it, so an older mixer gets nothing extra.
+hot_mix_ref() {
+  grep -m1 -E '^hot_mix_stretch = ref\((true|false)\)$' "$HERE/../liquidsoap/radio.liq" || true
+}
+
 xchain() {
   # Do cross's buffers follow each track's OWN stamp along a chain? Two tracks
   # (xdur) cannot see it: the 2.4.5 lag only shows from the third transition on,
@@ -661,7 +668,7 @@ xchain() {
   for f in 1 2 3 4 5; do
     [ -f "$WORK/x$f.wav" ] || ffmpeg -v error -y -f lavfi -i "sine=frequency=$((220 + f * 110)):duration=30" -af volume=-12dB -ar 44100 -ac 2 "$WORK/x$f.wav"
   done
-  awk '/^cross_prev_end = ref/{on=1} /^# BUFFER SIZING/{on=0} on' "$HERE/../liquidsoap/radio.liq" > "$WORK/xchain-stamps.liq"
+  { hot_mix_ref; awk '/^cross_prev_end = ref/{on=1} /^# BUFFER SIZING/{on=0} on' "$HERE/../liquidsoap/radio.liq"; } > "$WORK/xchain-stamps.liq"
   grep -q "def strip_cross_stamps" "$WORK/xchain-stamps.liq" \
     || { echo "XCHAIN FAIL — could not lift cross_stamps/strip_cross_stamps out of radio.liq"; return 1; }
   cat > "$WORK/xchain.liq" <<'LIQ'
@@ -775,13 +782,19 @@ jingleseam() {
   # rewrite are LIFTED from radio.liq so the harness cannot drift from the
   # mixer; each seam logs what it armed.
   gen_tones
-  awk '/^cross_prev_end = ref/{on=1} /^# BUFFER SIZING/{on=0} on' "$HERE/../liquidsoap/radio.liq" > "$WORK/jseam-stamps.liq"
+  { hot_mix_ref; awk '/^cross_prev_end = ref/{on=1} /^# BUFFER SIZING/{on=0} on' "$HERE/../liquidsoap/radio.liq"; } > "$WORK/jseam-stamps.liq"
   grep -E '^  (boundary_fading|jingle_out|washing|looping|sweeping|dissolving|chopping|blending) = ' \
     "$HERE/../liquidsoap/radio.liq" > "$WORK/jseam-arming.liq"
   local mark
   mark=$(grep -m1 -oE 'metadata\.map\(update=true, fun \(_\) -> \[\("subwave_jingle", "true"\)\]' "$HERE/../liquidsoap/radio.liq")
   [ "$(wc -l < "$WORK/jseam-arming.liq")" = 8 ] && [ -n "$mark" ] && grep -q "def cross_stamps" "$WORK/jseam-stamps.liq" \
     || { echo "JINGLESEAM FAIL — could not lift the arming lines / jingle mark / cross stamps from radio.liq"; return 1; }
+  # Since Hot Mix every arming line stands down on a mixed seam (`not mixed`,
+  # read from the seam's liq_mix stamps). These tones carry none, so no seam
+  # here is mixed; defined only when radio.liq has it.
+  if grep -qE '^  mixed = ' "$HERE/../liquidsoap/radio.liq"; then
+    { echo "  mixed = false"; cat "$WORK/jseam-arming.liq"; } > "$WORK/jseam-arming.tmp" && mv "$WORK/jseam-arming.tmp" "$WORK/jseam-arming.liq"
+  fi
   {
     cat <<'LIQ'
 settings.log.stdout := true
