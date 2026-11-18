@@ -6,6 +6,7 @@ import {
   idsMissingLabels,
   iterateScoreMaps,
   pageScoreMaps,
+  parseScoreMap,
   readScoreMap,
   readStateHash,
   writeLabels,
@@ -14,7 +15,12 @@ import {
 } from './audio-scores.js';
 // Every backfill scope must keep this exclusion, or an unanalysable file is
 // re-attempted forever (#1300).
-import { analysisFailureExclusion, forgetVectorSoundIfMoved, markTextVectorDirtyIfSoundChanged } from './tracks.js';
+import {
+  analysisFailureExclusion,
+  forgetVectorSoundIfMoved,
+  markTextVectorDirtyIfSoundChanged,
+  markVectorIfMoodsLandedElseForget,
+} from './tracks.js';
 import { deleteFacetRows } from './facets.js';
 import { deleteGridRow } from './grid.js';
 import { touchGenreInputs } from './genre-inputs.js';
@@ -97,6 +103,39 @@ export function setRelabelledTrackAudioMoodLabelsBulk(
   })();
 }
 
+// The relabel-all's write for the rows that had no labels before the pass: a new
+// track's moods mark the vector built without them (#2313), and anything else
+// forgets as above (tracks.ts markVectorIfMoodsLandedElseForget).
+export function setRelabelledNewTrackAudioMoodLabelsBulk(
+  rows: Array<{ id: string; moods: string[] }>,
+): void {
+  if (rows.length === 0) return;
+  requireDb().transaction(() => {
+    setTrackAudioMoodLabelsBulk(rows);
+    for (const { id } of rows) markVectorIfMoodsLandedElseForget(id);
+  })();
+}
+
+// The audio energy pass's scopes (music/propagated-energy.ts), each defined
+// once and shared by its reader and its guarded writer. An operator's tags
+// ('manual') are never written by a pass; the overrule judges only an energy a
+// tagging LLM gave.
+const SQL_NOT_MANUAL = `(source IS NULL OR source <> 'manual')`;
+const SQL_LLM_SOURCE = `source IN ('llm', 'uncertain-llm')`;
+
+// Rows read with their score map as s, parsed; a row whose map does not parse
+// is dropped, as iterateScoreMaps drops it.
+function withScores<R extends { s: string }>(
+  rows: R[],
+): Array<Omit<R, 's'> & { scores: Record<string, number> }> {
+  const out: Array<Omit<R, 's'> & { scores: Record<string, number> }> = [];
+  for (const { s, ...rest } of rows) {
+    const scores = parseScoreMap(s);
+    if (scores) out.push({ ...rest, scores });
+  }
+  return out;
+}
+
 // Scope of the audio-derived energy correction (#1362). Restricted to
 // source = 'propagated': an llm/manual energy is never overruled here.
 export function propagatedTracksWithAudioScores(): Array<{
@@ -111,21 +150,13 @@ export function propagatedTracksWithAudioScores(): Array<{
         ORDER BY id`,
     )
     .all() as Array<{ id: string; energy: string | null; s: string }>;
-  const out: Array<{ id: string; energy: string | null; scores: Record<string, number> }> = [];
-  for (const row of rows) {
-    try {
-      const parsed = JSON.parse(row.s);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        out.push({ id: row.id, energy: row.energy, scores: parsed as Record<string, number> });
-      }
-    } catch {
-    }
-  }
-  return out;
+  return withScores(rows);
 }
 
 // Scope of the empty-energy fill: tagged rows (moods present) that carry audio
-// scores and no energy at all, whoever wrote the moods. Never source = 'manual':
+// scores and no energy at all, whoever wrote the moods, propagation included
+// (a propagated row is empty when no voting neighbour had an energy). Never
+// source = 'manual':
 // an operator's own tags are never written by a pass. An untagged row has no
 // moods and stays out, so a fill never makes it read as tagged.
 export function emptyEnergyTracksWithAudioScores(): Array<{
@@ -136,22 +167,12 @@ export function emptyEnergyTracksWithAudioScores(): Array<{
     .prepare(
       `SELECT id, audio_mood_scores_json AS s FROM tracks
         WHERE energy IS NULL AND ${SQL_HAS_MOODS}
-          AND (source IS NULL OR source <> 'manual')
+          AND ${SQL_NOT_MANUAL}
           AND audio_mood_scores_json IS NOT NULL
         ORDER BY id`,
     )
     .all() as Array<{ id: string; s: string }>;
-  const out: Array<{ id: string; scores: Record<string, number> }> = [];
-  for (const row of rows) {
-    try {
-      const parsed = JSON.parse(row.s);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        out.push({ id: row.id, scores: parsed as Record<string, number> });
-      }
-    } catch {
-    }
-  }
-  return out;
+  return withScores(rows);
 }
 
 // Scope of the LLM-energy overrule: rows whose energy an LLM gave ('llm',
@@ -165,22 +186,12 @@ export function llmEnergyTracksWithAudioScores(): Array<{
   const rows = requireDb()
     .prepare(
       `SELECT id, energy, audio_mood_scores_json AS s FROM tracks
-        WHERE source IN ('llm', 'uncertain-llm') AND energy IS NOT NULL
+        WHERE ${SQL_LLM_SOURCE} AND energy IS NOT NULL
           AND audio_mood_scores_json IS NOT NULL
         ORDER BY id`,
     )
     .all() as Array<{ id: string; energy: string; s: string }>;
-  const out: Array<{ id: string; energy: string; scores: Record<string, number> }> = [];
-  for (const row of rows) {
-    try {
-      const parsed = JSON.parse(row.s);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        out.push({ id: row.id, energy: row.energy, scores: parsed as Record<string, number> });
-      }
-    } catch {
-    }
-  }
-  return out;
+  return withScores(rows);
 }
 
 // The overrule's write: `energy` only, and only while the row still holds the
@@ -190,7 +201,7 @@ export function overruleTrackEnergyBulk(rows: Array<{ id: string; from: string; 
   if (rows.length === 0) return 0;
   const d = requireDb();
   const stmt = d.prepare(
-    `UPDATE tracks SET energy = ? WHERE id = ? AND energy = ? AND source IN ('llm', 'uncertain-llm')`,
+    `UPDATE tracks SET energy = ? WHERE id = ? AND energy = ? AND ${SQL_LLM_SOURCE}`,
   );
   let changed = 0;
   d.transaction((rs: typeof rows) => {
@@ -199,16 +210,20 @@ export function overruleTrackEnergyBulk(rows: Array<{ id: string; from: string; 
   return changed;
 }
 
-// The fill's write: `energy` only, and only where it is STILL empty, so a tag
-// answer or an operator edit landing between the read and the write wins.
-// Returns how many rows it filled.
-export function fillEmptyTrackEnergyBulk(rows: Array<{ id: string; energy: string }>): number {
-  if (rows.length === 0) return 0;
+// The fill's write: `energy` only, and only where the row is STILL in the
+// fill's scope (empty, tagged, not an operator's), so a tag answer, an operator
+// edit or an operator's clear landing between the read and the write wins.
+// Returns how many rows it filled with each value, counted from the writes
+// themselves, so a row another writer took first is not counted.
+export function fillEmptyTrackEnergyBulk(
+  rows: Array<{ id: string; energy: 'high' | 'medium' | 'low' }>,
+): { high: number; medium: number; low: number } {
+  const filled = { high: 0, medium: 0, low: 0 };
+  if (rows.length === 0) return filled;
   const d = requireDb();
-  const stmt = d.prepare(`UPDATE tracks SET energy = ? WHERE id = ? AND energy IS NULL AND (source IS NULL OR source <> 'manual')`);
-  let filled = 0;
+  const stmt = d.prepare(`UPDATE tracks SET energy = ? WHERE id = ? AND energy IS NULL AND ${SQL_HAS_MOODS} AND ${SQL_NOT_MANUAL}`);
   d.transaction((rs: typeof rows) => {
-    for (const r of rs) filled += stmt.run(r.energy, r.id).changes;
+    for (const r of rs) filled[r.energy] += stmt.run(r.energy, r.id).changes;
   })(rows);
   return filled;
 }

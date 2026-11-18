@@ -500,13 +500,176 @@ def capability_loss():
 
 # --- Torch device for the heavy models (CLAP / Demucs) ----------------------
 # ANALYZE_DEVICE ∈ auto (default) | cpu | cuda. `auto` picks cuda when torch
-# actually sees a GPU (the subwave-analyzer-cuda flavour on an NVIDIA host)
-# and cpu everywhere else — on the cpu-wheel images torch.cuda.is_available()
-# is always False, so existing installs behave exactly as before. A cuda
-# request without a visible GPU warns and falls back to cpu: device selection
-# must never fail an analysis pass. The torch import stays lazy — only the
-# heavy code paths call this, so the librosa-only venv never needs torch.
+# sees a GPU AND can run a kernel on it (the subwave-analyzer-cuda flavour on
+# an NVIDIA host), and cpu everywhere else — on the cpu-wheel images
+# torch.cuda.is_available() is always False, so existing installs behave
+# exactly as before. Device selection must never fail an analysis pass, so
+# both `auto` and an explicit `cuda` warn and fall back to cpu when the GPU is
+# not visible OR fails the self-test below.
+#
+# The self-test is the half `is_available()` cannot answer (#2280): it is True
+# for a card the wheel has no kernels for (a Pascal GTX 1060 under the cu128
+# build, which starts at sm_75), and loading CLAP or Demucs onto that card
+# succeeds too, because moving weights runs no kernel. The first real op then
+# fails with "no kernel image is available", once per track, inside handlers
+# that log and carry on — so a tag run reported ok while every embedding and
+# vocal pass failed. One tiny op, synchronised, finds it here instead, where
+# falling back costs nothing. The torch import stays lazy — only the heavy
+# code paths call this, so the librosa-only venv never needs torch.
+#
+# The card is tested once per process, and whatever that decides stays until
+# the worker exits. A failure that can clear (the card out of memory while a
+# co-resident TTS or LLM holds it) is not tested again mid-process: a tiny op
+# can pass while the real model still does not fit, and a model that fails to
+# load is lost for the run, which is worse than cpu. The warning says why the
+# test failed and, for out of memory, that restarting the analyzer once memory
+# is free puts it back on the GPU.
 _DEVICE = None
+
+# Compute capability → the CUDA image's architecture tag for that card. The
+# tag table in docs/internals/infrastructure.md (#aio-cuda-tags) is the one
+# place that maps a tag to a build; this only names the card's row in it.
+# scripts/check-publish-matrix.test.ts pins these names to the publish
+# matrix's arch_tags, so the warning never names an unpublished tag.
+_ARCH_TAGS = (
+    ((5, 0), "maxwell"),
+    ((6, 0), "pascal"),
+    ((7, 0), "volta"),
+    ((7, 5), "turing"),
+    ((8, 0), "ampere"),
+    ((8, 9), "ada"),
+    ((9, 0), "hopper"),
+    ((10, 0), "blackwell"),
+)
+
+
+def cuda_arch_tag(capability):
+    """The architecture tag for a (major, minor) compute capability, or None
+    for a card older than any build supports."""
+    tag = None
+    for floor, name in _ARCH_TAGS:
+        if tuple(capability) >= floor:
+            tag = name
+    return tag
+
+
+def cuda_arch_covered(capability, arch_list):
+    """Whether the wheel's arch list can run on this card: SASS for the same
+    major at or below its minor (sm_60 runs on sm_61), or PTX at or below its
+    capability, which the driver compiles. Advisory only: the self-test
+    decides cuda or cpu, and this names a failure torch's message didn't
+    (cuda_failure_kind), which picks the warning's advice."""
+    major, minor = capability
+    for arch in arch_list or ():
+        m = re.fullmatch(r"(sm|compute)_(\d+)(\d)[a-z]?", arch)
+        if not m:
+            continue
+        a_major, a_minor = int(m.group(2)), int(m.group(3))
+        if m.group(1) == "sm" and a_major == major and a_minor <= minor:
+            return True
+        if m.group(1) == "compute" and (a_major, a_minor) <= (major, minor):
+            return True
+    return False
+
+
+def cuda_self_test(torch):
+    """Run one tiny real op on the card. Returns None when it works, else the
+    exception. `is_available()` only says a device is visible; this says the
+    wheel has a kernel image the card can execute."""
+    x = None
+    try:
+        x = torch.ones(8, device="cuda")
+        x.mul_(2)
+        torch.cuda.synchronize()
+        if float(x.sum().item()) != 16.0:
+            raise RuntimeError("CUDA self-test returned a wrong result")
+        return None
+    except Exception as ex:  # noqa: BLE001 — any failure means "not usable"
+        # Drop the tensor, hand its cached block back to the driver, and
+        # return the exception without its traceback, whose frames would
+        # keep the tensor alive. Only str(ex) is ever logged. The CUDA context
+        # itself stays until the process exits: torch cannot release it.
+        x = None
+        try:
+            torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001 — freeing is best-effort
+            pass
+        return ex.with_traceback(None)
+
+
+def _cuda_probe(torch):
+    """(name, capability, arch_list) for card 0. Every probe is guarded: a
+    broken CUDA stack must not turn the fallback into the failure. An arch
+    list torch could not report is None (unknown), never an empty list."""
+    try:
+        name = torch.cuda.get_device_name(0)
+    except Exception:  # noqa: BLE001
+        name = "unknown GPU"
+    try:
+        cap = tuple(torch.cuda.get_device_capability(0))
+    except Exception:  # noqa: BLE001
+        cap = None
+    try:
+        arch_list = list(torch.cuda.get_arch_list())
+    except Exception:  # noqa: BLE001
+        arch_list = None
+    return name, cap, arch_list
+
+
+def cuda_failure_kind(error, cap, arch_list):
+    """Why a self-test failed: "no_kernel" (the wheel has no kernel image for
+    this card), "oom", "driver" or "other". torch's own message decides first;
+    the arch list only names a card the message didn't, and an unknown one
+    (None) names nothing."""
+    msg = str(error).lower()
+    if "no kernel image" in msg:
+        return "no_kernel"
+    if "out of memory" in msg or type(error).__name__ == "OutOfMemoryError":
+        return "oom"
+    if cap and arch_list is not None and not cuda_arch_covered(cap, arch_list):
+        return "no_kernel"
+    if "driver" in msg:
+        return "driver"
+    return "other"
+
+
+def _cuda_fallback_warning(probe, error, kind):
+    """One warning naming the card, what the wheel was built for, the error,
+    and what to do about it."""
+    name, cap, arch_list = probe
+    sm = f"sm_{cap[0]}{cap[1]}" if cap else "sm_unknown"
+    detail = f"{name}, capability {sm}; this torch is built for {arch_list or 'an unknown arch list'}"
+    if kind == "no_kernel":
+        tag = cuda_arch_tag(cap) if cap else None
+        if tag:
+            advice = (
+                f"this image has no kernels for {sm}: use the CUDA image's :{tag} tag "
+                f"(ANALYZER_CUDA_TAG={tag} in .env on the split stack; "
+                "docs/internals/infrastructure.md#aio-cuda-tags)"
+            )
+        elif cap:
+            advice = f"no published CUDA build supports {sm}"
+        else:
+            advice = (
+                "this image has no kernels for this card: "
+                "docs/internals/infrastructure.md#aio-cuda-tags names the build for each card"
+            )
+    elif kind == "oom":
+        advice = (
+            "the card had no free memory when the analyzer started, most likely "
+            "held by another process on it (a local TTS or LLM); analysis runs on "
+            "cpu for now, and restarting the analyzer once that memory is free "
+            "puts it back on the GPU"
+        )
+    elif kind == "driver":
+        advice = "check the NVIDIA driver supports this image's CUDA runtime"
+    else:
+        advice = "the card could not run a CUDA op"
+    return (
+        f"CUDA self-test failed on {detail}: {type(error).__name__}: {error}. "
+        f"{advice}. Falling back to cpu; CLAP and Demucs still run, but Demucs on cpu is slow "
+        "(tens of seconds a track). Set ANALYZE_DEVICE=cpu to skip this check."
+    )
 
 
 def resolve_device():
@@ -519,18 +682,25 @@ def resolve_device():
     if want not in ("auto", "cpu", "cuda"):
         log(f"ANALYZE_DEVICE={want} not recognised (auto|cpu|cuda); using auto")
         want = "auto"
+    failed = None
     if want != "cpu" and torch.cuda.is_available():
-        _DEVICE = "cuda"
-        log(f"analysis device: cuda ({torch.cuda.get_device_name(0)})")
-    else:
-        if want == "cuda":
-            log(
-                "ANALYZE_DEVICE=cuda but torch sees no CUDA device "
-                "(cpu-only wheels, no GPU exposed to the container, or missing "
-                "nvidia-container-toolkit); falling back to cpu"
-            )
-        _DEVICE = "cpu"
-        log("analysis device: cpu")
+        failed = cuda_self_test(torch)
+        if failed is None:
+            _DEVICE = "cuda"
+            log(f"analysis device: cuda ({torch.cuda.get_device_name(0)})")
+            return _DEVICE
+    if failed is not None:
+        probe = _cuda_probe(torch)
+        kind = cuda_failure_kind(failed, probe[1], probe[2])
+        log(_cuda_fallback_warning(probe, failed, kind))
+    elif want == "cuda":
+        log(
+            "ANALYZE_DEVICE=cuda but torch sees no CUDA device "
+            "(cpu-only wheels, no GPU exposed to the container, or missing "
+            "nvidia-container-toolkit); falling back to cpu"
+        )
+    _DEVICE = "cpu"
+    log("analysis device: cpu")
     return _DEVICE
 
 
@@ -616,7 +786,10 @@ def _release_models(idle_s=None):
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            where = "GPU memory"
+            # A card that failed its self-test is visible too, but the models
+            # were on cpu: name where they actually were.
+            if _DEVICE == "cuda":
+                where = "GPU memory"
     except Exception:  # noqa: BLE001 — freeing is best-effort
         pass
     # Hand the freed tensor heap back to the OS. gc.collect() returns it to
@@ -1196,7 +1369,7 @@ def facet_tail(y_src, sr, offset, duration_s, librosa):
     a ranged read). `offset` is the window's absolute start in seconds and
     `duration_s` the file's duration. Returns
       {startMs, ending: 'fade'|'cold', lufs?, bpm?, beats?, bars?,
-       loudnessCurve?, tail_silence_ms?, tail_start_ms?}
+       loudnessCurve?, tail_curve_unavailable?, tail_silence_ms?, tail_start_ms?}
     with all timestamps ABSOLUTE, or None when nothing is measurable.
     `loudnessCurve` (loudness_curve) is the window's short-term loudness, for
     the controller's audible-end cut of a fade; omitted without pyloudnorm.
@@ -1302,6 +1475,13 @@ def facet_tail(y_src, sr, offset, duration_s, librosa):
         out["bars"] = bars_ms
     if curve is not None:
         out["loudnessCurve"] = curve
+    elif tail_loudness_curve_capable():
+        # Said, not left out (like loudness_curve_unavailable): an analyzer
+        # that cannot make the curve leaves it out, and the controller re-plans
+        # the tail when one can. This one could and its meter failed on this
+        # file, so asking again would only re-read it on every `--facets tail`
+        # pass. Lifted out of the outro below.
+        out["tail_curve_unavailable"] = "meter-failed"
     return out
 
 
@@ -2949,6 +3129,21 @@ LOUDNESS_CURVE_STEP_MS = 500
 LOUDNESS_CURVE_FLOOR_TENTHS = -1000
 
 
+def tail_loudness_curve_capable():
+    """Whether this worker can attach the tail's loudness curve (tail v3):
+    pyloudnorm present, and its meter exposing the K-weighting stages
+    loudness_curve() applies (a private attribute, so probed, never assumed).
+    The controller re-plans a placed tail stored without a curve only on
+    `True`, so an analyzer that cannot add one never re-reads it for nothing."""
+    try:
+        import pyloudnorm as pyln
+
+        stages = getattr(pyln.Meter(44100), "_filters", None)
+        return bool(stages) and all(hasattr(s, "apply_filter") for s in stages.values())
+    except Exception:  # noqa: BLE001 — absent or changed: not capable
+        return False
+
+
 def loudness_curve(y, sr, offset):
     """{startMs, stepMs, lufs: [int tenths]} for a decoded window `y` (mono (n,)
     or librosa's (channels, n)) starting at `offset` seconds into the file, or
@@ -4092,6 +4287,8 @@ def analyze(
         result["tail_window"] = "edges"
     if outro is not None:
         outro.pop("_searched", None)
+    if outro is not None and "tail_curve_unavailable" in outro:
+        result["tail_curve_unavailable"] = outro.pop("tail_curve_unavailable")
     if outro is not None and "tail_silence_ms" in outro:
         result["tail_silence_ms"] = outro.pop("tail_silence_ms")
         if "tail_start_ms" in outro:
@@ -5170,6 +5367,8 @@ def analyze_facets(librosa, source, facets, stems_dir=None, want_tail_vocals=Fal
                 lifted["tail_silence_ms"] = data.pop("tail_silence_ms")
                 if "tail_start_ms" in data:
                     lifted["tail_start_ms"] = data.pop("tail_start_ms")
+            if "tail_curve_unavailable" in data:
+                lifted["tail_curve_unavailable"] = data.pop("tail_curve_unavailable")
             if tail_span:
                 lifted["tail_window"] = "edges"
             out["tail"] = _ok({**lifted, **({"outro": data} if data else {})})
@@ -5379,6 +5578,10 @@ def main():
         # installed, not yet loaded: a failed load rides back as
         # capability_loss()["beat_grid"]. Older workers never emit the key.
         "grid_capable": grid_capable() and shutil.which("ffmpeg") is not None,
+        # Version signal: tail answers carry the short-term loudness curve
+        # (tail v3). Older workers never emit the key; the controller re-plans
+        # a placed tail stored without a curve only on `=== true`.
+        "tail_loudness_curve_capable": tail_loudness_curve_capable(),
     })
 
     for line in sys.stdin:

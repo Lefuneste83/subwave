@@ -109,6 +109,19 @@ export interface AnalysisResult {
   // `tailWindow` it was sent (it then ends where the music stops: tail v2, or
   // v3 when its outro carries the loudness curve — facets.placedTailVersion).
   tailPlaced?: boolean;
+  // Why a placed tail has no loudness curve, when the analyzer could make one
+  // and had none to give: its own reason, or 'rejected' for one this
+  // controller's parser refuses. null for an analyzer that cannot make the
+  // curve (it says nothing): that tail waits for one that can.
+  tailCurveUnavailable?: string | null;
+}
+
+// Settled-without-a-curve reason for a tail answer: the worker's own, or
+// 'rejected' when it sent a curve parseOutro would not keep.
+function tailCurveUnavailableOf(rawOutro: unknown, outro: OutroInfo | null, said: unknown): string | null {
+  if (outro?.loudnessCurve) return null;
+  if ((rawOutro as Record<string, unknown> | null)?.loudnessCurve != null) return 'rejected';
+  return typeof said === 'string' ? said : null;
 }
 
 // The outgoing track's measured ending. Timestamps are absolute ms.
@@ -278,6 +291,9 @@ interface WorkerMessage {
   // The whole-track beat grid (Beat This!, heavy images). Older workers never
   // emit the key.
   grid_capable?: boolean;
+  // Tail answers carry the tail's short-term loudness curve (tail v3). Absent
+  // on workers that predate it.
+  tail_loudness_curve_capable?: boolean;
   loudness_curve?: unknown;
   loudness_curve_unavailable?: unknown;
   loudness_version?: unknown;
@@ -287,6 +303,7 @@ interface WorkerMessage {
   edge_tail_ms?: unknown;
   decoded_duration_ms?: unknown;
   tail_window?: unknown;
+  tail_curve_unavailable?: unknown;
   // Facet-shape answer.
   facets?: Record<string, { status?: string; reason?: string; data?: WorkerMessage }>;
   source?: Record<string, unknown>;
@@ -341,6 +358,7 @@ let _localRangedTailCapable: boolean | null = null;
 let _localWholeFileCapable: boolean | null = null;
 let _localLoudnessCurveCapable: boolean | null = null;
 let _localGridCapable: boolean | null = null;
+let _localTailCurveCapable: boolean | null = null;
 let _localTextCapable: boolean | null = null;
 // Local twins of _sidecarAudioError / _sidecarVocalError — see there.
 let _localAudioError: string | null = null;
@@ -407,6 +425,7 @@ function startWorker(): Promise<void> {
           _localWholeFileCapable = typeof msg.whole_file_capable === 'boolean' ? msg.whole_file_capable : null;
           _localLoudnessCurveCapable = typeof msg.loudness_curve_capable === 'boolean' ? msg.loudness_curve_capable : null;
           _localGridCapable = typeof msg.grid_capable === 'boolean' ? msg.grid_capable : null;
+          _localTailCurveCapable = typeof msg.tail_loudness_curve_capable === 'boolean' ? msg.tail_loudness_curve_capable : null;
         }
         // After the ready assignments, so a reported loss always wins.
         noteLocalCapabilityLoss(msg);
@@ -481,6 +500,7 @@ export function flatTailOpts(songId: string, tw: TailWindow | null): Pick<Analyz
 // an AnalysisResult; absent fields read null.
 function toAnalysisResult(msg: WorkerMessage): AnalysisResult {
   const curve = msg.loudness_curve == null ? null : parseWholeLoudnessCurve(msg.loudness_curve);
+  const outro = parseOutro(msg.outro);
   return {
           bpm: msg.bpm ?? null,
           musicalKey: msg.key ?? null,
@@ -495,7 +515,7 @@ function toAnalysisResult(msg: WorkerMessage): AnalysisResult {
           bars: parseMsList(msg.bars),
           keyRanges: parseKeyRanges(msg.key_ranges),
           audioEmbedding: parseAudioEmbedding(msg.audio_embedding),
-          outro: parseOutro(msg.outro),
+          outro,
           leadSilenceMs: parseSilenceMs(msg.lead_silence_ms),
           tailSilenceMs: parseSilenceMs(msg.tail_silence_ms),
           tailStartMs: parseSilenceMs(msg.tail_start_ms),
@@ -512,6 +532,7 @@ function toAnalysisResult(msg: WorkerMessage): AnalysisResult {
           edgeTailMs: parseSilenceMs(msg.edge_tail_ms),
           decodedDurationMs: parseSilenceMs(msg.decoded_duration_ms),
           tailPlaced: msg.tail_window === 'edges',
+          tailCurveUnavailable: tailCurveUnavailableOf(msg.outro, outro, msg.tail_curve_unavailable),
   };
 }
 
@@ -596,6 +617,7 @@ let _sidecarRangedTailCapable: boolean | null = null;
 let _sidecarWholeFileCapable: boolean | null = null;
 let _sidecarLoudnessCurveCapable: boolean | null = null;
 let _sidecarGridCapable: boolean | null = null;
+let _sidecarTailCurveCapable: boolean | null = null;
 let _sidecarWholeFileConcurrency: number | null = null;
 // The sidecar's analysis pool size (ANALYZE_CONCURRENCY); null on a sidecar
 // that predates the field.
@@ -627,6 +649,7 @@ async function probeSidecar(url: string): Promise<boolean> {
       analyze_whole_file_capable?: boolean | null;
       analyze_loudness_curve_capable?: boolean | null;
       analyze_grid_capable?: boolean | null;
+      analyze_tail_loudness_curve_capable?: boolean | null;
       analyze_whole_file_concurrency?: number | null;
       analyze_concurrency?: number | null;
       analyze_audio_error?: string | null;
@@ -643,6 +666,7 @@ async function probeSidecar(url: string): Promise<boolean> {
       _sidecarWholeFileCapable = typeof body.analyze_whole_file_capable === 'boolean' ? body.analyze_whole_file_capable : null;
       _sidecarLoudnessCurveCapable = typeof body.analyze_loudness_curve_capable === 'boolean' ? body.analyze_loudness_curve_capable : null;
       _sidecarGridCapable = typeof body.analyze_grid_capable === 'boolean' ? body.analyze_grid_capable : null;
+      _sidecarTailCurveCapable = typeof body.analyze_tail_loudness_curve_capable === 'boolean' ? body.analyze_tail_loudness_curve_capable : null;
       _sidecarWholeFileConcurrency = Number.isInteger(body.analyze_whole_file_concurrency) && (body.analyze_whole_file_concurrency as number) > 0
         ? (body.analyze_whole_file_concurrency as number) : null;
       _sidecarConcurrency = Number.isInteger(body.analyze_concurrency) && (body.analyze_concurrency as number) > 0
@@ -708,6 +732,7 @@ async function sidecarRequest(body: ({ url: string } | { path: string }) & Analy
   if (!res.ok) return sidecarFailure(res);
   const resBody = (await res.json()) as WorkerMessage;
   if (!resBody.ok) throw new Error(resBody.error || 'analysis failed');
+  const outro = parseOutro(resBody.outro);
   return {
     bpm: resBody.bpm ?? null,
     musicalKey: resBody.key ?? null,
@@ -722,13 +747,14 @@ async function sidecarRequest(body: ({ url: string } | { path: string }) & Analy
     bars: parseMsList(resBody.bars),
     keyRanges: parseKeyRanges(resBody.key_ranges),
     audioEmbedding: parseAudioEmbedding(resBody.audio_embedding),
-    outro: parseOutro(resBody.outro),
+    outro,
     leadSilenceMs: parseSilenceMs(resBody.lead_silence_ms),
     tailSilenceMs: parseSilenceMs(resBody.tail_silence_ms),
     tailStartMs: parseSilenceMs(resBody.tail_start_ms),
     stemsCached: typeof resBody.stems_cached === 'boolean' ? resBody.stems_cached : null,
     tailStemsLanded: typeof resBody.tail_stems_landed === 'boolean' ? resBody.tail_stems_landed : null,
     tailPlaced: resBody.tail_window === 'edges',
+    tailCurveUnavailable: tailCurveUnavailableOf(resBody.outro, outro, resBody.tail_curve_unavailable),
   };
 }
 
@@ -827,6 +853,16 @@ export function loudnessCurveAvailable(): boolean | null {
 export function gridAvailable(): boolean | null {
   if (_backend === 'sidecar') return _sidecarGridCapable;
   if (_backend === 'local') return _localGridCapable;
+  return null;
+}
+
+// Tail answers carry the tail's short-term loudness curve (tail v3,
+// pyloudnorm). A placed tail stored without one is re-planned only on
+// `=== true`: an analyzer that cannot add it would answer without it again,
+// every run (acoustics-plan, `no-curve`).
+export function tailLoudnessCurveAvailable(): boolean | null {
+  if (_backend === 'sidecar') return _sidecarTailCurveCapable;
+  if (_backend === 'local') return _localTailCurveCapable;
   return null;
 }
 

@@ -180,6 +180,47 @@ def case_without_pyloudnorm():
             sys.modules["pyloudnorm"] = saved
 
 
+def case_capability_with_pyloudnorm():
+    # The worker says it can attach the curve, so the controller re-plans a
+    # placed tail stored without one.
+    assert aw.tail_loudness_curve_capable() is True
+
+
+def case_capability_without_pyloudnorm():
+    saved = sys.modules.get("pyloudnorm")
+    sys.modules["pyloudnorm"] = None
+    try:
+        assert aw.tail_loudness_curve_capable() is False
+    finally:
+        if saved is None:
+            sys.modules.pop("pyloudnorm", None)
+        else:
+            sys.modules["pyloudnorm"] = saved
+
+
+def case_capability_without_the_filters():
+    # A pyloudnorm whose meter no longer exposes the K-weighting stages
+    # loudness_curve() applies cannot produce the curve: not capable.
+    class Meter:
+        def __init__(self, rate):
+            self.rate = rate
+
+    class Stub:
+        pass
+
+    stub = Stub()
+    stub.Meter = Meter
+    saved = sys.modules.get("pyloudnorm")
+    sys.modules["pyloudnorm"] = stub
+    try:
+        assert aw.tail_loudness_curve_capable() is False
+    finally:
+        if saved is None:
+            sys.modules.pop("pyloudnorm", None)
+        else:
+            sys.modules["pyloudnorm"] = saved
+
+
 class FakeLibrosa:
     @staticmethod
     def to_mono(buf):
@@ -220,11 +261,27 @@ def case_facet_tail_without_pyloudnorm():
     try:
         out = aw.facet_tail(fading_stereo(), SR, 180.0, 200.0, FakeLibrosa)
         assert out is not None and "loudnessCurve" not in out, sorted(out or {})
+        # Not capable: says nothing, so the tail waits for an analyzer that is.
+        assert "tail_curve_unavailable" not in out, sorted(out)
     finally:
         if saved is None:
             sys.modules.pop("pyloudnorm", None)
         else:
             sys.modules["pyloudnorm"] = saved
+
+
+def case_facet_tail_meter_failed():
+    # Capable, but the meter failed on this file: said, so the controller
+    # settles the tail instead of re-reading it on every `--facets tail` pass.
+    saved = (aw.loudness_curve, aw.tail_loudness_curve_capable)
+    aw.loudness_curve = lambda *_a, **_k: None
+    aw.tail_loudness_curve_capable = lambda: True
+    try:
+        out = aw.facet_tail(fading_stereo(), SR, 180.0, 200.0, FakeLibrosa)
+        assert out is not None and "loudnessCurve" not in out, sorted(out or {})
+        assert out.get("tail_curve_unavailable") == "meter-failed", sorted(out)
+    finally:
+        aw.loudness_curve, aw.tail_loudness_curve_capable = saved
 
 
 print("analyzer loudness curve")
@@ -235,6 +292,10 @@ test("digital silence reads at the floor", case_silence_floor, needs=("pyloudnor
 test("no pyloudnorm: no curve, no failure", case_without_pyloudnorm)
 test("facet_tail stores the curve in the outro", case_facet_tail_carries_curve, needs=("pyloudnorm",))
 test("facet_tail without pyloudnorm omits the curve", case_facet_tail_without_pyloudnorm)
+test("facet_tail says when a capable meter failed", case_facet_tail_meter_failed)
+test("capable with pyloudnorm", case_capability_with_pyloudnorm, needs=("pyloudnorm",))
+test("not capable without pyloudnorm", case_capability_without_pyloudnorm)
+test("not capable when the meter lacks its filter stages", case_capability_without_the_filters)
 
 if failures:
     print(f"FAIL: {failures} case(s)")

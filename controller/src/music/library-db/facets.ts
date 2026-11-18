@@ -149,11 +149,16 @@ export function tailVersionOf(row: Pick<FacetSourceRow, 'tail_version' | 'has_ed
 // The `tail_version` stamp for a tail the analyzer confirmed it PLACED: 3 when
 // its outro carries a valid loudness curve (an analyzer with pyloudnorm), else
 // 2 (an older analyzer, or one without pyloudnorm: due again). A placed answer
-// with no outro has no curve to carry, so it is complete at 3. Mark the
-// answer, not the request: an unplaced tail gets no stamp at all.
-export function placedTailVersion(outro: { loudnessCurve?: unknown } | null | undefined): number {
+// with no outro has no curve to carry, so it is complete at 3, and so is one
+// whose analyzer could make the curve and said it had none to give
+// (`curveUnavailable`: the meter failed, or the curve was rejected; a window
+// too short for a reading gives an empty curve, which is a curve): asking
+// again would only re-read the file, on every `--facets tail` pass. Mark the answer, not the request: an unplaced tail
+// gets no stamp at all.
+export function placedTailVersion(outro: { loudnessCurve?: unknown } | null | undefined, curveUnavailable?: string | null): number {
   if (outro == null) return 3;
-  return parseLoudnessCurve(outro.loudnessCurve) ? 3 : 2;
+  if (parseLoudnessCurve(outro.loudnessCurve)) return 3;
+  return curveUnavailable ? 3 : 2;
 }
 
 // Does a tail with this stamp sit on the window that ends where the music
@@ -343,7 +348,11 @@ export function deriveFacetRows(
   // An outro proves the tail was decoded, even when its window held no
   // silence edge (tail_silence_ms is then NULL by design).
   if (row.has_tail_silence || row.has_outro) {
-    ok('tail', null, silentFile ? FACET_VERSIONS.tail : tailVersionOf(row));
+    // A tail on the placed window without the loudness curve (v2) stays one
+    // version below: re-planned for the curve, but only on an analyzer that
+    // says it can add one (acoustics-plan, `no-curve`), like loudness above.
+    const v = silentFile ? FACET_VERSIONS.tail : tailVersionOf(row);
+    ok('tail', v === FACET_VERSIONS.tail - 1 && isPlacedTailStamp(v) ? 'no-curve' : null, v);
     out[out.length - 1]!.measuredVersion = true;
   }
   else if (analysed) unmeasurable('tail', opts.tailReason ?? 'tail-not-measured');
@@ -531,9 +540,9 @@ function syncTrackFacetsOn(d: Database.Database, id: string, opts: SyncOpts): vo
     // re-measure the facet keeps it. Vocal reasons describe the current
     // columns instead, so a previously lost tail cannot retain a stale null
     // reason. A failure's reason is the latest error.
-    // An ok loudness row's reason (`no-curve`) describes the columns too.
+    // An ok loudness or tail row's reason (`no-curve`) describes the columns too.
     if (!isFresh && prev && prev.status === r.status && r.status !== 'failed' && r.facet !== 'vocal' && r.facet !== 'year' &&
-      !isOptInFacet(r.facet) && !(r.facet === 'loudness' && r.status === 'ok')) r.reason = prev.reason;
+      !isOptInFacet(r.facet) && !((r.facet === 'loudness' || r.facet === 'tail') && r.status === 'ok')) r.reason = prev.reason;
     // Measuring edges re-decides which window a stored tail sits on (the
     // tolerance in tailVersionOf), so that is taken as is too: otherwise every
     // track whose edges arrive after this table was derived stays planned for
@@ -593,9 +602,11 @@ export function facetDerivationStamp(): string {
   // Revision 5 settles the tail of a file the edges scan found silent.
   // Revision 6 reopens a whole-file loudness figure stored before the curve
   // (`no-curve`, one version below): the stations that ran the pass early.
+  // Revision 7 marks a placed tail without its loudness curve `no-curve`
+  // (upstream's own revision 6, which a fork station had already passed).
   // Adding a facet (year, grid) changes FACET_VERSIONS, which re-derives on its
   // own; with no grid stored yet that re-derive leaves every row as it was.
-  return JSON.stringify({ revision: 6, analysis: ANALYSIS_VERSION, facets: FACET_VERSIONS });
+  return JSON.stringify({ revision: 7, analysis: ANALYSIS_VERSION, facets: FACET_VERSIONS });
 }
 
 function readFacetStamp(d: Database.Database): string | null {
