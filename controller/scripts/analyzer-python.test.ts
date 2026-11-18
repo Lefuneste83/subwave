@@ -34,6 +34,7 @@ const SUITES = [
   'analyzer_tail_placement_test.py', // tail v2: the window ends where the music stops (stored edges)
   'analyzer_loudness_curve_test.py', // tail v3: short-term loudness curve (vs ffmpeg ebur128 where available)
   'analyzer_grid_test.py', // whole-track beat grid: the fit (segments, downbeat phase, octave-safe), numpy only
+  'analyzer_structure_test.py', // per-bar structure on the grid (kick, bass, mids, melody); needs scipy, skips here
   'analyzer_stems_marker_test.py', // no stem writes into an unmarked (unmounted) stems root
   'analyzer_shared_modes_test.py', // shared stems/transitions written 777/666 whatever the umask
   'analyzer_device_test.py', // cuda self-test + cpu fallback (#2280)

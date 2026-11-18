@@ -89,6 +89,10 @@ WHOLE_FILE_CONCURRENCY = _bounded_int_env("ANALYZE_WHOLE_FILE_CONCURRENCY", 4, 1
 # DJ mix streamed from the music server is the slow case.
 WHOLE_FILE_TIMEOUT_S = _bounded_float_env("ANALYZE_WHOLE_FILE_TIMEOUT_S", 900.0, 30.0, 7200.0)
 WHOLE_FILE_FACETS = ("loudness", "edges")
+# What the one-shot whole-file lane serves: the whole-file facets and the
+# per-bar structure (its own decode, numpy/scipy, no model), so a structure
+# pass runs as wide as a loudness pass and never queues behind CLAP/Demucs.
+WHOLE_FILE_LANE_FACETS = WHOLE_FILE_FACETS + ("structure",)
 # Facets that load a model (CLAP, Demucs, Beat This!): the residency tracking
 # counts a request that names one as model use.
 MODEL_FACETS = ("clap", "vocal", "stems", "grid")
@@ -753,6 +757,10 @@ async def health():
         # lean image or after a failed model load (analyze_grid_error says why).
         "analyze_grid_capable": analyzer_pool.capability("grid_capable", "beat_grid"),
         "analyze_grid_error": analyzer_pool.capability_error("beat_grid"),
+        # The per-bar structure on the beat grid (the `structure` facet:
+        # numpy + scipy + ffmpeg, no model; true on every image that has
+        # them). None on older workers, which never emit the key.
+        "analyze_structure_capable": analyzer_pool.capability("structure_capable", "structure"),
         # Tail answers carry the tail's short-term loudness curve (tail v3).
         # None on older workers, which never emit the key.
         "analyze_tail_loudness_curve_capable": analyzer_pool.capability(
@@ -813,7 +821,7 @@ class AnalyzeRequest(BaseModel):
     # Skips every non-embedding feature in the worker.
     embedding_only: bool = False
     # Per-facet request: compute ONLY these facets (head, loudness, tail,
-    # clap, vocal, stems, edges, grid) and answer {"facets": {...}, "source": {...}}.
+    # clap, vocal, stems, edges, grid, structure) and answer {"facets": {...}, "source": {...}}.
     # Absent = the flat response above, unchanged. embed / vocal /
     # embedding_only are ignored when this is set: the facets say it all.
     facets: list[str] | None = None
@@ -842,6 +850,10 @@ class AnalyzeRequest(BaseModel):
     # on the stem windows it writes (#2238). Untyped like stems_windows: the
     # worker judges it, and a bad value stamps unknown rather than a 422.
     source_size: Any = None
+    # Facet requests only: the beat grid the `structure` facet measures its
+    # bars on ({beats_per_bar, decoded_ms, segments}), from the controller's
+    # library (the worker never reads it). Untyped: the worker judges it.
+    structure_grid: Any = None
 
 
 @app.post("/analyze")
@@ -895,7 +907,9 @@ async def analyze(req: AnalyzeRequest):
             payload["stream_url"] = req.stream_url
         if req.stems_windows is not None:
             payload["stems_windows"] = req.stems_windows
-    if facets and all(f in WHOLE_FILE_FACETS for f in facets):
+        if req.structure_grid is not None:
+            payload["structure_grid"] = req.structure_grid
+    if facets and all(f in WHOLE_FILE_LANE_FACETS for f in facets):
         msg = await run_whole_file_once(payload)
     else:
         msg = await analyzer_pool.request(payload)
