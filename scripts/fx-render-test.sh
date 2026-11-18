@@ -789,6 +789,12 @@ jingleseam() {
   mark=$(grep -m1 -oE 'metadata\.map\(update=true, fun \(_\) -> \[\("subwave_jingle", "true"\)\]' "$HERE/../liquidsoap/radio.liq")
   [ "$(wc -l < "$WORK/jseam-arming.liq")" = 8 ] && [ -n "$mark" ] && grep -q "def cross_stamps" "$WORK/jseam-stamps.liq" \
     || { echo "JINGLESEAM FAIL — could not lift the arming lines / jingle mark / cross stamps from radio.liq"; return 1; }
+  # Since Hot Mix every arming line stands down on a mixed seam (`not mixed`,
+  # read from the seam's liq_mix stamps). These tones carry none, so no seam
+  # here is mixed; defined only when radio.liq has it.
+  if grep -qE '^  mixed = ' "$HERE/../liquidsoap/radio.liq"; then
+    { echo "  mixed = false"; cat "$WORK/jseam-arming.liq"; } > "$WORK/jseam-arming.tmp" && mv "$WORK/jseam-arming.tmp" "$WORK/jseam-arming.liq"
+  fi
   {
     cat <<'LIQ'
 settings.log.stdout := true
