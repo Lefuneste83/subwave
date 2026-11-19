@@ -47,7 +47,9 @@ const NEAREST_TIE_PCT = 1;
 // How many of the nearest tempos the never-starve fallback hands on.
 const NEAREST_KEEP = 8;
 
-export interface HotMix { maxStepPct: number; curve: HotMixCurvePoint[] }
+// `phraseBars`: each seam's overlap, in bars; `phraseMix`: the seam placed on
+// the measured kicks (music/phrase-mix-policy.ts), searched for when off.
+export interface HotMix { maxStepPct: number; curve: HotMixCurvePoint[]; phraseBars: number; phraseMix: boolean }
 
 type HotMixShow = { hotMix?: unknown } | null | undefined;
 
@@ -57,7 +59,7 @@ const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFi
 // saved show means the same thing here as in the editor. Malformed reads as off.
 export function hotMixOf(show: HotMixShow): HotMix | null {
   const hm = repairHotMix(show?.hotMix);
-  return hm.enabled ? { maxStepPct: hm.maxStepPct, curve: hm.curve } : null;
+  return hm.enabled ? { maxStepPct: hm.maxStepPct, curve: hm.curve, phraseBars: hm.phraseBars, phraseMix: hm.phraseMix } : null;
 }
 
 export function takesRequests(show: HotMixShow): boolean {

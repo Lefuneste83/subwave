@@ -4,12 +4,21 @@ import { SHOW_COLORS } from '../schedule/lib';
 import { eraLabelOf } from './types';
 import type { Persona, PlaylistIndexStatus, Schedule, SettingsResponse, Show } from './types';
 import {
+  HOT_MIX_PHRASE_BARS_DEFAULT,
   HOT_MIX_STEP_PCT_DEFAULT,
   migrateLegacyShowFields,
   repairHotMix,
   type ShowSchemaContext,
 } from '@/lib/schemas.generated';
 
+
+// A phrase length as the editor holds it (a number, or the select's text) to
+// the number the schema reads; empty is the default. Anything else is sent as
+// it stands, and the schema refuses it.
+function phraseBarsOf(v: unknown): number {
+  if (v == null || v === '') return HOT_MIX_PHRASE_BARS_DEFAULT;
+  return typeof v === 'string' ? Number(v) : (v as number);
+}
 
 export function clientMintId() {
   const b = crypto.getRandomValues(new Uint8Array(3));
@@ -142,6 +151,10 @@ export function showPayload(s: Show) {
       maxStepPct: s.hotMix?.maxStepPct ?? HOT_MIX_STEP_PCT_DEFAULT,
       curve: [...(s.hotMix?.curve ?? [])].sort((a, b) => a.at - b.at),
       closeRequests: s.hotMix?.closeRequests !== false,
+      // The select holds its value as text; the wire carries the number.
+      phraseBars: phraseBarsOf(s.hotMix?.phraseBars),
+      // No control edits it yet: carried through so a save never drops it.
+      phraseMix: s.hotMix?.phraseMix === true,
     },
     programme: s.programme ?? false,
     // A skill pin only means something in programme mode.

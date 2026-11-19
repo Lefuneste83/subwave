@@ -216,3 +216,140 @@ test('an outgoing track whose cue-in landed late buffers that much more, on both
   assert.match(RADIO_LIQ, /own = if mix_lead >= 0\. then mix_lead \+ clip_seam_slack \+ mix_out_late_room\(m\) else own end/);
   assert.match(RADIO_LIQ, /mix_max_d = mix_lead \+ clip_seam_slack \+ mix_out_late_room\(a\.metadata\) \+ frame\.duration\(\)/);
 });
+
+// ─── The phrase mix (show.hotMix.phraseMix) and the phrase length ───────────
+
+// Stored bars for a track: `bars` four-beat bars of `barUs` from `startMs`, the
+// full section (hard kick, bass, mids) on bars first..last, quiet elsewhere,
+// so structurePoints reads firstHardKick = first, lastHardKick = last.
+function structure(id: string, startMs: number, barUs: number, bars: number, first: number, last: number) {
+  const full = (i: number) => i + 1 >= first && i + 1 <= last;
+  const arr = (on: number, off: number) => Array.from({ length: bars }, (_, i) => (full(i) ? on : off));
+  db.writeStructure(id, {
+    version: 1,
+    decodedMs: null,
+    bars: {
+      runs: [[startMs, barUs, bars]],
+      kick: arr(0, -20), kicks: arr(4, 0), bass: arr(0, -30), mid: arr(0, -20),
+      high: arr(-6, -20), level: arr(0, -20), melody: arr(10, 10),
+    },
+  }, db.getGrid(id)!.measuredAt);
+}
+// A: 150 bars of 2 s from 0.5 s, its last hard kick on bar 100.
+structure('out-120', 500, 2_000_000, 150, 20, 100);
+// B: 150 bars of 4 beats at 123 BPM from 0.2 s, a 64-bar intro (first hard kick on bar 65).
+const B_BAR_US = 4 * Math.round(60e6 / 123);
+structure('in-123', 200, B_BAR_US, 150, 65, 140);
+const bBarSec = (k: number) => (200 + ((k - 1) * B_BAR_US) / 1000) / 1000;
+const logText = () => queue.djLog.map((l) => l.message).join('\n');
+
+test('phrase mix on, structure on both sides: the seam sits on the kicks', async () => {
+  await onAir({ enabled: true, phraseMix: true });
+  const { item, successor } = pairOf(A, B);
+  await plan(item, successor);
+  assert.ok(item.mixOut && successor.mixIn, logText());
+  // A's overlap starts the bar after its last hard kick (bar 101, 200.5 s) and
+  // it is cut 8 bars on; B enters 8 bars before its first hard kick (bar 57).
+  assert.ok(Math.abs(item.mixOut.outCueSec - (0.5 + 108 * 2)) < 1e-3, `${item.mixOut.outCueSec}`);
+  assert.ok(Math.abs(successor.mixIn.inCueSec - bBarSec(57)) < 1e-3, `${successor.mixIn.inCueSec}`);
+  assert.ok(Math.abs(item.mixOut.leadSec - 16) < 1e-3);
+  // The bass timings, for the mixer's later step.
+  assert.deepEqual(item.mixOut.bassRide, { fromSec: 0, toSec: item.mixOut.leadSec });
+  assert.equal(successor.mixIn.punchSec, item.mixOut.leadSec);
+  assert.match(logText(), /Hot Mix seam [\s\S]*phrase mix: out after bar 100 \(last hard kick\) \+8 bars, in at bar 57, first hard kick bar 65 at \+16s/);
+  assert.doesNotMatch(logText(), /phrase mix not used/);
+  // Nothing new reaches the mixer: the annotations are the ones without the bass timings.
+  const { bassRide: _r, ...outPlain } = item.mixOut;
+  const { punchSec: _p, ...inPlain } = successor.mixIn;
+  // (The annotations only: the stream URL's auth salt changes per call.)
+  const keys = (uri: string) => uri.slice(0, uri.indexOf(':subhttp:'));
+  const out = keys(getAnnotatedUri(item.track, { mixOut: item.mixOut, cueOutSec: item.mixOut.outCueSec }));
+  assert.ok(out.includes('liq_mix_out='));
+  assert.equal(out, keys(getAnnotatedUri(item.track, { mixOut: outPlain, cueOutSec: item.mixOut.outCueSec })));
+  const inn = keys(getAnnotatedUri(successor.track, { mixIn: successor.mixIn, cueInSec: successor.mixIn.inCueSec }));
+  assert.ok(inn.includes('liq_mix_in='));
+  assert.equal(inn, keys(getAnnotatedUri(successor.track, { mixIn: inPlain, cueInSec: successor.mixIn.inCueSec })));
+  assert.doesNotMatch(out + inn, /bass|punch|phrase/i);
+});
+
+test('phrase mix on, sixteen bars: B enters 16 bars before its kick, a 64-beat overlap', async () => {
+  await onAir({ enabled: true, phraseMix: true, phraseBars: 16 });
+  const { item, successor } = pairOf(A, B);
+  await plan(item, successor);
+  assert.ok(item.mixOut && successor.mixIn, logText());
+  assert.ok(Math.abs(successor.mixIn.inCueSec - bBarSec(49)) < 1e-3);
+  assert.ok(Math.abs(item.mixOut.leadSec - 32) < 1e-3);
+  assert.ok(Math.abs(item.mixOut.outCueSec - (0.5 + 116 * 2)) < 1e-3);
+  assert.match(logText(), /\+16 bars, in at bar 49, first hard kick bar 65 at \+32s/);
+});
+
+test('phrase mix on, an intro shorter than the show asks: the overlap is the window\'s, the kick on the cut', async () => {
+  await onAir({ enabled: true, phraseMix: true, phraseBars: 16 });
+  // A 12-bar intro (first hard kick on bar 13) holds one 8-bar phrase, not 16.
+  const S = track('in-short-123', 123, 200);
+  structure('in-short-123', 200, B_BAR_US, 150, 13, 140);
+  const { item, successor } = pairOf(A, S);
+  await plan(item, successor);
+  assert.ok(item.mixOut && successor.mixIn, logText());
+  assert.ok(Math.abs(successor.mixIn.inCueSec - bBarSec(5)) < 1e-3, `${successor.mixIn.inCueSec}`);
+  // Eight bars of A: the overlap and A's cut follow the window, not the show's 16.
+  assert.ok(Math.abs(item.mixOut.leadSec - 16) < 1e-3, `${item.mixOut.leadSec}`);
+  assert.ok(Math.abs(item.mixOut.outCueSec - (0.5 + 108 * 2)) < 1e-3, `${item.mixOut.outCueSec}`);
+  assert.equal(successor.mixIn.punchSec, item.mixOut.leadSec);
+  assert.match(logText(), /\+8 bars, in at bar 5, first hard kick bar 13 at \+16s/);
+});
+
+test('phrase mix on, no structure on the incoming track: one booth line, then the seam as before', async () => {
+  await onAir({ enabled: true, phraseMix: true });
+  const { item, successor } = pairOf(A, Z);
+  await plan(item, successor);
+  assert.ok(item.mixOut && successor.mixIn, logText());
+  const lines = queue.djLog.filter((l) => /phrase mix not used/.test(l.message));
+  assert.equal(lines.length, 1);
+  assert.match(lines[0].message, /^Hot Mix: phrase mix not used for "out-120" → "top-121" \(no structure measured on the incoming track\): beat mix as before$/);
+  assert.equal(successor.mixIn.inCueSec, 0, 'the searched seam: B on its first downbeat');
+  assert.equal(item.mixOut.bassRide, undefined);
+  assert.equal(successor.mixIn.punchSec, undefined);
+});
+
+test('phrase mix on, a window it cannot use: the searched seam, and the booth says why', async () => {
+  await onAir({ enabled: true, phraseMix: true });
+  // The structure cannot place it: A ends (a trim, a cap) before any 8-bar
+  // transition after its full section starts.
+  let p = pairOf(A, B);
+  await queue.planHotMixSeam(p.item, p.successor, { trim: NO_TRIM, endSecs: [45], boundaryCueSec: null });
+  assert.match(logText(), /phrase mix not used for "out-120" → "in-123" \(the outgoing track ends before an 8-bar transition fits\): beat mix as before/);
+  assert.ok(p.item.mixOut && p.item.mixOut.outCueSec <= 45, 'the searched seam still plans');
+  // The grid does not hold it: bars stored 100 ms off the grid's downbeats.
+  queue.djLog.length = 0;
+  const S = track('in-shift-123', 123, 200);
+  structure(S.id, 300, B_BAR_US, 150, 65, 140);
+  p = pairOf(A, S);
+  await plan(p.item, p.successor);
+  assert.match(logText(), /phrase mix not used for "out-120" → "in-shift-123" \(the phrase window's incoming downbeat is not on a trusted grid\): beat mix as before/);
+  assert.equal(p.successor.mixIn?.inCueSec, 0.2);
+  assert.equal(p.successor.mixIn?.punchSec, undefined);
+});
+
+test('phrase mix off: exactly the seam it always was, structure or not', async () => {
+  await onAir({ enabled: true });
+  const { item, successor } = pairOf(A, B);
+  await plan(item, successor);
+  assert.ok(item.mixOut && successor.mixIn, logText());
+  assert.equal(successor.mixIn.inCueSec, 0.2);
+  assert.ok(Math.abs(item.mixOut.leadSec - 16) < 1e-3);
+  assert.equal(item.mixOut.bassRide, undefined);
+  assert.equal(successor.mixIn.punchSec, undefined);
+  assert.doesNotMatch(logText(), /phrase mix/);
+});
+
+test('phrase length 16 without the phrase mix: a 64-beat overlap on the searched seam', async () => {
+  await onAir({ enabled: true, phraseBars: 16 });
+  const { item, successor } = pairOf(A, B);
+  await plan(item, successor);
+  assert.ok(item.mixOut && successor.mixIn, logText());
+  assert.ok(Math.abs(item.mixOut.leadSec - 32) < 1e-3);
+  assert.equal(successor.mixIn.holdSec, item.mixOut.leadSec);
+  assert.equal(successor.mixIn.inCueSec, 0.2);
+  assert.equal(item.track.crossSec, item.mixOut.leadSec);
+});

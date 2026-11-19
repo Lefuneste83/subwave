@@ -18,7 +18,9 @@ import * as silenceTrim from '../music/silence-trim.js';
 import * as hotMixSeam from '../music/hot-mix-seam.js';
 import * as percussionPhase from '../music/percussion-phase.js';
 import { hotMixOf } from '../music/hot-mix-policy.js';
-import { getGrid } from '../music/library-db.js';
+import { getGrid, getStructure } from '../music/library-db.js';
+import { planPhraseWindow, type PhraseWindow } from '../music/phrase-mix-policy.js';
+import { structurePoints, type StructurePoints } from '../music/structure-policy.js';
 import * as cueLanding from '../music/cue-landing.js';
 import * as libraryMount from '../music/library-mount.js';
 import { capCueOutSec } from '../music/track-floor.js';
@@ -435,6 +437,38 @@ const startNowDrops = (i: QueueItem) => !!i.aiPicked && !i.requestedBy && !i.ste
 const startNowKeeps = (i: QueueItem) => i.sent || !startNowDrops(i);
 
 // transitions far more often — a working DJ talks across most of them.
+
+// The phrase mix's window for one pair (music/phrase-mix-policy.ts decides;
+// this reads each side's structure). A structure counts only measured ('ok')
+// and on the grid the seam plans on: bars measured on an older grid would put
+// the window off its downbeats.
+type GridRow = NonNullable<ReturnType<typeof getGrid>>;
+function phraseWindowOf(
+  bars: number,
+  seam: hotMixSeam.SeamInput,
+  [aId, aGrid]: [string, GridRow],
+  [bId, bGrid]: [string, GridRow],
+): { ok: true; window: PhraseWindow; lastKick: number } | { ok: false; reason: string } {
+  const sideOf = (id: string, grid: GridRow, which: string):
+    { points: StructurePoints; runs: Array<[number, number, number]> } | string => {
+    let st: ReturnType<typeof getStructure> = null;
+    try { st = getStructure(id); } catch { /* no library db */ }
+    if (st?.status !== 'ok' || !st.bars) return `no structure measured on the ${which} track`;
+    if (st.gridAt !== grid.measuredAt) return `the ${which} track's structure was measured on an older beat grid`;
+    return { points: structurePoints(st.bars), runs: st.bars.runs };
+  };
+  const a = sideOf(aId, aGrid, 'outgoing');
+  if (typeof a === 'string') return { ok: false, reason: a };
+  const b = sideOf(bId, bGrid, 'incoming');
+  if (typeof b === 'string') return { ok: false, reason: b };
+  const v = planPhraseWindow({
+    bars,
+    a: { ...a, cueInSec: seam.a.cueInSec, endSec: seam.a.endSec },
+    b: { ...b, cueInSec: seam.b.cueInSec },
+  });
+  return v.ok ? { ok: true, window: v.window, lastKick: a.points.lastHardKick! } : v;
+}
+
 class Queue {
   upcoming: QueueItem[] = [];  // request items pushed by listeners, not yet playing
   current: QueueItem | null = null;    // what's broadcasting right now (request or auto)
@@ -1997,10 +2031,14 @@ class Queue {
   // DJ Hot Mix seam (music/hot-mix-seam.ts decides; this gathers and stamps).
   // Runs at the outgoing item's pair drain, after applyPairStamps, and before
   // the stem blend, which it replaces: the plan cuts this item on a bar line
-  // eight bars after the downbeat its successor starts on, and stamps the
+  // the show's phrase length (eight bars by default) after the downbeat its
+  // successor starts on, and stamps the
   // successor's downbeat cue-in and tempo stretch. Anything it cannot trust
   // (no grid, a show-change cut, a gap past twice the step, a mixer without
   // the stretch) leaves the plain crossfade, and says why in the booth log.
+  // The overlap is the show's phrase length; with its phrase mix on, the seam
+  // is first placed on both tracks' measured kicks (music/phrase-mix-policy.ts)
+  // and, when that cannot be, searched as before with one booth line saying why.
   async planHotMixSeam(item: QueueItem, successor: QueueItem, ctx: {
     trim: { cueInSec: number | null; cueOutSec: number | null };
     endSecs: Array<number | null | undefined>;
@@ -2029,8 +2067,9 @@ class Queue {
     const aCues = positiveCues([mixIn?.inCueSec, ctx.trim.cueInSec]);
     const ends = positiveCues(ctx.endSecs);
     if (!ends.length) return plain('the outgoing track has no known length');
-    const verdict = hotMixSeam.planHotMixSeam({
+    const seamInput: hotMixSeam.SeamInput = {
       stepPct: mixCfg.maxStepPct,
+      overlapBeats: mixCfg.phraseBars * 4,
       a: {
         segments: aGrid.segments, beatsPerBar: aGrid.beatsPerBar, bpm: aGrid.bpm,
         cueInSec: aCues.length ? Math.max(...aCues) : 0,
@@ -2042,7 +2081,32 @@ class Queue {
         cueInSec: silenceTrim.resolveSilenceTrim(successor.track).cueInSec ?? 0,
         durationSec: knownDurationSec(successor.track),
       },
-    });
+    };
+    let verdict: hotMixSeam.SeamVerdict | null = null;
+    let phrase: { window: PhraseWindow; lastKick: number } | null = null;
+    if (mixCfg.phraseMix) {
+      const placed = phraseWindowOf(mixCfg.phraseBars, seamInput, [item.track.id, aGrid], [successor.track.id, bGrid]);
+      let why = placed.ok ? '' : placed.reason;
+      if (placed.ok) {
+        const w = placed.window;
+        // The window's own length: the incoming intro may hold fewer bars
+        // than the show asks, and the kick lands on the cut only when the
+        // overlap is exactly the bars the window counted back.
+        const v = hotMixSeam.planHotMixSeam({
+          ...seamInput,
+          overlapBeats: w.bars * 4,
+          window: { aStartSec: w.aStartSec, bEntrySec: w.bEntrySec },
+        });
+        if (v.ok) {
+          verdict = v;
+          phrase = { window: w, lastKick: placed.lastKick };
+        } else {
+          why = v.reason;
+        }
+      }
+      if (!phrase) this.log('mix', `Hot Mix: phrase mix not used for ${pairTitle} (${why}): beat mix as before`);
+    }
+    verdict ??= hotMixSeam.planHotMixSeam(seamInput);
     if (!verdict.ok) return plain(verdict.reason);
     const plan = verdict.plan;
     // Where the ear hears the beat (music/percussion-phase.ts): a grid sits a
@@ -2086,6 +2150,12 @@ class Queue {
     const id = randomBytes(4).toString('hex');
     item.mixOut = { id, leadSec: plan.leadSec, end: plan.aEnd, outCueSec: plan.outCueSec };
     successor.mixIn = { id, ...plan.bStart, inCueSec: plan.inCueSec, ...(waitSec ? { waitSec } : {}) };
+    // The phrase mix's bass timings, for the mixer's bass move (a later step):
+    // stamped on the items only, never annotated, so radio.liq sees nothing new.
+    if (phrase && plan.bPunchSec != null) {
+      item.mixOut.bassRide = { fromSec: 0, toSec: plan.leadSec };
+      successor.mixIn.punchSec = plan.bPunchSec;
+    }
     // An older mixer ignores the mix stamps: it crossfades over the overlap.
     item.track.crossSec = plan.leadSec;
     for (const k of ['washout', 'loop'] as const) {
@@ -2099,7 +2169,14 @@ class Queue {
     const moves = plan.kind === 'split'
       ? `split: out ×${plan.aEnd!.tempo.toFixed(4)}, in ×${plan.bStart.tempo.toFixed(4)}`
       : `in ×${plan.bStart.tempo.toFixed(4)}, out untouched`;
-    this.log('mix', `Hot Mix seam ${pairTitle}: ${plan.aBpm} → ${plan.bBpm} BPM (${plan.gapPct > 0 ? '+' : ''}${plan.gapPct} %), ${moves}; overlap ${plan.leadSec}s, cut ${plan.outCueSec}s, cue-in ${plan.inCueSec}s; ${phaseNote}`);
+    let phraseNote = '';
+    if (phrase) {
+      const w = phrase.window;
+      const outAfter = w.aStartBar - 1;
+      const anchor = outAfter === phrase.lastKick ? 'last hard kick' : `${phrase.lastKick - outAfter} bars before the last hard kick`;
+      phraseNote = `; phrase mix: out after bar ${outAfter} (${anchor}) +${w.bars} bars, in at bar ${w.bEntryBar}, first hard kick bar ${w.bPunchBar} at +${plan.leadSec}s`;
+    }
+    this.log('mix', `Hot Mix seam ${pairTitle}: ${plan.aBpm} → ${plan.bBpm} BPM (${plan.gapPct > 0 ? '+' : ''}${plan.gapPct} %), ${moves}; overlap ${plan.leadSec}s, cut ${plan.outCueSec}s, cue-in ${plan.inCueSec}s; ${phaseNote}${phraseNote}`);
   }
 
   // Basenames of rendered transition clips that haven't AIRED yet — the clip

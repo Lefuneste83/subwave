@@ -6,8 +6,8 @@
 // leaves after its last hard kick + N bars, the incoming one enters N bars
 // before its first hard kick, its bass punched in on that kick. The points are
 // rules over these arrays (music/structure-policy.ts), not stored: a rule
-// change re-reads nothing. No transition reads them yet (a later step), so the
-// facet changes nothing on air.
+// change re-reads nothing. Only a Hot Mix show's opt-in phrase mix reads them
+// (music/phrase-mix-policy.ts), so the facet alone changes nothing on air.
 //
 // Per bar of the track's own beat grid (library-db/grid.ts) the analyzer
 // measures (analyze_worker.facet_structure), levels in dB against the track's
