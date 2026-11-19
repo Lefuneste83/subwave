@@ -27,8 +27,7 @@ export interface LibraryOverview {
   blocked: { total: number; track: number; album: number; artist: number; rule: number; byEntry?: Record<string, number> };
   lengthLimits: { show: string | null; minSec: number | null; maxSec: number | null; within: number } | null;
   aired: { windowDays: number; recent: number; ever: number; never: number; since: string | null };
-  // `remeasure` is absent from a controller older than the split: read it as 0.
-  attention: { eraAlbums: number; unmeasurable: number; remeasure?: number; yearFailed: number; analysisFailed: number; damaged?: number; total: number };
+  attention: { eraAlbums: number; unmeasurable: number; remeasure: number; yearFailed: number; analysisFailed: number; damaged: number; total: number };
   computedAt: string;
 }
 
@@ -105,8 +104,8 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
 }) {
   const { adminFetch } = useLibrary();
   const [downloading, setDownloading] = useState(false);
-  // The tracks behind Needs you (unreadable, year lookup failed, analysis gave
-  // up, damaged) as a CSV with their file paths; the Era albums have the Era
+  // The tracks behind Needs you (unreadable, to re-measure, year lookup failed,
+  // analysis gave up, damaged) as a CSV with their file paths; the Era albums have the Era
   // tab's CSV.
   const downloadAttention = async () => {
     setDownloading(true);
@@ -150,12 +149,13 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
     ? [
         a.eraAlbums ? `${plural(a.eraAlbums, 'album')} to review (Era)` : null,
         a.unmeasurable ? `${plural(a.unmeasurable, 'track')} unreadable` : null,
-        a.remeasure ? `${plural(a.remeasure, 'track')} to re-measure` : null,
         a.yearFailed ? `${plural(a.yearFailed, 'track')}: year lookup failed` : null,
         a.analysisFailed ? `${plural(a.analysisFailed, 'track')}: analysis gave up` : null,
         a.damaged ? `${plural(a.damaged, 'track')} damaged` : null,
       ].filter(Boolean).join(' · ') || 'all clear'
     : '…';
+  // Shown, never summed: the next analysis run takes these again by itself.
+  const remeasureNote = a && a.remeasure ? `${plural(a.remeasure, 'track')} to re-measure (not counted)` : null;
   const gap = o && serverTotal != null ? serverTotal - o.library : null;
 
   return (
@@ -235,18 +235,19 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
           icon={<TriangleAlert size={15} aria-hidden />}
           label="Needs you"
           value={num(a?.total)}
-          sub={attentionParts}
+          sub={remeasureNote ? <>{attentionParts} · {remeasureNote}</> : attentionParts}
           onOpen={onOpenTab && a && a.eraAlbums > 0 ? () => onOpenTab('era') : undefined}
           openLabel="Open the Era tab"
           tip={<>
             What only you can settle, as one sum of albums and tracks:
             <br />· <b>albums</b> to review in the Era tab (the same count as its &ldquo;To review&rdquo;)
             <br />· <b>tracks</b> the analyzer could not read for some measure (a silent, corrupt or unusual file), each counted once
-            <br />· <b>tracks</b> with a measurement still due, not a bad file (a tail read before its edges were known): an analysis run of that measure takes them again
-            <br />· <b>tracks</b> whose original-year lookup failed
+            <br />· <b>tracks</b> whose original-year lookup failed (not &ldquo;not found&rdquo;: an error, retried later)
             <br />· <b>tracks</b> the analysis gave up on after repeated failures
             <br />· <b>tracks</b> whose file decodes into bursts far over full scale (corrupt frames): they air too quiet or click
-            <br />All clear at 0.
+            <br />All clear at 0. Tracks with a measurement still due (a tail read before its edges
+            were known) are shown as &ldquo;to re-measure&rdquo; but not counted: an analysis run of
+            that measure takes them again, with nothing for you to do.
           </>}
         />
         <Tile
@@ -296,17 +297,17 @@ export function LibraryCounts({ overview: o, serverTotal, countedAt, scanning, o
         </div>
       )}
 
-      {a && a.total - a.eraAlbums > 0 && (
+      {a && (a.total - a.eraAlbums > 0 || a.remeasure > 0) && (
         <div className="lib-counts-check flex flex-wrap items-center gap-2">
           <span>
             Needs you: <b className="mono-num">{plural(a.total - a.eraAlbums, 'track')}</b> to look at by hand
-            {' '}({[
+            {a.total - a.eraAlbums > 0 && <>{' '}({[
               a.unmeasurable ? `${num(a.unmeasurable)} unreadable` : null,
-              a.remeasure ? `${num(a.remeasure)} to re-measure` : null,
               a.yearFailed ? `${num(a.yearFailed)} year lookup failed` : null,
               a.analysisFailed ? `${num(a.analysisFailed)} analysis gave up` : null,
               a.damaged ? `${num(a.damaged)} damaged (corrupt frames)` : null,
-            ].filter(Boolean).join(', ')}).
+            ].filter(Boolean).join(', ')})</>}.
+            {a.remeasure > 0 && <> Also {plural(a.remeasure, 'track')} to re-measure, which the next analysis run takes by itself.</>}
           </span>
           <Btn sm onClick={downloadAttention} disabled={downloading}
             title="Every one of these tracks, what went wrong and where its file lives, as CSV (the Era albums are in the Era tab's own CSV)">

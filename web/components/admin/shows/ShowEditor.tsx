@@ -7,7 +7,7 @@ import { ShowPreparationField } from './ShowPreparationField';
 // Keyed by show id at the call site, so switching shows remounts and clears
 // the AiFill box and genreDraft buffer (neither is form data).
 
-import type { ChangeEvent, ReactNode, RefObject } from 'react';
+import type { ChangeEvent, ComponentProps, ReactNode, RefObject } from 'react';
 import { useId, useMemo, useState } from 'react';
 import { useController, type Control, type FieldErrors, type UseFormTrigger } from 'react-hook-form';
 import { Input } from '../../ui/input';
@@ -20,7 +20,14 @@ import { TagField } from '../TagField';
 import { EditorDialog, EditorFooter } from '../../ui/editor-dialog';
 import { AiFill } from '../AiFill';
 import GenreSuggest from '../GenreSuggest';
-import { GuestPersonaPicker, ThemePicker, PlaylistPicker } from './ShowPickers';
+import {
+  AllowlistSkipNotice,
+  GuestPersonaPicker,
+  IMAGING_PICKER_COPY,
+  JingleMixerNotice,
+  ThemePicker,
+  PlaylistPicker,
+} from './ShowPickers';
 import { cn } from '../../../lib/cn';
 import { fieldAria } from '@/lib/form';
 import { SelectField, SwitchField, TextField, TextareaField, ToggleGroupField } from '@/lib/form-fields';
@@ -38,6 +45,7 @@ import {
   TAGS_MAX,
   TAG_MAX,
   TAG_RE,
+  DESCRIPTION_MAX,
   TOPIC_MAX,
   VOCAL_OPTIONS,
   YEAR_MAX,
@@ -48,6 +56,7 @@ import {
 } from './types';
 import type { EraWindow, Persona, PlaylistIndexStatus, Show, ShowsFormValues, SkillOption, ThemeOption } from './types';
 import { hasAnyMusicFilter, showPayload } from './lib';
+import { SHOW_IMAGING_ALLOWLIST_MAX } from '@/lib/schemas.generated';
 import { ChipRow } from './ChipRow';
 import { HotMixFields } from './HotMixFields';
 import { PlaylistPosition } from './PlaylistPosition';
@@ -68,6 +77,9 @@ const FIELD_LABELS: Record<string, string> = {
   excludedPlaylistIds: 'excluded playlists',
   excludedAlbumKinds: 'album kinds left out',
   hotMix: 'Hot Mix',
+  allowedJingles: 'jingles',
+  allowedBeds: 'beds',
+  description: 'listener description',
 };
 
 // Some rules root on an ARRAY field (`eras.0.fromYear`), so walk down to the
@@ -106,6 +118,14 @@ interface ShowEditorProps {
   // Only 'ready' means /dj/playlists answered, so an id absent from
   // `playlists` can't be called missing while the index is merely unknown.
   playlistsStatus: PlaylistIndexStatus;
+  // The station's jingle and bed library, for the Imaging allowlists. Same
+  // status rule as playlists: only 'ready' may call a listed entry deleted.
+  jingles: { id: string; name: string; songCount: null }[];
+  jinglesStatus: PlaylistIndexStatus;
+  beds: { id: string; name: string; songCount: null }[];
+  bedsStatus: PlaylistIndexStatus;
+  // The mixer counts the rotate, so it cannot honour a jingle list.
+  jingleListIgnored: boolean;
   apiBase: string;
   adminFetch: (path: string, init?: RequestInit) => Promise<Response>;
   minTrackSeconds?: number;
@@ -138,6 +158,11 @@ export function ShowEditor({
   tagSuggestions,
   playlists,
   playlistsStatus,
+  jingles,
+  jinglesStatus,
+  beds,
+  bedsStatus,
+  jingleListIgnored,
   apiBase,
   adminFetch,
   minTrackSeconds,
@@ -188,7 +213,10 @@ export function ShowEditor({
   const fadeAtShowEndCtl = useController({ control, name: path('fadeAtShowEnd') });
   const tagsCtl = useController({ control, name: path('tags') });
 
-  const candidateKey = JSON.stringify(showPayload(show));
+  // The imaging lists and the listener description play no part in which
+  // tracks a show can pick.
+  const { allowedJingles: _j, allowedBeds: _b, description: _d, ...candidateShape } = showPayload(show);
+  const candidateKey = JSON.stringify(candidateShape);
   const [candidateBusy, setCandidateBusy] = useState(false);
   const [candidateError, setCandidateError] = useState<string | null>(null);
   const [candidateReport, setCandidateReport] = useState<{ key: string; value: CandidateDiagnostic } | null>(null);
@@ -476,11 +504,24 @@ export function ShowEditor({
             label="Show brief"
             rows={5}
             placeholder="e.g. Slow ambient, modern classical and downtempo for the late shift. Think Nils Frahm, Hammock, Bonobo's quieter side, nothing with a hard beat. Keep the host calm and unhurried, like a friend talking you down at 1am."
-            description="Describe the music, the listener and how the host should sound. The DJ uses this brief for song picks and spoken links."
+            description="For the DJ only: describe the music, the listener and how the host should sound. The DJ uses this brief for song picks and spoken links. Listeners see it only when the listener description below is empty."
             maxLength={TOPIC_MAX}
           />
           <span className="field-hint -mt-2">
             {show.topic.trim().length}/{TOPIC_MAX}
+          </span>
+
+          <TextareaField
+            control={control}
+            name={path('description')}
+            label="Listener description"
+            rows={2}
+            placeholder="e.g. Ambient, modern classical and downtempo to see you through the small hours."
+            description="What listeners read on the schedule and the On Now card. Plain text. The DJ never sees it. Leave it empty to show the brief above instead."
+            maxLength={DESCRIPTION_MAX}
+          />
+          <span className="field-hint -mt-2">
+            {(show.description ?? '').trim().length}/{DESCRIPTION_MAX}
           </span>
 
           <div className="grid items-start gap-6 xl:grid-cols-2">
@@ -1077,6 +1118,57 @@ export function ShowEditor({
         </ShowEditorSection>
 
         <ShowEditorSection
+          section="imaging"
+          title="Imaging"
+          description="Choose which jingles and beds air while this show is on. Pick none to allow every one."
+        >
+          <div className="grid items-start gap-6 xl:grid-cols-2">
+            <Field>
+              <PlaylistIdsField
+                control={control}
+                name={path('allowedJingles')}
+                playlists={jingles}
+                status={jinglesStatus}
+                max={SHOW_IMAGING_ALLOWLIST_MAX}
+                label="jingles"
+                copy={IMAGING_PICKER_COPY}
+              >
+                <span>
+                  The automatic rotate and the over-music ID draw only from these while this show airs. Pressing play
+                  on a jingle ignores the list.
+                </span>
+              </PlaylistIdsField>
+              <JingleMixerNotice ignored={jingleListIgnored} listed={show.allowedJingles} />
+              <AllowlistSkipNotice
+                kind="jingle"
+                listed={show.allowedJingles}
+                libraryIds={jingles.map(j => j.id)}
+                status={jinglesStatus}
+              />
+            </Field>
+            <Field>
+              <PlaylistIdsField
+                control={control}
+                name={path('allowedBeds')}
+                playlists={beds}
+                status={bedsStatus}
+                max={SHOW_IMAGING_ALLOWLIST_MAX}
+                label="beds"
+                copy={IMAGING_PICKER_COPY}
+              >
+                <span>Links and request intros are bedded only on these while this show airs.</span>
+              </PlaylistIdsField>
+              <AllowlistSkipNotice
+                kind="bed"
+                listed={show.allowedBeds}
+                libraryIds={beds.map(b => b.id)}
+                status={bedsStatus}
+              />
+            </Field>
+          </div>
+        </ShowEditorSection>
+
+        <ShowEditorSection
           section="appearance"
           title="Appearance"
           description="Choose the player palette listeners see while this show airs."
@@ -1115,14 +1207,20 @@ function PlaylistIdsField({
   status,
   max,
   label,
+  copy,
   children,
 }: {
   control: Control<ShowsFormValues>;
-  name: `shows.${number}.playlistIds` | `shows.${number}.excludedPlaylistIds`;
+  name:
+    | `shows.${number}.playlistIds`
+    | `shows.${number}.excludedPlaylistIds`
+    | `shows.${number}.allowedJingles`
+    | `shows.${number}.allowedBeds`;
   playlists: { id: string; name: string; songCount: number | null }[];
   status: PlaylistIndexStatus;
   max: number;
   label: string;
+  copy?: ComponentProps<typeof PlaylistPicker>['copy'];
   children?: ReactNode;
 }) {
   const uid = useId();
@@ -1141,6 +1239,7 @@ function PlaylistIdsField({
           selected={field.value ?? []}
           max={max}
           onChange={field.onChange}
+          copy={copy}
         />
         <FieldError {...aria.errorProps} errors={fieldState.error ? [fieldState.error] : undefined} />
       </div>

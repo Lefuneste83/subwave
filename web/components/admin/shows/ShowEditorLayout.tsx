@@ -10,6 +10,7 @@ const SECTIONS = [
   { id: 'playlists', label: 'Playlists', hint: 'Sources and exclusions' },
   { id: 'hotmix', label: 'Hot Mix', hint: 'Tempo steps and requests' },
   { id: 'timing', label: 'Timing', hint: 'Track lengths and handoff' },
+  { id: 'imaging', label: 'Imaging', hint: 'Jingles and beds' },
   { id: 'appearance', label: 'Appearance', hint: 'The player on air' },
 ] as const;
 

@@ -172,12 +172,6 @@ const STATS_INDEXES: Array<[name: string, sql: string]> = [
   // its own predicate columns, the WHERE spelled exactly as they query it).
   ['idx_tracks_damaged_decode', `CREATE INDEX IF NOT EXISTS idx_tracks_damaged_decode ON tracks(peak_db, loudness_lufs) WHERE ${DAMAGED_DECODE_SQL}`],
   ['idx_tracks_stats', 'CREATE INDEX IF NOT EXISTS idx_tracks_stats ON tracks(energy, source, tagged_at, artist, genres, moods) WHERE moods IS NOT NULL'],
-  // The Library counts line (library-overview.ts): every column its one pass
-  // reads, so the pass walks this index and never the wide rows, and the era
-  // albums still to review. Last: they name fork columns, and a failed build
-  // stops the loop.
-  ['idx_tracks_overview', 'CREATE INDEX IF NOT EXISTS idx_tracks_overview ON tracks(id, album_id, artist_id, artist, album, title, genres, moods, audio_moods, lastfm_tags, duration_sec, bpm, musical_key, loudness_lufs, loudness_version)'],
-  ['idx_tracks_era_open', 'CREATE INDEX IF NOT EXISTS idx_tracks_era_open ON tracks(era_untrusted, album_artist, album, original_year)'],
   // The era review (Library → Era). album_kind answers a show's
   // excludedAlbumKinds on every pick (tracks.albumKindTrackIds); the album key
   // answers each per-album read and write (era-review.ts). Both scanned the
@@ -189,8 +183,16 @@ const STATS_INDEXES: Array<[name: string, sql: string]> = [
   // `artist_id = ? OR album_artist_id = ?` runs as two index lookups only with
   // this beside idx_tracks_artist_id; without it, the OR scans the table.
   ['idx_tracks_album_artist_id', 'CREATE INDEX IF NOT EXISTS idx_tracks_album_artist_id ON tracks(album_artist_id)'],
+  // The Library counts line (library-overview.ts): every column its one pass
+  // reads, so the pass walks this index and never the wide rows, and the era
+  // albums still to review. Last: idx_tracks_era_open names a column added by
+  // name (schema.ts ensureNamedColumns), and a failed build stops the loop.
+  ['idx_tracks_overview', 'CREATE INDEX IF NOT EXISTS idx_tracks_overview ON tracks(id, album_id, artist_id, artist, album, title, genres, moods, audio_moods, lastfm_tags, duration_sec, bpm, musical_key, loudness_lufs, loudness_version)'],
+  ['idx_tracks_era_open', 'CREATE INDEX IF NOT EXISTS idx_tracks_era_open ON tracks(era_untrusted, album_artist, album, original_year)'],
 ];
-// Replaced by one of the above; dropped at open so it stops costing writes.
+// Fork: the pre-review counts line built this index on fork stations (upstream
+// never shipped it); replaced by one of the above, dropped at open so it stops
+// costing writes.
 const RETIRED_STATS_INDEXES = ['idx_tracks_era_review'];
 
 export function ensureStatsIndexes(): void {

@@ -16,6 +16,7 @@ import TuneInOverlay from './TuneInOverlay';
 import DotRail from './DotRail';
 import CoverAmbient from './CoverAmbient';
 import CoverZoom from './CoverZoom';
+import { coverZoomDismissed, skinShortcutsDisabled } from './coverZoom';
 import AmbientLyrics from './AmbientLyrics';
 import CommandPalette, { type PlayerDrawer } from './CommandPalette';
 import ShortcutsDialog from './ShortcutsDialog';
@@ -80,11 +81,6 @@ export default function ClassicSkin({ portalNode }: SkinProps) {
   const [zoomFrom, setZoomFrom] = useState<HTMLElement | null>(null);
   const openCover = useCallback((thumbnail: HTMLElement) => setZoomFrom(thumbnail), []);
   const closeCover = useCallback(() => setZoomFrom(null), []);
-  // Nothing left to show (off air, no art) or a drawer opening over it: it
-  // simply goes.
-  useEffect(() => {
-    if (!coverSrc || offline || drawer != null) setZoomFrom(null);
-  }, [coverSrc, offline, drawer]);
 
   // Stable handlers + counts for the memoized layout components, so a feed
   // update that doesn't touch them costs no re-render.
@@ -111,6 +107,11 @@ export default function ClassicSkin({ portalNode }: SkinProps) {
   const [tickerOn, setTickerOn] = useState(true);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  // Nothing left to show (off air, no art), or a drawer or the palette opening
+  // over it: the enlarged cover simply goes (coverZoomDismissed).
+  useEffect(() => {
+    if (coverZoomDismissed({ hasCover: !!coverSrc, offline, drawerOpen: drawer != null, paletteOpen })) setZoomFrom(null);
+  }, [coverSrc, offline, drawer, paletteOpen]);
 
   // Lyrics show on the stage itself (AmbientLyrics), never in a drawer. The
   // operator's switch rides GET /state; within it, L toggles this listener's
@@ -180,7 +181,7 @@ export default function ClassicSkin({ portalNode }: SkinProps) {
       '?': () => setShortcutsOpen(true),
       'mod+k': () => setPaletteOpen(o => !o),
     },
-    { disabled: paletteOpen || shortcutsOpen },
+    { disabled: skinShortcutsDisabled({ paletteOpen, shortcutsOpen, coverOpen: zoomFrom != null }) },
   );
 
   // The controller returns a request id immediately; matching runs in the booth
