@@ -319,8 +319,27 @@ export function planHotMixSeam(input: SeamInput): SeamVerdict {
 // Each side's stamps, as getAnnotatedUri writes them (radio.liq reads these
 // names). `id` ties the pair: the mixer applies B's start only after the A
 // that names it.
-export interface MixOutStamps { id: string; leadSec: number; end: EndStretch | null }
-export interface MixInStamps extends StartStretch { id: string }
+export interface MixOutStamps {
+  id: string; leadSec: number; end: EndStretch | null;
+  // A phrase-mix seam: the outgoing bass ridden down over the overlap
+  // (radio.liq HOT MIX BASS MOVE reads it as liq_mix_bass="ride").
+  bassRide?: { fromSec: number; toSec: number };
+}
+export interface MixInStamps extends StartStretch {
+  id: string;
+  // A phrase-mix seam: output seconds after B starts at which its first hard
+  // kick plays, where its bass punches back in (liq_mix_punch).
+  punchSec?: number;
+}
+
+// The punch once the beat phase has moved B's cue-in (shiftInCue): B's audio,
+// and its first hard kick with it, moves by the file seconds its start moved,
+// at B's opening tempo r. A shift the cue could not take is waited in the
+// mixer (`waitSec`, file seconds), which is the cue starting that much earlier.
+export function punchAfterShift(punchSec: number, plannedInCueSec: number, inCueSec: number, waitSec: number, r: number): number {
+  const moved = (inCueSec - waitSec) - plannedInCueSec;
+  return Math.round((punchSec - moved / (r > 0 ? r : 1)) * 1e4) / 1e4;
+}
 
 // ─── The incoming side at handoff ───────────────────────────────────────────
 

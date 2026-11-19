@@ -1244,7 +1244,8 @@ export function getAnnotatedUri(song, opts: { maxDurationSec?: number | null; cu
     if (opts.mixOutLateSec != null && Number.isFinite(opts.mixOutLateSec) && opts.mixOutLateSec !== 0
       && opts.mixOutLateSec > -CUE_EARLY_MAX_SEC && opts.mixOutLateSec < CUE_LATE_MAX_SEC) {
       fields.push(`liq_mix_out_late="${opts.mixOutLateSec.toFixed(6)}"`);
-    }
+    }    // A phrase-mix seam: the mixer rides its bass down over the overlap.
+    if (opts.mixOut.bassRide) fields.push('liq_mix_bass="ride"');
   }
   if (opts.mixIn) {
     fields.push(`liq_mix_in="${escAnnotate(opts.mixIn.id)}"`);
@@ -1257,6 +1258,9 @@ export function getAnnotatedUri(song, opts: { maxDurationSec?: number | null; cu
     if (opts.mixCueLateSec != null && Number.isFinite(opts.mixCueLateSec) && opts.mixCueLateSec !== 0
       && opts.mixCueLateSec > -CUE_EARLY_MAX_SEC && opts.mixCueLateSec < CUE_LATE_MAX_SEC) {
       fields.push(`liq_mix_cue_late="${opts.mixCueLateSec.toFixed(6)}"`);
+    }    // A phrase-mix seam: where its first hard kick plays, its bass punching in.
+    if (opts.mixIn.punchSec != null && Number.isFinite(opts.mixIn.punchSec) && opts.mixIn.punchSec > 0) {
+      fields.push(`liq_mix_punch="${opts.mixIn.punchSec.toFixed(4)}"`);
     }
   }
   // Per-track loudness gain offset, in the "<n> dB" form Liquidsoap's amplify

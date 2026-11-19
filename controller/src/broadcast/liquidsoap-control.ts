@@ -256,6 +256,25 @@ export async function hotMixStretchBuilt(): Promise<boolean> {
   }
 }
 
+// Whether the running mixer runs the Hot Mix bass move (radio.liq, HOT MIX BASS
+// MOVE). The phrase mix places a seam on the kicks FOR that move: placed on a
+// mixer without it, it airs as the trim alone, which lost the operator's blind
+// tests. Fails closed like the stretch: an older mixer answers "unknown
+// command". Cached for a minute and dropped on every restart.
+const hotMixBassCache = cachedAsync(
+  async () => (await sendCommand('hotmix_bass', 2000)).trim().split(/\s+/)[0] === 'true',
+  { ttlMs: 60_000 },
+);
+onMixerRestart(() => hotMixBassCache.invalidate());
+
+export async function hotMixBassBuilt(): Promise<boolean> {
+  try {
+    return await hotMixBassCache.get();
+  } catch {
+    return false;
+  }
+}
+
 // Guaranteed real telnet round-trip: invalidating first drops any in-flight
 // take too. Operator-triggered surfaces only (Doctor) — putting this on a poll
 // reinstates the per-request connection the cache exists to remove.

@@ -69,6 +69,7 @@ const plan = (item: Parameters<typeof queue.planHotMixSeam>[0], successor: Param
 
 beforeEach(() => {
   queue._hotMixStretchBuilt = async () => true;
+  queue._hotMixBassBuilt = async () => true;
   queue.djLog.length = 0;
 });
 
@@ -258,18 +259,17 @@ test('phrase mix on, structure on both sides: the seam sits on the kicks', async
   assert.equal(successor.mixIn.punchSec, item.mixOut.leadSec);
   assert.match(logText(), /Hot Mix seam [\s\S]*phrase mix: out after bar 100 \(last hard kick\) \+8 bars, in at bar 57, first hard kick bar 65 at \+16s/);
   assert.doesNotMatch(logText(), /phrase mix not used/);
-  // Nothing new reaches the mixer: the annotations are the ones without the bass timings.
-  const { bassRide: _r, ...outPlain } = item.mixOut;
-  const { punchSec: _p, ...inPlain } = successor.mixIn;
-  // (The annotations only: the stream URL's auth salt changes per call.)
+  // The mixer's bass move reads them: A rides its bass down, B punches on its kick.
   const keys = (uri: string) => uri.slice(0, uri.indexOf(':subhttp:'));
   const out = keys(getAnnotatedUri(item.track, { mixOut: item.mixOut, cueOutSec: item.mixOut.outCueSec }));
-  assert.ok(out.includes('liq_mix_out='));
-  assert.equal(out, keys(getAnnotatedUri(item.track, { mixOut: outPlain, cueOutSec: item.mixOut.outCueSec })));
+  assert.match(out, /liq_mix_bass="ride"/);
   const inn = keys(getAnnotatedUri(successor.track, { mixIn: successor.mixIn, cueInSec: successor.mixIn.inCueSec }));
-  assert.ok(inn.includes('liq_mix_in='));
-  assert.equal(inn, keys(getAnnotatedUri(successor.track, { mixIn: inPlain, cueInSec: successor.mixIn.inCueSec })));
-  assert.doesNotMatch(out + inn, /bass|punch|phrase/i);
+  assert.match(inn, /liq_mix_punch="16\.0000"/);
+  for (const key of ['liq_mix_bass', 'liq_mix_punch']) assert.ok(RADIO_LIQ.includes(`"${key}"`), `radio.liq reads ${key}`);
+  // A seam the phrase mix did not place carries neither.
+  const { bassRide: _r, ...outPlain } = item.mixOut;
+  const { punchSec: _p, ...inPlain } = successor.mixIn;
+  assert.doesNotMatch(keys(getAnnotatedUri(item.track, { mixOut: outPlain })) + keys(getAnnotatedUri(successor.track, { mixIn: inPlain })), /liq_mix_bass|liq_mix_punch/);
 });
 
 test('phrase mix on, sixteen bars: B enters 16 bars before its kick, a 64-beat overlap', async () => {
@@ -297,6 +297,18 @@ test('phrase mix on, an intro shorter than the show asks: the overlap is the win
   assert.ok(Math.abs(item.mixOut.outCueSec - (0.5 + 108 * 2)) < 1e-3, `${item.mixOut.outCueSec}`);
   assert.equal(successor.mixIn.punchSec, item.mixOut.leadSec);
   assert.match(logText(), /\+8 bars, in at bar 5, first hard kick bar 13 at \+16s/);
+});
+
+test('phrase mix on, a mixer without the bass move: never the placed seam (the trim alone lost the blind tests)', async () => {
+  await onAir({ enabled: true, phraseMix: true });
+  queue._hotMixBassBuilt = async () => false;
+  const { item, successor } = pairOf(A, B);
+  await plan(item, successor);
+  assert.ok(item.mixOut && successor.mixIn, logText());
+  assert.match(logText(), /Hot Mix: phrase mix not used for "out-120" → "in-123" \(the mixer has no bass move: rebuild the broadcast image\): beat mix as before/);
+  assert.ok(Math.abs(successor.mixIn.inCueSec - bBarSec(57)) > 1, 'the searched seam, not the window');
+  assert.equal(item.mixOut.bassRide, undefined);
+  assert.equal(successor.mixIn.punchSec, undefined);
 });
 
 test('phrase mix on, no structure on the incoming track: one booth line, then the seam as before', async () => {

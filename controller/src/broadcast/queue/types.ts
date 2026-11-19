@@ -219,13 +219,13 @@ export interface QueueItem {
   // Both carry the pair's id, which radio.liq matches before it stretches the
   // incoming track; planned when the outgoing item drains with its successor.
   // A phrase-mix seam (music/phrase-mix-policy.ts) also stamps its bass
-  // timings for the mixer's bass move, a later step: `bassRide` on A (output
-  // seconds from the overlap's start over which A's bass is ridden down) and
-  // `punchSec` on B (output seconds after B starts at which its bass punches
-  // in, its first hard kick). Neither is annotated: radio.liq reads nothing new.
-  mixOut?: (MixOutStamps & { outCueSec: number; bassRide?: { fromSec: number; toSec: number } }) | null;
+  // timings for the mixer's bass move (radio.liq, HOT MIX BASS MOVE):
+  // `bassRide` on A (A's bass ridden down over the overlap, annotated as
+  // liq_mix_bass="ride") and `punchSec` on B (output seconds after B starts at
+  // which its first hard kick plays and its bass punches in, liq_mix_punch).
+  mixOut?: (MixOutStamps & { outCueSec: number }) | null;
   // `waitSec`: the beat-phase shift its cue-in could not take (hotMixSeam.shiftInCue).
-  mixIn?: (MixInStamps & { inCueSec: number; waitSec?: number; punchSec?: number }) | null;
+  mixIn?: (MixInStamps & { inCueSec: number; waitSec?: number }) | null;
   // Outgoing music already committed an early ending into this clip/track.
   lengthPolicyCommitted?: boolean;
   stemCueInSec?: number;
