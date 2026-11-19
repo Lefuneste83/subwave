@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  GLIDE_SEC, OVERLAP_BEATS, RAMP_BEATS, SYNC_MAX_PCT,
+  GLIDE_SEC, OVERLAP_BEATS, RAMP_BEATS, SYNC_MAX_PCT, WINDOW_MATCH_SEC,
   incomingStamps, outAt, planHotMixSeam, profileOf, shiftInCue, srcAt,
   type SeamInput, type StartStretch, type EndStretch,
 } from '../src/music/hot-mix-seam.js';
@@ -177,4 +177,108 @@ test('the seam into B stands on a downbeat at the top of the file, where the que
   assert.equal(incomingStamps({ ...deep, waitSec: 0.01 }, 0.2, -0.024).cueLateSec, -0.014);
   assert.equal(incomingStamps(deep, 0.2, 0.021).cueLateSec, 0.021);
   assert.deepEqual(incomingStamps(null, 0, null), { mixIn: null, cueLateSec: null });
+});
+
+// ─── The overlap length and the phrase window ───────────────────────────────
+
+test('a 16-bar overlap: 64 beats of A, cut on a bar line, every beat of both sides listed', () => {
+  const v = planHotMixSeam({ ...pair(120, 123), overlapBeats: 64 });
+  assert.ok(v.ok, JSON.stringify(v));
+  const p = v.plan;
+  assert.ok(Math.abs(p.leadSec - 64 * 0.5) < 1e-3);
+  assert.equal(p.bStart.holdSec, p.leadSec);
+  assert.equal(p.aOverlapBeats.length, 65);
+  assert.ok(Math.abs(p.aOverlapBeats[64] - p.outCueSec) < 1e-3);
+  assert.ok(p.bOverlapBeats.length >= 64 && p.bOverlapBeats.length <= 65, `${p.bOverlapBeats.length}`);
+  const barsFromDownbeat = (p.outCueSec - p.leadSec - 0.5) / 2;
+  assert.ok(Math.abs(barsFromDownbeat - Math.round(barsFromDownbeat)) < 1e-6);
+  assert.equal(p.bPunchSec, undefined, 'no window, no punch');
+  // The default is today's eight bars.
+  const d = planHotMixSeam(pair(120, 123));
+  assert.ok(d.ok);
+  assert.equal(d.plan.aOverlapBeats.length, OVERLAP_BEATS + 1);
+});
+
+// B's bar k (4 beats at 123 BPM from 0.2 s), A's bar k (2 s from 0.5 s).
+const bBar = (k: number) => 0.2 + (k - 1) * 4 * 60 / 123;
+const aBar = (k: number) => 0.5 + (k - 1) * 2;
+
+test('a phrase window: A\'s overlap starts on its bar, B enters on its bar, far past its cue-in', () => {
+  const window = { aStartSec: aBar(101), bEntrySec: bBar(57) };
+  const v = planHotMixSeam({ ...pair(120, 123), window });
+  assert.ok(v.ok, JSON.stringify(v));
+  const p = v.plan;
+  assert.equal(p.kind, 'incoming');
+  assert.ok(Math.abs(p.outCueSec - aBar(109)) < 1e-3, `cut ${p.outCueSec}`);
+  assert.ok(Math.abs(p.inCueSec - bBar(57)) < 1e-3, `cue-in ${p.inCueSec}`);
+  assert.ok(p.inCueSec > 30, 'no 30 s limit on a window');
+  // B's first hard kick, 8 of its bars later, plays where A is cut.
+  assert.equal(p.bPunchSec, p.leadSec);
+  assert.ok(Math.abs((bBar(65) - bBar(57)) / p.bStart.tempo - p.leadSec) < 1e-3);
+  assert.ok(Math.abs(p.aOverlapBeats[0] - aBar(101)) < 1e-3);
+  assert.ok(Math.abs(p.bOverlapBeats[0] - bBar(57)) < 1e-3);
+  // Rounded structure times still find their downbeats.
+  const near = planHotMixSeam({ ...pair(120, 123), window: { aStartSec: aBar(101) + 0.02, bEntrySec: bBar(57) - 0.02 } });
+  assert.ok(near.ok);
+  assert.equal(near.plan.outCueSec, p.outCueSec);
+  assert.equal(near.plan.inCueSec, p.inCueSec);
+  assert.ok(WINDOW_MATCH_SEC <= 0.03);
+});
+
+test('a 16-bar phrase window', () => {
+  const v = planHotMixSeam({ ...pair(120, 123), overlapBeats: 64, window: { aStartSec: aBar(101), bEntrySec: bBar(49) } });
+  assert.ok(v.ok, JSON.stringify(v));
+  assert.ok(Math.abs(v.plan.outCueSec - aBar(117)) < 1e-3);
+  assert.ok(Math.abs((bBar(65) - v.plan.inCueSec) / v.plan.bStart.tempo - v.plan.bPunchSec!) < 1e-3);
+});
+
+test('a split phrase window: A ramps over the bars before its window, the overlap stays on it', () => {
+  const v = planHotMixSeam({ ...pair(120, 125), window: { aStartSec: aBar(101), bEntrySec: 0.2 + 56 * 4 * 60 / 125 } });
+  assert.ok(v.ok, JSON.stringify(v));
+  assert.equal(v.plan.kind, 'split');
+  // The ramp ends, in output time, on the window's downbeat; the cut is 8 bars on.
+  const prof = profileOf(null, v.plan.aEnd);
+  assert.ok(Math.abs(outAt(prof, aBar(101)) - (v.plan.aEnd!.fromSec + v.plan.aEnd!.rampSec)) < 1e-3);
+  assert.ok(Math.abs(v.plan.outCueSec - aBar(109)) < 1e-3);
+  assert.equal(v.plan.bPunchSec, v.plan.leadSec);
+});
+
+test('a phrase window the grids do not hold is no windowed seam', () => {
+  const window = { aStartSec: aBar(101), bEntrySec: bBar(57) };
+  // Off a downbeat.
+  for (const w of [{ ...window, aStartSec: window.aStartSec + 1 }, { ...window, bEntrySec: window.bEntrySec + 0.1 }]) {
+    const v = planHotMixSeam({ ...pair(120, 123), window: w });
+    assert.equal(v.ok, false, JSON.stringify(w));
+    assert.match((v as { reason: string }).reason, /phrase window/);
+  }
+  // The cut past A's end.
+  assert.equal(planHotMixSeam({ ...pair(120, 123, { a: { ...grid(120), cueInSec: 0, endSec: aBar(108), start: null } }), window }).ok, false);
+  // A's window on an untrusted (double-time) stretch of its grid.
+  const a = {
+    bpm: 120, beatsPerBar: 4,
+    segments: [
+      { anchorMs: 500, periodUs: 500000, beats: 380, downbeatMs: 500 },
+      { anchorMs: 190500, periodUs: 250000, beats: 400, downbeatMs: 190500 },
+    ],
+  };
+  assert.equal(planHotMixSeam({ ...pair(120, 123, { a: { ...a, cueInSec: 0, endSec: 240, start: null } }), window }).ok, false);
+  // B an octave away: its bars are not A's, so its kick would miss the cut.
+  const half = planHotMixSeam({ ...pair(124, 62), window: { aStartSec: 0.5 + 100 * 4 * 60 / 124, bEntrySec: 0.2 + 56 * 4 * 60 / 62 } });
+  assert.equal(half.ok, false);
+  assert.match((half as { reason: string }).reason, /octave/);
+});
+
+test('a phrase window on two-beat grids: the structure\'s four-beat bars are pairs of grid bars', () => {
+  const two = (bpm: number, anchor: number) => ({ ...grid(bpm, anchor), beatsPerBar: 2 });
+  const input: SeamInput = {
+    stepPct: 3,
+    a: { ...two(120, 0.5), cueInSec: 0, endSec: 240, start: null },
+    b: { ...two(123, 0.2), cueInSec: 0, durationSec: 300 },
+    window: { aStartSec: aBar(101), bEntrySec: bBar(57) },
+  };
+  const v = planHotMixSeam(input);
+  assert.ok(v.ok, JSON.stringify(v));
+  assert.ok(Math.abs(v.plan.outCueSec - aBar(109)) < 1e-3);
+  assert.ok(Math.abs(v.plan.inCueSec - bBar(57)) < 1e-3);
+  assert.equal(v.plan.bPunchSec, v.plan.leadSec);
 });

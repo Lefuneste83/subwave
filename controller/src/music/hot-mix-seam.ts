@@ -14,13 +14,25 @@
 // stretch.
 //
 // Where. The incoming track starts on its first downbeat, at a downbeat of the
-// outgoing one, and the outgoing track is cut OVERLAP_BEATS later, on a bar
-// line, so both fade over the same eight bars (the overlap, `leadSec`). The
+// outgoing one, and the outgoing track is cut `overlapBeats` later (the show's
+// phrase length; OVERLAP_BEATS, eight bars, by default), on a bar line, so both
+// fade over the same bars (the overlap, `leadSec`). The
 // incoming one holds the outgoing tempo while that lasts, then glides back to
 // its own over GLIDE_SEC. Every window sits inside ONE grid segment whose
 // period agrees with the track's tempo: a seam laid across a segment change,
 // or on a double-time stretch of the grid, has no beat to trust, and gets the
 // plain crossfade instead.
+//
+// A phrase window (music/phrase-mix-policy.ts, a show's `phraseMix`) names both
+// downbeats instead of searching for them: the outgoing track's overlap starts
+// on the downbeat at `aStartSec`, and the incoming one on its downbeat at
+// `bEntrySec`, however deep into the record that is (the window skips its
+// intro on purpose). Every other rule stands, and a window the grids do not
+// hold is refused, never moved: the caller then searches as before. Its
+// structure counts four-beat bars of the incoming track's own beat, so an
+// incoming tempo folded an octave would put its first hard kick off the cut,
+// and is refused too; otherwise that kick plays exactly `leadSec` after the
+// incoming track starts (`bPunchSec`).
 //
 // Timelines. Liquidsoap stretches by OUTPUT seconds since the track started
 // (the factor is a function of what the stretch has emitted, never of input
@@ -38,6 +50,9 @@ export const GLIDE_SEC = 16;
 // The incoming track's first usable downbeat must come within this of where
 // it would otherwise start: past it the seam would skip the record's opening.
 export const IN_DOWNBEAT_MAX_SEC = 30;
+// A phrase window's times (structure bars, stored to the ms) find their grid
+// downbeat within this.
+export const WINDOW_MATCH_SEC = 0.03;
 // A segment's period must agree with the track's tempo to within this.
 const PERIOD_AGREE = 0.01;
 // The mixer refuses a factor outside [0.85, 1.15]; stay well inside it.
@@ -54,8 +69,13 @@ export interface SeamSide {
   bpm: number | null;
 }
 
+// File seconds of the two downbeats a phrase window names.
+export interface SeamWindow { aStartSec: number; bEntrySec: number }
+
 export interface SeamInput {
   stepPct: number;
+  overlapBeats?: number;        // the overlap, in beats of A (default OVERLAP_BEATS)
+  window?: SeamWindow | null;   // a phrase window: both downbeats named
   a: SeamSide & {
     cueInSec: number;           // where the outgoing track started (its own trim)
     endSec: number;             // its effective end: duration, trim, cap
@@ -81,6 +101,9 @@ export interface SeamPlan {
   // the beat-phase check (music/percussion-phase.ts) measures.
   aOverlapBeats: number[];
   bOverlapBeats: number[];
+  // With a phrase window: output seconds after B starts at which its first
+  // hard kick plays, which is where A is cut (leadSec, by construction).
+  bPunchSec?: number;
 }
 
 export type SeamVerdict = { ok: true; plan: SeamPlan } | { ok: false; reason: string };
@@ -185,15 +208,25 @@ export function planHotMixSeam(input: SeamInput): SeamVerdict {
   if (!bSegs.length) return { ok: false, reason: 'no trusted beat grid on the incoming track' };
   const aBar = input.a.beatsPerBar && input.a.beatsPerBar > 0 ? input.a.beatsPerBar : 4;
   const bBar = input.b.beatsPerBar && input.b.beatsPerBar > 0 ? input.b.beatsPerBar : 4;
+  const overlapBeats = input.overlapBeats && input.overlapBeats > 0 ? Math.round(input.overlapBeats) : OVERLAP_BEATS;
+  const win = input.window ?? null;
 
-  // The incoming side first: its first trusted downbeat at or after its cue-in.
+  // The incoming side first: its first trusted downbeat at or after its cue-in,
+  // or the window's own.
   const bCue = Math.max(0, input.b.cueInSec);
   let bPick: { seg: GridSegment; at: number } | null = null;
   for (const seg of bSegs) {
+    if (win) {
+      const at = downbeats(seg, bBar).find((t) => Math.abs(t - win.bEntrySec) <= WINDOW_MATCH_SEC + 1e-9);
+      if (at != null && (!bPick || Math.abs(at - win.bEntrySec) < Math.abs(bPick.at - win.bEntrySec))) bPick = { seg, at };
+      continue;
+    }
     const at = downbeats(seg, bBar).find((t) => t >= bCue - 1e-6);
     if (at != null && at - bCue <= IN_DOWNBEAT_MAX_SEC && (!bPick || at < bPick.at)) bPick = { seg, at };
   }
-  if (!bPick) return { ok: false, reason: 'no downbeat near the incoming track\'s start' };
+  if (!bPick) {
+    return { ok: false, reason: win ? 'the phrase window\'s incoming downbeat is not on a trusted grid' : 'no downbeat near the incoming track\'s start' };
+  }
   const pB = periodOf(bPick.seg);
   const bBpmNative = 60 / pB;
 
@@ -211,6 +244,9 @@ export function planHotMixSeam(input: SeamInput): SeamVerdict {
       ? 'incoming'
       : Math.abs(gapPct) <= 2 * syncPct + 1e-9 ? 'split' : null;
     if (!kind) return { ok: false, reason: `tempo gap ${round(gapPct, 1)} % is past twice the ${syncPct} % sync limit` };
+    if (win && Math.abs(bBpm / bBpmNative - 1) > 1e-9) {
+      return { ok: false, reason: 'the phrase window\'s incoming tempo is an octave from the outgoing one: its bars are not the outgoing one\'s' };
+    }
     // Factors: the outgoing track ends at q, the incoming one starts at r, and
     // both then play one beat every pA / q output seconds.
     const q = kind === 'split' ? Math.sqrt(bBpm / aBpm) : 1;
@@ -219,7 +255,7 @@ export function planHotMixSeam(input: SeamInput): SeamVerdict {
     if (r < FACTOR_MIN || r > FACTOR_MAX || q < FACTOR_MIN || q > FACTOR_MAX) {
       return { ok: false, reason: 'stretch past the mixer\'s range' };
     }
-    const overlapSrc = OVERLAP_BEATS * pA;
+    const overlapSrc = overlapBeats * pA;
     const leadSec = overlapSrc / q;
     const rampOut = kind === 'split' ? RAMP_BEATS * pA : 0;
     const rampSrc = rampOut * (1 + q) / 2;
@@ -228,7 +264,9 @@ export function planHotMixSeam(input: SeamInput): SeamVerdict {
     // The latest downbeat D of this segment whose window fits: the ramp and
     // the overlap inside the segment, the cut before the track's end, the ramp
     // after the outgoing track's own start stretch.
-    const dbs = downbeats(aSeg, aBar).reverse();
+    // A window names its D: the one downbeat at its start, or none here.
+    const dbs = downbeats(aSeg, aBar).reverse()
+      .filter((D) => !win || Math.abs(D - win.aStartSec) <= WINDOW_MATCH_SEC + 1e-9);
     for (const D of dbs) {
       if (D + overlapSrc > aEnd + 1e-6) continue;
       if (D + overlapSrc > segEnd(aSeg) + pA + 1e-6) continue;
@@ -263,13 +301,19 @@ export function planHotMixSeam(input: SeamInput): SeamVerdict {
           leadSec: round(leadSec, 4),
           bStart: { tempo: round(r, 6), holdSec: round(leadSec, 4), glideSec: GLIDE_SEC },
           aEnd: end,
-          aOverlapBeats: Array.from({ length: OVERLAP_BEATS + 1 }, (_, k) => round(D + k * pA, 4)),
+          aOverlapBeats: Array.from({ length: overlapBeats + 1 }, (_, k) => round(D + k * pA, 4)),
           bOverlapBeats: Array.from({ length: Math.floor((leadSec * r) / pB) + 1 }, (_, k) => round(bPick!.at + k * pB, 4)),
+          ...(win ? { bPunchSec: round(leadSec, 4) } : {}),
         },
       };
     }
   }
-  return { ok: false, reason: 'no downbeat window for the overlap in the outgoing track\'s grid' };
+  return {
+    ok: false,
+    reason: win
+      ? 'the phrase window\'s outgoing downbeat is not on a trusted grid, or its overlap does not fit there'
+      : 'no downbeat window for the overlap in the outgoing track\'s grid',
+  };
 }
 
 // Each side's stamps, as getAnnotatedUri writes them (radio.liq reads these
