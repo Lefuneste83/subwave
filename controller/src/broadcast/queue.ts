@@ -934,6 +934,11 @@ class Queue {
     this.djLog.unshift(entry);
     this.djLog = this.djLog.slice(0, 200);
     console.log(`[${kind}] ${message}`);
+    // The mixing lines (every Hot Mix seam planned or refused and why, stem
+    // blends) also go to the day's events file: the ring above is lost on a
+    // restart, and a seam heard on air is judged after the fact. Message only;
+    // other kinds carry listener and speech detail and stay in memory.
+    if (kind === 'mix') logEvent('booth.mix', { message });
   }
 
   // Format aired session speech for recap, or return null. prior reads the archived outgoing
