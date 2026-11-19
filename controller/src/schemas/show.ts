@@ -68,7 +68,17 @@ export type HotMixCurvePoint = { at: number; bpm: number };
 // `closeRequests` is the show's own toggle, on by default: an ask is a tempo jump
 // or an unmixable pair by nature, so a mixed show starts closed and the operator
 // may open it.
-export type HotMixConfig = { enabled: boolean; maxStepPct: number; curve: HotMixCurvePoint[]; closeRequests: boolean };
+// `phraseBars` is the overlap of every beat mix, in bars (8 = the 32 beats every
+// seam had before the field, so an absent one reads as it always did; 16 suits
+// radio). `phraseMix` places the seam on the tracks' measured kicks instead of
+// searching for it (music/phrase-mix-policy.ts): opt-in, off by default, because
+// without the mixer's bass move the placement alone lost the blind tests.
+export const HOT_MIX_PHRASE_BARS = [8, 16, 24, 32] as const;
+export const HOT_MIX_PHRASE_BARS_DEFAULT = 8;
+export type HotMixConfig = {
+  enabled: boolean; maxStepPct: number; curve: HotMixCurvePoint[]; closeRequests: boolean;
+  phraseBars: number; phraseMix: boolean;
+};
 
 // What an era-suspect album IS, set (or confirmed) by the operator in Library →
 // Era and pre-filled from the title (music/album-kind.ts). Declared here, not
@@ -289,7 +299,12 @@ function orderCurve(points: HotMixCurvePoint[]): HotMixCurvePoint[] {
   return [...byAt.entries()].sort((a, b) => a[0] - b[0]).map(([at, bpm]) => ({ at, bpm }));
 }
 
-const HOT_MIX_OFF: HotMixConfig = { enabled: false, maxStepPct: HOT_MIX_STEP_PCT_DEFAULT, curve: [], closeRequests: true };
+const HOT_MIX_OFF: HotMixConfig = {
+  enabled: false, maxStepPct: HOT_MIX_STEP_PCT_DEFAULT, curve: [], closeRequests: true,
+  phraseBars: HOT_MIX_PHRASE_BARS_DEFAULT, phraseMix: false,
+};
+
+const isPhraseBars = (v: number): boolean => (HOT_MIX_PHRASE_BARS as readonly number[]).includes(v);
 
 // Absent is off with the defaults, so a show saved before the field reads as it
 // always did.
@@ -309,6 +324,13 @@ const hotMixField = z.preprocess(
       // Tri-state on the wire, boolean once parsed: absent reads as the default
       // (closed), only an explicit false opens requests.
       closeRequests: z.unknown().optional().transform((v) => v !== false),
+      phraseBars: z.preprocess(
+        (v) => numberLike(nullToUndefined(v)),
+        z.number({ error: 'phrase length must be a number' })
+          .refine(isPhraseBars, `phrase length must be ${HOT_MIX_PHRASE_BARS.join(', ')} bars`)
+          .default(HOT_MIX_PHRASE_BARS_DEFAULT),
+      ),
+      phraseMix: showBool(),
     })
     .default(() => ({ ...HOT_MIX_OFF, curve: [] })),
 );
@@ -639,13 +661,17 @@ export function repairShowTags(raw: unknown): string[] | undefined {
 }
 
 /** The Hot Mix block, repaired: anything malformed reads as off, an
- *  out-of-bounds step as the default, and an invalid curve point is dropped.
+ *  out-of-bounds step or phrase length as the default, and an invalid curve
+ *  point is dropped.
  *  Also how the pick paths read a resolved show (music/hot-mix-policy.ts), so
  *  the two can never disagree about what a saved show means. */
 export function repairHotMix(raw: unknown): HotMixConfig {
   if (!raw || typeof raw !== 'object') return { ...HOT_MIX_OFF, curve: [] };
-  const rec = raw as { enabled?: unknown; maxStepPct?: unknown; curve?: unknown; closeRequests?: unknown };
+  const rec = raw as {
+    enabled?: unknown; maxStepPct?: unknown; curve?: unknown; closeRequests?: unknown; phraseBars?: unknown; phraseMix?: unknown;
+  };
   const step = Number(numberLike(rec.maxStepPct));
+  const phraseBars = Number(numberLike(rec.phraseBars));
   const points: HotMixCurvePoint[] = [];
   if (Array.isArray(rec.curve)) {
     for (const p of rec.curve) {
@@ -662,6 +688,8 @@ export function repairHotMix(raw: unknown): HotMixConfig {
       ? step : HOT_MIX_STEP_PCT_DEFAULT,
     curve: orderCurve(points).slice(0, HOT_MIX_CURVE_POINTS_MAX),
     closeRequests: rec.closeRequests !== false,
+    phraseBars: isPhraseBars(phraseBars) ? phraseBars : HOT_MIX_PHRASE_BARS_DEFAULT,
+    phraseMix: rec.phraseMix === true,
   };
 }
 

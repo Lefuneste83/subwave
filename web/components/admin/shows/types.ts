@@ -100,7 +100,9 @@ export interface Show {
   excludedAlbumKinds: string[];
   /** DJ Hot Mix: consecutive picks stay within `maxStepPct` of each other's
    *  tempo, steered along the optional curve; requests close unless
-   *  `closeRequests` is off. Off = the show picks as it always did. */
+   *  `closeRequests` is off. `phraseBars` is each beat mix's overlap; the
+   *  editor has no control for `phraseMix` yet and carries it through.
+   *  Off = the show picks as it always did. */
   hotMix: HotMixConfig;
   /** The show airs as a produced episode: intro, feature segment, sign-off. */
   programme: boolean;

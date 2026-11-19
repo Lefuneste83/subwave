@@ -9,7 +9,7 @@ import {
   curveBpmAt, fitsTempoWindow, hotMixOf, nearestTempoFallback, octaveNearest, takesRequests,
   tempoStepPct, tempoWindowFor, withinTempoWindow,
 } from '../src/music/hot-mix-policy.js';
-import { HOT_MIX_STEP_PCT_DEFAULT, repairHotMix, repairShowForLoad, showSchema } from '../src/schemas/show.js';
+import { HOT_MIX_PHRASE_BARS, HOT_MIX_PHRASE_BARS_DEFAULT, HOT_MIX_STEP_PCT_DEFAULT, repairHotMix, repairShowForLoad, showSchema } from '../src/schemas/show.js';
 import { prevShowChangeMs } from '../src/broadcast/show-boundary.js';
 
 const show = (hotMix: unknown) => ({ hotMix });
@@ -147,14 +147,14 @@ const parse = (extra: Record<string, unknown>) => showSchema(ctx).safeParse({ na
 test('a show saved before the field reads as off, with the defaults', () => {
   const r = parse({});
   assert.ok(r.success);
-  assert.deepEqual(r.data.hotMix, { enabled: false, maxStepPct: 3, curve: [], closeRequests: true });
-  assert.deepEqual(parse({ hotMix: null }).data?.hotMix, { enabled: false, maxStepPct: 3, curve: [], closeRequests: true });
+  assert.deepEqual(r.data.hotMix, { enabled: false, maxStepPct: 3, curve: [], closeRequests: true, phraseBars: 8, phraseMix: false });
+  assert.deepEqual(parse({ hotMix: null }).data?.hotMix, { enabled: false, maxStepPct: 3, curve: [], closeRequests: true, phraseBars: 8, phraseMix: false });
 });
 
 test('save: numeric strings are read, the curve is ordered and de-duplicated by position', () => {
   const r = parse({ hotMix: { enabled: true, maxStepPct: '4', curve: [{ at: '100', bpm: 124 }, { at: 0, bpm: '118' }, { at: 100, bpm: 126 }], closeRequests: false } });
   assert.ok(r.success);
-  assert.deepEqual(r.data.hotMix, { enabled: true, maxStepPct: 4, curve: [{ at: 0, bpm: 118 }, { at: 100, bpm: 126 }], closeRequests: false });
+  assert.deepEqual(r.data.hotMix, { enabled: true, maxStepPct: 4, curve: [{ at: 0, bpm: 118 }, { at: 100, bpm: 126 }], closeRequests: false, phraseBars: 8, phraseMix: false });
 });
 
 test('save REFUSES an out-of-bounds step or curve point; load drops or defaults it', () => {
@@ -163,15 +163,61 @@ test('save REFUSES an out-of-bounds step or curve point; load drops or defaults 
   assert.equal(parse({ hotMix: { enabled: true, curve: [{ at: 50, bpm: 400 }] } }).success, false);
   assert.equal(parse({ hotMix: { enabled: true, curve: Array.from({ length: 9 }, (_, i) => ({ at: i * 10, bpm: 120 })) } }).success, false);
   assert.deepEqual(repairHotMix({ enabled: true, maxStepPct: 50, curve: [{ at: 120, bpm: 128 }, { at: 50, bpm: 126 }, 'x'] }),
-    { enabled: true, maxStepPct: 3, curve: [{ at: 50, bpm: 126 }], closeRequests: true });
-  assert.deepEqual(repairHotMix('on'), { enabled: false, maxStepPct: 3, curve: [], closeRequests: true });
+    { enabled: true, maxStepPct: 3, curve: [{ at: 50, bpm: 126 }], closeRequests: true, phraseBars: 8, phraseMix: false });
+  assert.deepEqual(repairHotMix('on'), { enabled: false, maxStepPct: 3, curve: [], closeRequests: true, phraseBars: 8, phraseMix: false });
+});
+
+test('the phrase length: 8, 16, 24 or 32 bars, 8 by default; the phrase mix is opt-in', () => {
+  assert.equal(HOT_MIX_PHRASE_BARS_DEFAULT, 8);
+  assert.deepEqual([...HOT_MIX_PHRASE_BARS], [8, 16, 24, 32]);
+  const r = parse({ hotMix: { enabled: true, phraseBars: '16', phraseMix: true } });
+  assert.ok(r.success);
+  assert.equal(r.data.hotMix.phraseBars, 16);
+  assert.equal(r.data.hotMix.phraseMix, true);
+  // Absent: today's eight bars, placement searched as before.
+  const plain = parse({ hotMix: { enabled: true } });
+  assert.ok(plain.success);
+  assert.equal(plain.data.hotMix.phraseBars, 8);
+  assert.equal(plain.data.hotMix.phraseMix, false);
+  assert.equal(parse({ hotMix: { enabled: true, phraseMix: 'true' } }).data?.hotMix.phraseMix, false, 'only a real true opts in');
+  assert.equal(parse({ hotMix: { enabled: true, phraseBars: null } }).data?.hotMix.phraseBars, 8);
+});
+
+test('save REFUSES a phrase length off the list; load repairs it to 8', () => {
+  for (const bad of [12, 0, 40, -8, 'x', 16.5]) {
+    assert.equal(parse({ hotMix: { enabled: true, phraseBars: bad } }).success, false, `refuses ${bad}`);
+  }
+  assert.equal(repairHotMix({ enabled: true, phraseBars: 12 }).phraseBars, 8);
+  assert.equal(repairHotMix({ enabled: true, phraseBars: '24' }).phraseBars, 24);
+  assert.equal(repairHotMix({ enabled: true, phraseBars: 'x' }).phraseBars, 8);
+  assert.equal(repairHotMix({ enabled: true, phraseMix: 1 }).phraseMix, false);
+  assert.equal(repairHotMix({ enabled: true, phraseMix: true }).phraseMix, true);
+  const repaired = repairShowForLoad({ name: 'Mix', personaId: 'p', hotMix: { enabled: true, phraseBars: 12, phraseMix: true } }, null);
+  const r = showSchema(ctx).safeParse(repaired);
+  assert.ok(r.success);
+  assert.equal(r.data.hotMix.phraseBars, 8);
+  assert.equal(r.data.hotMix.phraseMix, true);
+});
+
+test('the phrase settings round-trip through save and the switch reader', () => {
+  const r = parse({ hotMix: { enabled: true, phraseBars: 32, phraseMix: true } });
+  assert.ok(r.success);
+  const again = parse({ hotMix: r.data.hotMix });
+  assert.ok(again.success);
+  assert.deepEqual(again.data.hotMix, r.data.hotMix);
+  assert.deepEqual(repairHotMix(r.data.hotMix), r.data.hotMix);
+  const hm = hotMixOf({ hotMix: r.data.hotMix });
+  assert.equal(hm?.phraseBars, 32);
+  assert.equal(hm?.phraseMix, true);
+  assert.equal(hotMixOf(ON())?.phraseBars, 8);
+  assert.equal(hotMixOf(ON())?.phraseMix, false);
 });
 
 test('the load path repairs before the schema, so a stale block costs the value, not the show', () => {
   const repaired = repairShowForLoad({ name: 'Mix', personaId: 'p', hotMix: { enabled: true, maxStepPct: 99, curve: [{ at: 'x', bpm: 1 }] } }, null);
   const r = showSchema(ctx).safeParse(repaired);
   assert.ok(r.success);
-  assert.deepEqual(r.data.hotMix, { enabled: true, maxStepPct: 3, curve: [], closeRequests: true });
+  assert.deepEqual(r.data.hotMix, { enabled: true, maxStepPct: 3, curve: [], closeRequests: true, phraseBars: 8, phraseMix: false });
   assert.equal(repairShowForLoad({ name: 'Mix', personaId: 'p' }, null).hotMix, undefined);
 });
 

@@ -1,7 +1,8 @@
 'use client';
 
-// DJ Hot Mix for one show: the switch, the tempo step, the BPM curve over the
-// show's running time, and the requests toggle. What the switch does on air is
+// DJ Hot Mix for one show: the switch, the tempo step, the overlap length, the
+// BPM curve over the show's running time, and the requests toggle. The phrase
+// mix (`phraseMix`) has no control yet: the form carries it through untouched. What the switch does on air is
 // the controller's music/hot-mix-policy.ts; this only edits the saved block.
 
 import type { ChangeEvent } from 'react';
@@ -13,16 +14,20 @@ import { FieldDescription, FieldError } from '../../ui/field';
 import { Btn } from '../ui';
 import { ShowFieldHelp } from './ShowEditorLayout';
 import { fieldAria } from '@/lib/form';
-import { SwitchField } from '@/lib/form-fields';
+import { SelectField, SwitchField } from '@/lib/form-fields';
 import {
   HOT_MIX_BPM_MAX,
   HOT_MIX_BPM_MIN,
   HOT_MIX_CURVE_POINTS_MAX,
+  HOT_MIX_PHRASE_BARS,
   HOT_MIX_STEP_PCT_MAX,
   HOT_MIX_STEP_PCT_MIN,
   type HotMixCurvePoint,
 } from '@/lib/schemas.generated';
 import type { ShowsFormValues } from './types';
+
+// The overlap lengths the schema accepts, as select options.
+export const PHRASE_BAR_OPTIONS = HOT_MIX_PHRASE_BARS.map(n => ({ value: String(n), label: `${n} bars` }));
 
 // A new point lands after the last one, halfway to the end, at its tempo.
 export function nextCurvePoint(curve: readonly HotMixCurvePoint[]): HotMixCurvePoint {
@@ -68,8 +73,8 @@ export function HotMixFields({ control, index }: { control: Control<ShowsFormVal
         description="Mixes this show like a DJ set: each track the DJ picks stays close in tempo to the one before it, and the mixer beat-matches each transition. Meant for electronic shows."
       />
       <ShowFieldHelp title="How the transitions are mixed">
-        The incoming track starts on a downbeat, on a downbeat of the outgoing one, and both play together for eight
-        bars. Up to the step, only the incoming track is synced and the outgoing one plays untouched; up to twice the
+        The incoming track starts on a downbeat, on a downbeat of the outgoing one, and both play together for the
+        overlap below (eight bars unless you change it). Up to the step, only the incoming track is synced and the outgoing one plays untouched; up to twice the
         step, both meet halfway; past that, and for any track without a measured beat grid, it is a plain crossfade.
         The incoming track then glides back to its own tempo. The first show to turn Hot Mix on (or the last to turn
         it off) needs a mixer restart: Settings, then restart mixer.
@@ -101,6 +106,15 @@ export function HotMixFields({ control, index }: { control: Control<ShowsFormVal
           </ShowFieldHelp>
           <FieldError {...stepAria.errorProps} errors={stepCtl.fieldState.error ? [stepCtl.fieldState.error] : undefined} />
         </div>
+
+        <SelectField
+          control={control}
+          name={`${base}.phraseBars`}
+          label="overlap (bars)"
+          disabled={!enabled}
+          options={PHRASE_BAR_OPTIONS}
+          description="Overlap of each beat mix, in bars; 8 is the norm, 16 suits radio."
+        />
 
         <SwitchField
           control={control}

@@ -287,10 +287,12 @@ test('requestsClosure: the one decision, pure', () => {
 // ─── The saved show ─────────────────────────────────────────────────────────
 
 test('the block survives a cold load, and reaches the resolved show the pick paths read', async () => {
-  await onAir({ hotMix: { enabled: true, maxStepPct: 4, curve: [{ at: 100, bpm: 130 }, { at: 0, bpm: 120 }], closeRequests: false } });
+  await onAir({ hotMix: { enabled: true, maxStepPct: 4, curve: [{ at: 100, bpm: 130 }, { at: 0, bpm: 120 }], closeRequests: false, phraseBars: 16, phraseMix: true } });
   setCache(null);
   await settings.load();
   const stored = settings.get().shows.find((s: any) => s.id === 's_mix');
-  assert.deepEqual(stored.hotMix, { enabled: true, maxStepPct: 4, curve: [{ at: 0, bpm: 120 }, { at: 100, bpm: 130 }], closeRequests: false });
+  assert.deepEqual(stored.hotMix, {
+    enabled: true, maxStepPct: 4, curve: [{ at: 0, bpm: 120 }, { at: 100, bpm: 130 }], closeRequests: false, phraseBars: 16, phraseMix: true,
+  });
   assert.deepEqual(settings.resolveActiveShow()?.hotMix, stored.hotMix);
 });
