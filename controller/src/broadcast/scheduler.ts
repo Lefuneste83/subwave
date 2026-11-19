@@ -30,7 +30,9 @@ import { queue } from './queue.js';
 import { createPoolBuilder } from './auto-pool.js';
 import { applyTrackFloor, capCueOutSec, trackLengthSeconds } from '../music/track-floor.js';
 import { purgeSummary, runScheduledOrphanPurge } from '../music/orphan-purge.js';
-import { allTrackIdsOrdered } from '../music/library-db.js';
+import { allTrackIdsOrdered, getGrid } from '../music/library-db.js';
+import { hotMixOf } from '../music/hot-mix-policy.js';
+import { planSafeOut } from '../music/safe-out-policy.js';
 import { airableAnchorTracks, coastFloor, COAST_MIN_SEC, rotationCoast, rotationOrder, showNoRepeatGuard } from '../music/show-recency.js';
 import { knownDurationSec } from './queue/pure.js';
 import { autoPlaylistShowLabel, createShowBuildTracker } from './auto-playlist-show.js';
@@ -39,7 +41,7 @@ import { coastContents, coastRepeats, HANDOVER_REASON_TEXT, onCoastHandover, typ
 import { isIdle } from './stream-idle.js';
 import { noteCoastReloaded, noteCoastWritten } from './off-coast-policy.js';
 import { autoPlaylistRefreshCron, createAutoPlaylistRefreshRunner } from './auto-playlist-maintenance.js';
-import { reloadAutoPlaylist } from './liquidsoap-control.js';
+import { hotMixSafeBuilt, reloadAutoPlaylist } from './liquidsoap-control.js';
 import * as session from './session.js';
 import { withoutStandIns } from './stand-in-policy.js';
 import * as djAgent from './dj-agent.js';
@@ -661,13 +663,37 @@ async function refreshAutoPlaylistInner(canPublish: () => boolean): Promise<Refr
   if (selectionMaxSec && !pool.length) queue.log('scheduler', 'Auto-playlist empty: no eligible tracks under the hard maximum; using existing dead-air safety');
   for (const t of pool) await queue.applyLoudnessGain(t);
 
+  // In a Hot Mix show a coast track's exit is never beat-matched (the
+  // controller plans no seam out of it; the first track after a mixer restart
+  // is one), so each entry carries the safe transition (music/safe-out-policy.ts,
+  // radio.liq HOT MIX SAFE OUT): its bass ridden out before a bar line, cut a
+  // bar later, whatever follows entering at full there. Only for a mixer that
+  // has it; anything the policy cannot place keeps its plain crossfade.
+  const safeCoast = hotMixOf(show) != null && await hotMixSafeBuilt();
   const lines = ['#EXTM3U', ...pool.map((t: any) => {
     const trim = silenceTrim.resolveSilenceTrim(t);
+    const capCue = capCueOutSec(knownDurationSec(t), maxDurationSec);
+    let cueOutSec = trim.cueOutSec;
+    let safeOut: { barSec: number; leadSec: number } | null = null;
+    if (safeCoast) {
+      const ends = [knownDurationSec(t), trim.cueOutSec, capCue].filter((x): x is number => typeof x === 'number' && x > 0);
+      let grid: ReturnType<typeof getGrid> = null;
+      try { grid = t.id ? getGrid(t.id) : null; } catch { /* no library db */ }
+      const g = grid?.status === 'ok' ? grid : null;
+      const plan = ends.length ? planSafeOut({
+        a: { segments: g?.segments, beatsPerBar: g?.beatsPerBar, bpm: g?.bpm ?? t.bpm, endSec: Math.min(...ends), cueInSec: trim.cueInSec },
+      }) : null;
+      if (plan) {
+        safeOut = { barSec: plan.barSec, leadSec: plan.leadSec };
+        cueOutSec = Math.min(cueOutSec ?? Infinity, plan.outCueSec);
+      }
+    }
     return subsonic.getAnnotatedUri(t, {
       // Same rule as the drain: stamp the cap only past this track's length.
       maxDurationSec: capCueOutSec(knownDurationSec(t), maxDurationSec),
       cueInSec: trim.cueInSec,
-      cueOutSec: trim.cueOutSec,
+      cueOutSec,
+      safeOut,
     });
   })];
   // Atomic replace, so a reload never reads a half-written playlist.

@@ -17,6 +17,7 @@ import { STALE_SOCKET_RETRY_MS } from '../util/fetch-timeout.js';
 import { fileTitle, MAX_REPORTED_TITLE_BYTES, normalizeTitle, titleVerdict } from './tag-title.js';
 import { firstAlbumArtistId } from './artist-credit.js';
 import type { MixInStamps, MixOutStamps } from './hot-mix-seam.js';
+import type { SafeOutStamps } from './safe-out-policy.js';
 
 function buildAuth() {
   const salt = crypto.randomBytes(8).toString('hex');
@@ -1192,7 +1193,7 @@ export function getPlayableUri(song, resolveProbeId: string | null = null) {
 export function escAnnotate(s) {
   return String(s ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
-export function getAnnotatedUri(song, opts: { maxDurationSec?: number | null; cueOutSec?: number | null; cueInSec?: number | null; resolveProbeId?: string | null; clipLeadSec?: number | null; clipCueLateSec?: number | null; localPath?: string | null; mixOut?: MixOutStamps | null; mixIn?: MixInStamps | null; mixCueLateSec?: number | null; mixOutLateSec?: number | null } = {}) {
+export function getAnnotatedUri(song, opts: { maxDurationSec?: number | null; cueOutSec?: number | null; cueInSec?: number | null; resolveProbeId?: string | null; clipLeadSec?: number | null; clipCueLateSec?: number | null; localPath?: string | null; mixOut?: MixOutStamps | null; mixIn?: MixInStamps | null; mixCueLateSec?: number | null; mixOutLateSec?: number | null; safeOut?: Pick<SafeOutStamps, 'barSec' | 'leadSec'> | null } = {}) {
   const fields = [
     `title="${escAnnotate(song.title)}"`,
     `artist="${escAnnotate(song.artist)}"`,
@@ -1246,6 +1247,13 @@ export function getAnnotatedUri(song, opts: { maxDurationSec?: number | null; cu
       fields.push(`liq_mix_out_late="${opts.mixOutLateSec.toFixed(6)}"`);
     }    // A phrase-mix seam: the mixer rides its bass down over the overlap.
     if (opts.mixOut.bassRide) fields.push('liq_mix_bass="ride"');
+  }
+  // A Hot Mix safe transition (radio.liq HOT MIX SAFE OUT): the outgoing bar
+  // and the lead from the incoming start to its end. Never beside a Hot Mix
+  // seam's own stamps, which the mixer would take first anyway.
+  if (opts.safeOut && !opts.mixOut && opts.safeOut.barSec > 0 && opts.safeOut.leadSec > 0) {
+    fields.push(`liq_safe_out="${opts.safeOut.barSec.toFixed(4)}"`);
+    fields.push(`liq_safe_lead="${opts.safeOut.leadSec.toFixed(4)}"`);
   }
   if (opts.mixIn) {
     fields.push(`liq_mix_in="${escAnnotate(opts.mixIn.id)}"`);

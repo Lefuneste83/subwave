@@ -16,6 +16,7 @@ import { aboveKnownTrackCeiling } from '../music/track-duration.js';
 import { anyCleanShow, heldBackFromShow } from '../music/explicit-policy.js';
 import * as silenceTrim from '../music/silence-trim.js';
 import * as hotMixSeam from '../music/hot-mix-seam.js';
+import * as safeOutPolicy from '../music/safe-out-policy.js';
 import * as percussionPhase from '../music/percussion-phase.js';
 import { hotMixOf } from '../music/hot-mix-policy.js';
 import { getGrid, getStructure } from '../music/library-db.js';
@@ -523,6 +524,7 @@ class Queue {
   _hotMixStretchBuilt = () => liquidsoapControl.hotMixStretchBuilt();
   // Whether it runs the bass move the phrase mix places seams for; a field too.
   _hotMixBassBuilt = () => liquidsoapControl.hotMixBassBuilt();
+  _hotMixSafeBuilt = () => liquidsoapControl.hotMixSafeBuilt();
   _bedCatalog = beds.catalog;
   _bedGetPath = beds.getPath;
   _writeHandoff = writeHandoff;
@@ -2035,6 +2037,15 @@ class Queue {
     return prev?.mixOut?.id === item.mixIn.id ? item.mixIn : null;
   }
 
+  // The safe transition INTO this item (its downbeat cue-in), on the same
+  // terms as liveMixIn: only while the item that planned it is still ahead.
+  liveSafeIn(item: QueueItem): QueueItem['safeIn'] {
+    if (!item.safeIn) return null;
+    const idx = this.upcoming.indexOf(item);
+    const prev = idx > 0 ? this.upcoming[idx - 1] : idx === 0 ? this.current : null;
+    return prev?.safeOut?.id === item.safeIn.id ? item.safeIn : null;
+  }
+
   // DJ Hot Mix seam (music/hot-mix-seam.ts decides; this gathers and stamps).
   // Runs at the outgoing item's pair drain, after applyPairStamps, and before
   // the stem blend, which it replaces: the plan cuts this item on a bar line
@@ -2052,28 +2063,35 @@ class Queue {
     boundaryCueSec: number | null;
   }): Promise<void> {
     delete item.mixOut;
+    delete item.safeOut;
     if (successor.sent) return;
     delete successor.mixIn;
+    delete successor.safeIn;
     const mixCfg = hotMixOf(this.selectionShow(successor));
     if (!mixCfg) return;
     const pairTitle = `"${item.track.title}" → "${successor.track.title}"`;
     const plain = (why: string) => this.log('mix', `Hot Mix: plain crossfade ${pairTitle} (${why})`);
     if (ctx.boundaryCueSec != null) return plain('the show changes at this seam');
-    if (!item.track.id || !successor.track.id) return plain('a track outside the library');
-    if (!(await this._hotMixStretchBuilt())) {
-      return plain('the mixer has not built the tempo stretch: restart the mixer');
-    }
     let aGrid: ReturnType<typeof getGrid> = null;
     let bGrid: ReturnType<typeof getGrid> = null;
     try {
-      aGrid = getGrid(item.track.id);
-      bGrid = getGrid(successor.track.id);
+      if (item.track.id) aGrid = getGrid(item.track.id);
+      if (successor.track.id) bGrid = getGrid(successor.track.id);
     } catch { /* no library db */ }
-    if (aGrid?.status !== 'ok' || bGrid?.status !== 'ok') return plain('no beat grid measured');
     const mixIn = this.liveMixIn(item);
-    const aCues = positiveCues([mixIn?.inCueSec, ctx.trim.cueInSec]);
+    const aCues = positiveCues([mixIn?.inCueSec ?? this.liveSafeIn(item)?.inCueSec, ctx.trim.cueInSec]);
     const ends = positiveCues(ctx.endSecs);
     if (!ends.length) return plain('the outgoing track has no known length');
+    // Anything that cannot be beat-matched takes the safe transition instead
+    // of an unsynced overlap (music/safe-out-policy.ts), on a mixer that has it.
+    const safe = (why: string) => this.stampSafeOut(item, successor, {
+      why, pairTitle, aGrid, bGrid, endSec: Math.min(...ends), aCueInSec: aCues.length ? Math.max(...aCues) : 0,
+    });
+    if (!item.track.id || !successor.track.id) return safe('a track outside the library');
+    if (!(await this._hotMixStretchBuilt())) {
+      return safe('the mixer has not built the tempo stretch: restart the mixer');
+    }
+    if (aGrid?.status !== 'ok' || bGrid?.status !== 'ok') return safe('no beat grid measured');
     const seamInput: hotMixSeam.SeamInput = {
       stepPct: mixCfg.maxStepPct,
       overlapBeats: mixCfg.phraseBars * 4,
@@ -2118,7 +2136,7 @@ class Queue {
       if (!phrase) this.log('mix', `Hot Mix: phrase mix not used for ${pairTitle} (${why}): beat mix as before`);
     }
     verdict ??= hotMixSeam.planHotMixSeam(seamInput);
-    if (!verdict.ok) return plain(verdict.reason);
+    if (!verdict.ok) return safe(verdict.reason);
     const plan = verdict.plan;
     // Where the ear hears the beat (music/percussion-phase.ts): a grid sits a
     // track-specific distance from the on-beat percussion the ear locks to,
@@ -2191,6 +2209,46 @@ class Queue {
       phraseNote = `; phrase mix: out after bar ${outAfter} (${anchor}) +${w.bars} bars, in at bar ${w.bEntryBar}, first hard kick bar ${w.bPunchBar} at +${plan.leadSec}s`;
     }
     this.log('mix', `Hot Mix seam ${pairTitle}: ${plan.aBpm} → ${plan.bBpm} BPM (${plan.gapPct > 0 ? '+' : ''}${plan.gapPct} %), ${moves}; overlap ${plan.leadSec}s, cut ${plan.outCueSec}s, cue-in ${plan.inCueSec}s; ${phaseNote}${phraseNote}`);
+  }
+
+  // DJ Hot Mix safe transition (music/safe-out-policy.ts decides; this gathers
+  // and stamps): a Hot Mix seam that cannot be beat-matched rides the outgoing
+  // bass out over two bars and lets the incoming track in at full on its
+  // first downbeat at the outgoing bar line (radio.liq HOT MIX SAFE OUT). An
+  // older mixer, or a track too short for the ride, keeps the plain crossfade.
+  async stampSafeOut(item: QueueItem, successor: QueueItem, s: {
+    why: string; pairTitle: string;
+    aGrid: ReturnType<typeof getGrid>; bGrid: ReturnType<typeof getGrid>;
+    endSec: number; aCueInSec: number;
+  }): Promise<void> {
+    const plain = (why: string) => this.log('mix', `Hot Mix: plain crossfade ${s.pairTitle} (${why})`);
+    if (!(await this._hotMixSafeBuilt())) return plain(`${s.why}; the mixer has no safe transition: rebuild the broadcast image`);
+    const usable = (g: ReturnType<typeof getGrid>) => (g?.status === 'ok' ? g : null);
+    const a = usable(s.aGrid);
+    const b = usable(s.bGrid);
+    const plan = safeOutPolicy.planSafeOut({
+      a: { segments: a?.segments, beatsPerBar: a?.beatsPerBar, bpm: a?.bpm ?? item.track.bpm, endSec: s.endSec, cueInSec: s.aCueInSec },
+      b: {
+        segments: b?.segments, beatsPerBar: b?.beatsPerBar, bpm: b?.bpm ?? successor.track.bpm,
+        cueInSec: silenceTrim.resolveSilenceTrim(successor.track).cueInSec ?? 0,
+      },
+    });
+    if (!plan) return plain(`${s.why}; too short for the safe transition`);
+    if (!this.upcoming.includes(item) || !this.upcoming.includes(successor) || successor.sent) return;
+    const id = randomBytes(4).toString('hex');
+    item.safeOut = { id, barSec: plan.barSec, leadSec: plan.leadSec, outCueSec: plan.outCueSec };
+    if (plan.inCueSec != null) successor.safeIn = { id, inCueSec: plan.inCueSec };
+    // What the mixer buffers (cross_stamps sizes it from the stamps too).
+    item.track.crossSec = safeOutPolicy.safeCrossSec(plan);
+    for (const k of ['washout', 'loop'] as const) {
+      if (item.track[k]) this.noteDrop(item.track, k, 'hot-mix');
+    }
+    delete item.track.washout;
+    delete item.track.washoutAuto;
+    delete item.track.washoutDelay;
+    delete item.track.loop;
+    delete item.track.loopBar;
+    this.log('mix', `Hot Mix: safe transition ${s.pairTitle} (${s.why}): outgoing bass out over 2 bars of ${plan.barSec}s (bar from the ${plan.source}), cut ${plan.outCueSec}s, ${plan.inCueSec != null ? `incoming at full on its first downbeat, cue-in ${plan.inCueSec}s` : 'incoming at full from its own cue-in'}`);
   }
 
   // Basenames of rendered transition clips that haven't AIRED yet — the clip
@@ -2555,6 +2613,9 @@ class Queue {
                     .map(key => [key, originalExit[key]]),
                 ) : undefined };
                 item.cueOutSec = blend.outCueSec;
+                // A rendered blend is aligned audio: it replaces a safe transition.
+                delete item.safeOut;
+                delete successor.safeIn;
                 successor.stemSeam = true;
                 successor.stemCueInSec = blend.inCueSec;
                 this.log('mix', `stem blend armed: ${item.track.title} ✕ ${successor.track.title} (cut ${blend.outCueSec}s, cue-in ${blend.inCueSec}s, clip ${blend.clipSec}s)`);
@@ -2586,6 +2647,8 @@ class Queue {
         // A Hot Mix seam cuts this track on a bar line, inside every early end
         // above (the plan was sized against them).
         if (item.mixOut) item.cueOutSec = Math.min(item.cueOutSec ?? Infinity, item.mixOut.outCueSec);
+        // A safe transition cuts it one bar after the incoming bar line.
+        if (item.safeOut) item.cueOutSec = Math.min(item.cueOutSec ?? Infinity, item.safeOut.outCueSec);
         // And the seam INTO it, while it stands, starts it on its downbeat.
         const mixInLive = this.liveMixIn(item);
         // Local file or stream, decided once for this handoff (#2222). The mount
@@ -2612,7 +2675,7 @@ class Queue {
         // seam's cue-in is DEEPER into the track than any leading silence (the
         // clip already played that head), so the later of the two is the one
         // that leaves no audio played twice.
-        const cueInCandidates = positiveCues([item.stemSeam ? item.stemCueInSec : null, mixInLive?.inCueSec, trim.cueInSec]);
+        const cueInCandidates = positiveCues([item.stemSeam ? item.stemCueInSec : null, mixInLive?.inCueSec, this.liveSafeIn(item)?.inCueSec, trim.cueInSec]);
         item.cueInSec = cueInCandidates.length ? Math.max(...cueInCandidates) : undefined;
         // CUE-IN LANDING (#2003): Liquidsoap 2.4.x starts Y on the first codec
         // frame at or after its cue, up to ~93ms late, and at a clip -> Y seam
@@ -2665,7 +2728,7 @@ class Queue {
         const uri = () => {
           const liveMax = item.requestedBy ? null : settings.effectiveTrackLengthLimits().playbackMaxSec;
           // The annotation and queue clock must resolve the same live cap.
-          const earlyEnds = positiveCues([item.stemBlend?.outCueSec, item.mixOut?.outCueSec, trim.cueOutSec, boundaryCueSec,
+          const earlyEnds = positiveCues([item.stemBlend?.outCueSec, item.mixOut?.outCueSec, item.safeOut?.outCueSec, trim.cueOutSec, boundaryCueSec,
             liveMax && itemDurSec > liveMax ? liveMax : null]);
           item.cueOutSec = earlyEnds.length ? Math.min(...earlyEnds) : undefined;
           if (!liveMax && item.track.washoutAuto) {
@@ -2674,7 +2737,7 @@ class Queue {
             delete item.track.washoutDelay;
           }
           const liveMixIn = this.liveMixIn(item);
-          const liveCueIns = positiveCues([item.stemSeam ? item.stemCueInSec : null, liveMixIn?.inCueSec, trim.cueInSec]);
+          const liveCueIns = positiveCues([item.stemSeam ? item.stemCueInSec : null, liveMixIn?.inCueSec, this.liveSafeIn(item)?.inCueSec, trim.cueInSec]);
           item.cueInSec = liveCueIns.length ? Math.max(...liveCueIns) : undefined;
           // The seam into it stands only while its planned downbeat is still
           // the start (no cue-in is a start at 0 s, hot-mix-seam.incomingStamps).
@@ -2704,6 +2767,7 @@ class Queue {
             mixOut: item.mixOut ?? null,
             mixOutLateSec: item.mixOut ? landedLate : null,
             mixIn: mixInNow.mixIn,
+            safeOut: item.safeOut ?? null,
           });
         };
         if (trim.cueInSec != null || trim.cueOutSec != null) {

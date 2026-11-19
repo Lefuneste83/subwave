@@ -9,6 +9,7 @@ import type { ClipSeamCues } from '../stem-seam.js';
 import type { TransitionEffect } from '../../settings/vocab.js';
 import type { MixDropReason } from '../../schemas/transitions.js';
 import type { MixInStamps, MixOutStamps } from '../../music/hot-mix-seam.js';
+import type { SafeOutStamps } from '../../music/safe-out-policy.js';
 
 // A persona as it flows through the queue's voice path — only `id`/`name`/
 // `djMode` are read here; the rest rides through to tts.speak()/voiceGainDb().
@@ -226,6 +227,14 @@ export interface QueueItem {
   mixOut?: (MixOutStamps & { outCueSec: number }) | null;
   // `waitSec`: the beat-phase shift its cue-in could not take (hotMixSeam.shiftInCue).
   mixIn?: (MixInStamps & { inCueSec: number; waitSec?: number }) | null;
+  // DJ Hot Mix safe transition (music/safe-out-policy.ts), for a Hot Mix seam
+  // that could not be beat-matched: `safeOut` rides the OUTGOING item (its cut
+  // one bar after the bar line, its bar, the lead from the incoming start to
+  // its end; annotated liq_safe_out/liq_safe_lead for radio.liq's HOT MIX SAFE
+  // OUT), `safeIn` the incoming one (its cue-in, its first downbeat less the
+  // pre-roll), matched by id like mixIn.
+  safeOut?: SafeOutStamps | null;
+  safeIn?: { id: string; inCueSec: number } | null;
   // Outgoing music already committed an early ending into this clip/track.
   lengthPolicyCommitted?: boolean;
   stemCueInSec?: number;
