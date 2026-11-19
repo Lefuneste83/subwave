@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   GLIDE_SEC, OVERLAP_BEATS, RAMP_BEATS, SYNC_MAX_PCT, WINDOW_MATCH_SEC,
-  incomingStamps, outAt, planHotMixSeam, profileOf, shiftInCue, srcAt,
+  incomingStamps, outAt, planHotMixSeam, profileOf, punchAfterShift, shiftInCue, srcAt,
   type SeamInput, type StartStretch, type EndStretch,
 } from '../src/music/hot-mix-seam.js';
 
@@ -282,3 +282,22 @@ test('a phrase window on two-beat grids: the structure\'s four-beat bars are pai
   assert.ok(Math.abs(v.plan.inCueSec - bBar(57)) < 1e-3);
   assert.equal(v.plan.bPunchSec, v.plan.leadSec);
 });
+
+// The punch moves with B's audio: a beat-phase shift that starts B later in
+// its file brings the first hard kick that much earlier after B starts, at B's
+// opening tempo; a shift the cue could not take (waitSec) is waited in the
+// mixer, so it counts the other way. The mixer then takes its own cue-in
+// landing off in B's time (radio.liq, HOT MIX BASS MOVE).
+test('the punch follows the cue-in a beat-phase shift moved', () => {
+  // 16 s planned at r = 0.975, cue moved 15 ms later in the file: the kick
+  // comes 15 / 0.975 ms sooner.
+  assert.equal(punchAfterShift(16, 100, 100.015, 0, 0.975), round4(16 - 0.015 / 0.975));
+  // Moved earlier: later.
+  assert.equal(punchAfterShift(16, 100, 99.98, 0, 1), 16.02);
+  // Clamped at the file's start: the cue is 0, the wait holds B back 20 ms of
+  // file, the same as a cue at -0.02.
+  assert.equal(punchAfterShift(16, 0, 0, 0.02, 1), 16.02);
+  // No shift: the plan's own.
+  assert.equal(punchAfterShift(16, 100, 100, 0, 0.98), 16);
+});
+const round4 = (x: number) => Math.round(x * 1e4) / 1e4;

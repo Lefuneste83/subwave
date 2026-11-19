@@ -521,6 +521,8 @@ class Queue {
   _overlayMixerStatus = async () => overlayMixerStatus(await liquidsoapControl.sendCommand('jingle_overlay_status'));
   // Whether the running mixer built the Hot Mix stretch; a field so tests can stand one in.
   _hotMixStretchBuilt = () => liquidsoapControl.hotMixStretchBuilt();
+  // Whether it runs the bass move the phrase mix places seams for; a field too.
+  _hotMixBassBuilt = () => liquidsoapControl.hotMixBassBuilt();
   _bedCatalog = beds.catalog;
   _bedGetPath = beds.getPath;
   _writeHandoff = writeHandoff;
@@ -2085,7 +2087,11 @@ class Queue {
     let verdict: hotMixSeam.SeamVerdict | null = null;
     let phrase: { window: PhraseWindow; lastKick: number } | null = null;
     if (mixCfg.phraseMix) {
-      const placed = phraseWindowOf(mixCfg.phraseBars, seamInput, [item.track.id, aGrid], [successor.track.id, bGrid]);
+      // A placed seam is the trim FOR the bass move: on a mixer without the
+      // move it would air as the trim alone, which lost the blind tests.
+      const placed = !(await this._hotMixBassBuilt())
+        ? { ok: false as const, reason: 'the mixer has no bass move: rebuild the broadcast image' }
+        : phraseWindowOf(mixCfg.phraseBars, seamInput, [item.track.id, aGrid], [successor.track.id, bGrid]);
       let why = placed.ok ? '' : placed.reason;
       if (placed.ok) {
         const w = placed.window;
@@ -2117,6 +2123,7 @@ class Queue {
     // clear on-beat percussion on either side, past the cap) stays grid on grid.
     let phaseNote = 'beat phase unchecked: grid on grid';
     let waitSec = 0;
+    const plannedInCueSec = plan.inCueSec;
     const budgetMs = beatPhaseBudgetMs(this.remainingUntilItemAirs(item));
     if (budgetMs > 0) {
       const sourceOf = (t: Track) => {
@@ -2150,11 +2157,13 @@ class Queue {
     const id = randomBytes(4).toString('hex');
     item.mixOut = { id, leadSec: plan.leadSec, end: plan.aEnd, outCueSec: plan.outCueSec };
     successor.mixIn = { id, ...plan.bStart, inCueSec: plan.inCueSec, ...(waitSec ? { waitSec } : {}) };
-    // The phrase mix's bass timings, for the mixer's bass move (a later step):
-    // stamped on the items only, never annotated, so radio.liq sees nothing new.
+    // The phrase mix's bass timings, for the mixer's bass move (radio.liq, HOT
+    // MIX BASS MOVE): A's bass ridden down over the overlap, B's punched back
+    // on its first hard kick, which moved with B's cue-in if the beat phase
+    // moved it.
     if (phrase && plan.bPunchSec != null) {
       item.mixOut.bassRide = { fromSec: 0, toSec: plan.leadSec };
-      successor.mixIn.punchSec = plan.bPunchSec;
+      successor.mixIn.punchSec = hotMixSeam.punchAfterShift(plan.bPunchSec, plannedInCueSec, plan.inCueSec, waitSec, plan.bStart.tempo);
     }
     // An older mixer ignores the mix stamps: it crossfades over the overlap.
     item.track.crossSec = plan.leadSec;

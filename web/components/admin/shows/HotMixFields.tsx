@@ -1,9 +1,10 @@
 'use client';
 
 // DJ Hot Mix for one show: the switch, the tempo step, the overlap length, the
-// BPM curve over the show's running time, and the requests toggle. The phrase
-// mix (`phraseMix`) has no control yet: the form carries it through untouched. What the switch does on air is
-// the controller's music/hot-mix-policy.ts; this only edits the saved block.
+// phrase mix, the BPM curve over the show's running time, and the requests
+// toggle. What the switches do on air is the controller's
+// music/hot-mix-policy.ts and music/phrase-mix-policy.ts; this only edits the
+// saved block.
 
 import type { ChangeEvent } from 'react';
 import { useId } from 'react';
@@ -115,6 +116,21 @@ export function HotMixFields({ control, index }: { control: Control<ShowsFormVal
           options={PHRASE_BAR_OPTIONS}
           description="Overlap of each beat mix, in bars; 8 is the norm, 16 suits radio."
         />
+
+        <div className="field">
+          <SwitchField
+            control={control}
+            name={`${base}.phraseMix`}
+            label="Phrase mix"
+            disabled={!enabled}
+            description="Mixes on each track's structure: the outgoing track leaves after its last hard kick, the incoming one enters the overlap before its first hard kick, its bass held back and punched in on that kick while the outgoing bass is ridden down."
+          />
+          <ShowFieldHelp title="Which transitions it changes">
+            Only tracks whose structure has been measured (the opt-in structure analysis) and whose intro holds at
+            least eight bars before its first hard kick; a shorter intro takes a shorter overlap, eight bars at a time.
+            Every other transition is mixed as above, and the booth log says why. It needs the current broadcast image.
+          </ShowFieldHelp>
+        </div>
 
         <SwitchField
           control={control}
