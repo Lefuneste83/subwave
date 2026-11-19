@@ -6,8 +6,9 @@
 // Why: the operator's DJ recipe for a transition between two tracks on one
 // grid. The outgoing track leaves after its LAST hard kick plus N bars; the
 // incoming one enters N bars before its FIRST hard kick, with its bass punched
-// in on that kick. Both points sit on phrase lines (8 bars counted from bar 1).
-// No transition reads this yet (a later step): with the facet never run,
+// in on that kick. The phrases count from those kicks, never from bar 1
+// (music/phrase-mix-policy.ts says why). Only a Hot Mix show with its opt-in
+// `phraseMix` reads this: with the facet never run, or the switch off,
 // nothing a station plays changes.
 //
 // The rules, ported from the offline prototype the operator validated by ear
