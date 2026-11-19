@@ -301,3 +301,29 @@ test('the punch follows the cue-in a beat-phase shift moved', () => {
   assert.equal(punchAfterShift(16, 100, 100, 0, 0.98), 16);
 });
 const round4 = (x: number) => Math.round(x * 1e4) / 1e4;
+
+// An intro the beat tracker split: a short first segment (here 12 beats, the
+// first ~6 s) before the main one. The first downbeat cannot hold eight bars
+// in its segment; the next segment's first downbeat, still inside the 30 s the
+// seam may skip, can. Measured on air 16-19 Nov: 12 of the 35 unsynced seams
+// in Hot Mix shows were this, planned as plain crossfades.
+test('an incoming intro split into a short segment: the seam enters on the main segment', () => {
+  const p = 60 / 124;
+  const b = {
+    bpm: 124, beatsPerBar: 4,
+    segments: [
+      { anchorMs: 300, periodUs: 60e6 / 124, beats: 12, downbeatMs: 300 },
+      { anchorMs: (0.3 + 13 * p) * 1000, periodUs: 60e6 / 124 * 1.0002, beats: 500, downbeatMs: (0.3 + 13 * p) * 1000 },
+    ],
+  };
+  const v = planHotMixSeam(pair(122, 124, { b: { ...b, cueInSec: 0, durationSec: 300 } }));
+  assert.ok(v.ok, JSON.stringify(v));
+  assert.ok(Math.abs(v.plan.inCueSec - (0.3 + 13 * p)) < 1e-3, `${v.plan.inCueSec}`);
+  // The first segment's downbeat still wins when its segment holds the overlap.
+  const long = planHotMixSeam(pair(122, 124));
+  assert.ok(long.ok && Math.abs(long.plan.inCueSec - 0.2) < 1e-6);
+  // A main segment past the 30 s the seam may skip: no seam, as before.
+  const far = { ...b, segments: [b.segments[0], { ...b.segments[1], anchorMs: 40_000, downbeatMs: 40_000 }] };
+  const f = planHotMixSeam(pair(122, 124, { b: { ...far, cueInSec: 0, durationSec: 300 } }));
+  assert.equal(f.ok, false);
+});
