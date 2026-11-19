@@ -11,7 +11,8 @@
 //
 // Per bar of the track's own beat grid (library-db/grid.ts) the analyzer
 // measures (analyze_worker.facet_structure), levels in dB against the track's
-// loud bars (90th percentile) and rounded to 0.5 dB:
+// loud bars (90th percentile) and stored as the 0.5 dB step at or below the
+// measurement (floored, so a threshold test on the step is exact):
 //   kick    the < 100 Hz envelope peak at the bar's beats (median of them);
 //   kicks   how many of its beats carry a < 150 Hz hit;
 //   bass    40-120 Hz between the kicks; mid 250 Hz-4 kHz; high > 4 kHz;

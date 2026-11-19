@@ -2248,7 +2248,10 @@ def facet_grid(src):
 #           the 250 Hz-4 kHz magnitude spectrum (geometric over arithmetic
 #           mean). 0 dB = noise-like (or silence), higher = clearer pitched
 #           lines; an absolute figure, not against the loud bars.
-# Rounded to 0.5 dB, levels floored at STRUCTURE_FLOOR_DB. Bars run from each
+# Stored as the 0.5 dB step AT OR BELOW the measurement (floor, never round to
+# nearest: a kick at -4.2 dB rounded to -4.0 would pass the -4 dB hard-kick
+# test; measured on the 98 prototype tracks, nearest rounding moved the first
+# hard kick on 18 of them), levels floored at STRUCTURE_FLOOR_DB. Bars run from each
 # grid segment's downbeat phase (as the controller's gridBarsWithin), and a bar
 # the decoded audio does not hold whole is left out; `runs` ([startMs, barUs,
 # count]) map them to seconds.
@@ -2269,13 +2272,34 @@ STRUCTURE_FLOOR_DB = -99.0
 STRUCTURE_REF_PERCENTILE = 90
 STRUCTURE_KICK_HIT_SHARE = 0.3
 STRUCTURE_FRAME = 4096
+# The rules read DJ bars of four beats (8-bar phrases, a kick on 3 of the 4
+# beats). Beat This! reads a 4/4 house track as 2 beats per bar on ~10 % of the
+# library (production, 18 Nov: 4,794 of 50,163 grids with trusted bars): its
+# downbeats are then every other one of ours, so such a grid is measured in
+# four-beat bars from its own downbeat. Any other meter (3, 5, 6, 7) has no
+# four-beat bar to measure: unmeasurable / odd-meter, today's transition.
+STRUCTURE_BEATS_PER_BAR = 4
+STRUCTURE_METERS = (2, 4)
+# A segment whose tempo is off the track's main tempo by more than this is a
+# misreading (a double-time stretch, a chance segment in a breakdown), not a
+# place to count bars: the same band as grid-policy.ts STEADY_TEMPO_BAND.
+STRUCTURE_TEMPO_BAND = 0.04
 STRUCTURE_HOP = 2048
+
+
+def _module_installed(name):
+    """find_spec without its raise: a module already in sys.modules with no
+    __spec__ (a test's stand-in, a half-imported package) raises ValueError,
+    and a capability probe on the ready line must never raise."""
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def structure_capable():
     """numpy + scipy for the filters, ffmpeg for the decode."""
-    return (importlib.util.find_spec("numpy") is not None and importlib.util.find_spec("scipy") is not None
-            and shutil.which("ffmpeg") is not None)
+    return _module_installed("numpy") and _module_installed("scipy") and shutil.which("ffmpeg") is not None
 
 
 def _finite_number(v):
@@ -2307,6 +2331,22 @@ def parse_structure_grid(raw):
                      "downbeat_s": None if d is None else d / 1000.0})
     dec = raw.get("decoded_ms")
     return {"beats_per_bar": bpb, "segments": segs, "decoded_s": dec / 1000.0 if _finite_number(dec) and dec > 0 else None}
+
+
+def structure_measure_grid(grid):
+    """The grid the structure is measured on: four-beat bars, and only the
+    segments whose tempo agrees with the track's main tempo (the period
+    covering the most TIME: a double-time misreading holds twice the beats in
+    the same span, so a beat count would elect it) to within
+    STRUCTURE_TEMPO_BAND. None for a meter other than STRUCTURE_METERS."""
+    if grid["beats_per_bar"] not in STRUCTURE_METERS:
+        return None
+    by_period = {}
+    for s in grid["segments"]:
+        by_period[s["period_s"]] = by_period.get(s["period_s"], 0.0) + s["beats"] * s["period_s"]
+    main = max(by_period.items(), key=lambda kv: kv[1])[0]
+    segs = [s for s in grid["segments"] if abs(s["period_s"] - main) <= STRUCTURE_TEMPO_BAND * main]
+    return {**grid, "beats_per_bar": STRUCTURE_BEATS_PER_BAR, "segments": segs}
 
 
 def structure_bars(grid, duration_s):
@@ -2352,7 +2392,7 @@ def _structure_runs(bars, bpb):
 
 
 def _half_db(v):
-    return max(STRUCTURE_FLOOR_DB, round(float(v) * 2) / 2)
+    return max(STRUCTURE_FLOOR_DB, math.floor(float(v) * 2 + 1e-9) / 2)
 
 
 def _structure_block(ss, np, seg, sr, a, bars, bpb):
@@ -2526,6 +2566,9 @@ def facet_structure(src, raw_grid):
         return _unmeasurable("no-grid")
     if grid["decoded_s"] is not None and grid["decoded_s"] > STRUCTURE_MAX_SECONDS:
         return _unmeasurable("too-long")
+    grid = structure_measure_grid(grid)
+    if grid is None:
+        return _unmeasurable("odd-meter")
     try:
         y = decode_structure(src)
         if len(y) / STRUCTURE_SR > STRUCTURE_MAX_SECONDS:

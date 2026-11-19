@@ -13,7 +13,7 @@
 // The rules, ported from the offline prototype the operator validated by ear
 // (scratch/onair/trim/structure.py):
 //   - a FULL bar is a full section: hard kick (kick level >= HARD_KICK_DB),
-//     bass present (> FULL_BASS_DB), mids (>= FULL_MID_DB) and a kick on at
+//     bass present (measured > FULL_BASS_DB: stored >= it), mids (>= FULL_MID_DB) and a kick on at
 //     least FULL_MIN_KICKS beats. One lone non-full bar between two full ones
 //     is a fill and counts as full; two in a row break the run.
 //   - the full section starts at the first run of >= FULL_RUN_BARS full bars
@@ -28,7 +28,10 @@
 //   - intro = the bars before the first hard kick, outro = the bars after the
 //     last one.
 // The levels are dB against the track's own loud bars (90th percentile), so
-// the thresholds read the same on a quiet master and a loud one.
+// the thresholds read the same on a quiet master and a loud one. A stored
+// level is the 0.5 dB step at or below the measurement (the worker floors it),
+// so `>=` a threshold on the 0.5 dB grid is exact, and "bass above -12 dB"
+// reads as a stored step >= -12 (a measurement of exactly -12.0 aside).
 
 export const HARD_KICK_DB = -4;
 export const FULL_BASS_DB = -12;
@@ -68,7 +71,7 @@ export function fullBars(b: StructureRuleInput): boolean[] {
   const n = barCount(b);
   const raw: boolean[] = [];
   for (let i = 0; i < n; i++) {
-    raw.push(b.kick[i] >= HARD_KICK_DB && b.bass[i] > FULL_BASS_DB && b.mid[i] >= FULL_MID_DB && b.kicks[i] >= FULL_MIN_KICKS);
+    raw.push(b.kick[i] >= HARD_KICK_DB && b.bass[i] >= FULL_BASS_DB && b.mid[i] >= FULL_MID_DB && b.kicks[i] >= FULL_MIN_KICKS);
   }
   return raw.map((f, i) => f || (i > 0 && i < n - 1 && raw[i - 1] && raw[i + 1]));
 }

@@ -187,8 +187,35 @@ check("a bad metre is None", aw.parse_structure_grid({**grid_req(), "beats_per_b
 check("a bad period is None", aw.parse_structure_grid({"beats_per_bar": 4, "segments": [
     {"anchorMs": 0, "periodUs": 0, "beats": 8, "downbeatMs": 0}]}) is None)
 
+print("structure_measure_grid")
+# A 4/4 track read as 2 beats per bar is measured in four-beat bars from its
+# own downbeat: the same bars as the 4-beat reading.
+two_bpb = aw.structure_measure_grid(aw.parse_structure_grid(grid_req(bpb=2)))
+check("a 2-beat grid is measured in four-beat bars", two_bpb and two_bpb["beats_per_bar"] == 4, two_bpb)
+via2 = aw.measure_structure(y, SR, two_bpb)
+check("a 2-beat grid gives the 4-beat grid's bars", via2 and via2["runs"] == ans["runs"] and via2["kicks"] == ans["kicks"], via2 and via2["runs"])
+for meter in (3, 5, 6, 7):
+    check(f"a {meter}-beat grid has no four-beat bar", aw.structure_measure_grid(aw.parse_structure_grid(grid_req(bpb=meter))) is None)
+# A segment off the main tempo (here a double-time misreading) is not counted.
+# A short double-time misreading (the last 4 bars, twice the beats) against
+# the rest of the track at the real tempo.
+mixed = aw.parse_structure_grid({"beats_per_bar": 4, "segments": [
+    {"anchorMs": int(T0 * 1000), "periodUs": int(PER * 1e6), "beats": (INTRO + MAIN - 4) * 4, "downbeatMs": int(T0 * 1000)},
+    {"anchorMs": int((T0 + (INTRO + MAIN - 4) * BAR) * 1000), "periodUs": int(PER * 1e6 / 2), "beats": 4 * 8,
+     "downbeatMs": int((T0 + (INTRO + MAIN - 4) * BAR) * 1000)}]})
+kept = aw.structure_measure_grid(mixed)
+check("a segment off the main tempo is dropped", kept is not None and len(kept["segments"]) == 1 and kept["segments"][0]["period_s"] == PER, kept)
+near = aw.parse_structure_grid({"beats_per_bar": 4, "segments": [
+    {"anchorMs": int(T0 * 1000), "periodUs": int(PER * 1e6), "beats": INTRO * 4, "downbeatMs": int(T0 * 1000)},
+    {"anchorMs": int((T0 + INTRO * BAR) * 1000), "periodUs": int(PER * 1e6 * 1.03), "beats": MAIN * 4,
+     "downbeatMs": int((T0 + INTRO * BAR) * 1000)}]})
+near_kept = aw.structure_measure_grid(near)
+check("a segment within the tempo band is kept", near_kept is not None and len(near_kept["segments"]) == 2)
+
 print("facet_structure")
 check("no source", aw.facet_structure(None, grid_req()) == {"status": "unmeasurable", "reason": "no-whole-file-source"})
+check("an odd meter is odd-meter without a decode",
+      aw.facet_structure("http://music.example/rest/stream?u=x&t=SECRET", grid_req(bpb=3)) == {"status": "unmeasurable", "reason": "odd-meter"})
 check("no grid", aw.facet_structure("/x.flac", None) == {"status": "unmeasurable", "reason": "no-grid"})
 long_grid = grid_req(decoded_ms=int(aw.STRUCTURE_MAX_SECONDS * 1000) + 60_000)
 check("a grid over 30 min is too-long without a decode",

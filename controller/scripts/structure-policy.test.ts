@@ -46,12 +46,14 @@ test('the constants are the approved ones', () => {
 test('a full bar needs all four conditions; a lone gap is tolerated, two are not', () => {
   const b = full(10);
   set(b, 'kick', 2, 2, -4.5);   // soft kick
-  set(b, 'bass', 4, 4, -12);    // no bass (must be ABOVE -12)
+  set(b, 'bass', 4, 4, -12.5);  // no bass (stored step below -12)
   set(b, 'mid', 6, 6, -6);      // thin mids
   set(b, 'kicks', 8, 9, 2);     // kick on two beats only, two bars running
   assert.deepEqual(P.fullBars(b), [true, true, true, true, true, true, true, false, false, true]);
-  // At the thresholds exactly: kick -4 and mid -5.5 are full, kicks 3 too.
-  const edge = set(set(set(full(3), 'kick', 2, 2, -4), 'mid', 2, 2, -5.5), 'kicks', 2, 2, 3);
+  // At the thresholds exactly: kick -4, mid -5.5 and bass -12 are full, kicks
+  // 3 too (stored levels are the 0.5 dB step at or below the measurement, so
+  // a stored -12 is a measurement in [-12, -11.5): above -12).
+  const edge = set(set(set(set(full(3), 'kick', 2, 2, -4), 'mid', 2, 2, -5.5), 'kicks', 2, 2, 3), 'bass', 2, 2, -12);
   assert.deepEqual(P.fullBars(edge), [true, true, true]);
   // The ends are never bridged.
   assert.deepEqual(P.fullBars(set(full(3), 'kick', 1, 1, -9)), [false, true, true]);

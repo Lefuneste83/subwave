@@ -902,10 +902,16 @@ outdated, because `grid_at` records which grid the row was measured on. The
 work runs in the one-shot whole-file lane (`analyze_worker.facet_structure`):
 one ffmpeg decode to mono 22,050 Hz, then scipy Butterworth filters run block
 by block (about 70 MB for a 30-minute file), with no librosa and no model.
-Files over 30 minutes are `unmeasurable / too-long`. It is planned only on
+Files over 30 minutes are `unmeasurable / too-long`. Bars are always four
+beats (the rules' 8-bar phrases): a grid read as 2 beats per bar (about 10 % of
+the grids with trusted bars) is measured in four-beat bars from its own
+downbeat, any other meter is `unmeasurable / odd-meter` without a decode, and
+a grid segment whose tempo is more than 4 % off the track's main tempo (the
+tempo covering the most time) is not counted. It is planned only on
 `analyze_structure_capable === true`, and never in a regular run or an
 automatic backfill. `track_structure` stores compact arrays per bar, in dB
-against the track's 90th-percentile bar and rounded to 0.5 dB:
+against the track's 90th-percentile bar and floored to the 0.5 dB step (rounding
+to the nearest step moved threshold decisions on 18 of 98 prototype tracks):
 - `kick`: the < 100 Hz zero-phase envelope peak at the beats, as a median;
 - `kicks`: the number of beats with a < 150 Hz hit;
 - `bass`: 40–120 Hz between the kicks;
