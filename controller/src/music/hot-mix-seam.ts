@@ -211,30 +211,47 @@ export function planHotMixSeam(input: SeamInput): SeamVerdict {
   const overlapBeats = input.overlapBeats && input.overlapBeats > 0 ? Math.round(input.overlapBeats) : OVERLAP_BEATS;
   const win = input.window ?? null;
 
-  // The incoming side first: its first trusted downbeat at or after its cue-in,
-  // or the window's own.
+  // The incoming side first: its trusted downbeats at or after its cue-in,
+  // within IN_DOWNBEAT_MAX_SEC, earliest first, or the window's own. Each is
+  // tried in turn and the first whose plan stands is taken: a beat tracker
+  // often splits an intro into a short first segment (10-30 beats) before the
+  // main one, so the first downbeat cannot hold the overlap in its segment
+  // while the main segment's, a few seconds on, can (12 of the 35 unsynced
+  // seams in Hot Mix shows, 16-19 Nov). The first candidate that plans is the
+  // one the seam always took, so a seam planned before is planned the same.
   const bCue = Math.max(0, input.b.cueInSec);
-  let bPick: { seg: GridSegment; at: number } | null = null;
+  const picks: Array<{ seg: GridSegment; at: number }> = [];
   for (const seg of bSegs) {
     if (win) {
       const at = downbeats(seg, bBar).find((t) => Math.abs(t - win.bEntrySec) <= WINDOW_MATCH_SEC + 1e-9);
-      if (at != null && (!bPick || Math.abs(at - win.bEntrySec) < Math.abs(bPick.at - win.bEntrySec))) bPick = { seg, at };
+      if (at != null && (!picks.length || Math.abs(at - win.bEntrySec) < Math.abs(picks[0].at - win.bEntrySec))) picks.splice(0, 1, { seg, at });
       continue;
     }
-    const at = downbeats(seg, bBar).find((t) => t >= bCue - 1e-6);
-    if (at != null && at - bCue <= IN_DOWNBEAT_MAX_SEC && (!bPick || at < bPick.at)) bPick = { seg, at };
+    for (const at of downbeats(seg, bBar)) {
+      if (at >= bCue - 1e-6 && at - bCue <= IN_DOWNBEAT_MAX_SEC) picks.push({ seg, at });
+    }
   }
-  if (!bPick) {
+  if (!picks.length) {
     return { ok: false, reason: win ? 'the phrase window\'s incoming downbeat is not on a trusted grid' : 'no downbeat near the incoming track\'s start' };
   }
-  const pB = periodOf(bPick.seg);
-  const bBpmNative = 60 / pB;
+  picks.sort((x, y) => x.at - y.at);
 
   // The outgoing tempo at its end: the last trusted segment before its end.
   const aEnd = input.a.endSec;
   const aSegsBefore = aSegs.filter((seg) => segStart(seg) < aEnd).sort((x, y) => segStart(y) - segStart(x));
   if (!aSegsBefore.length) return { ok: false, reason: 'no trusted beat grid before the outgoing track\'s end' };
 
+  let first: SeamVerdict | null = null;
+  for (const bPick of picks) {
+    const v = planFrom(bPick);
+    if (v.ok) return v;
+    first ??= v;
+  }
+  return first!;
+
+  function planFrom(bPick: { seg: GridSegment; at: number }): SeamVerdict {
+  const pB = periodOf(bPick.seg);
+  const bBpmNative = 60 / pB;
   for (const aSeg of aSegsBefore) {
     const pA = periodOf(aSeg);
     const aBpm = 60 / pA;
@@ -302,7 +319,7 @@ export function planHotMixSeam(input: SeamInput): SeamVerdict {
           bStart: { tempo: round(r, 6), holdSec: round(leadSec, 4), glideSec: GLIDE_SEC },
           aEnd: end,
           aOverlapBeats: Array.from({ length: overlapBeats + 1 }, (_, k) => round(D + k * pA, 4)),
-          bOverlapBeats: Array.from({ length: Math.floor((leadSec * r) / pB) + 1 }, (_, k) => round(bPick!.at + k * pB, 4)),
+          bOverlapBeats: Array.from({ length: Math.floor((leadSec * r) / pB) + 1 }, (_, k) => round(bPick.at + k * pB, 4)),
           ...(win ? { bPunchSec: round(leadSec, 4) } : {}),
         },
       };
@@ -314,6 +331,7 @@ export function planHotMixSeam(input: SeamInput): SeamVerdict {
       ? 'the phrase window\'s outgoing downbeat is not on a trusted grid, or its overlap does not fit there'
       : 'no downbeat window for the overlap in the outgoing track\'s grid',
   };
+  }
 }
 
 // Each side's stamps, as getAnnotatedUri writes them (radio.liq reads these
