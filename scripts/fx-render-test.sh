@@ -795,6 +795,11 @@ jingleseam() {
   if grep -qE '^  mixed = ' "$HERE/../liquidsoap/radio.liq"; then
     { echo "  mixed = false"; cat "$WORK/jseam-arming.liq"; } > "$WORK/jseam-arming.tmp" && mv "$WORK/jseam-arming.tmp" "$WORK/jseam-arming.liq"
   fi
+  # Likewise the safe transition (`not safe_on`, read from liq_safe_* stamps
+  # these tones do not carry); defined only when radio.liq has it.
+  if grep -qE '^  safe_on = ' "$HERE/../liquidsoap/radio.liq"; then
+    { echo "  safe_on = false"; cat "$WORK/jseam-arming.liq"; } > "$WORK/jseam-arming.tmp" && mv "$WORK/jseam-arming.tmp" "$WORK/jseam-arming.liq"
+  fi
   {
     cat <<'LIQ'
 settings.log.stdout := true
@@ -940,6 +945,11 @@ eqpower() {
     awk '/^  def flagged\(m, k\)/{on=1} on{print} on&&/liq_blend"\)$/{exit}' "$radio"; } > "$WORK/eqp-rule.liq"
   grep -q 'equal_power_seam =' "$WORK/eqp-rule.liq" \
     || { echo "EQPOWER FAIL — could not lift the equal_power_seam rule out of radio.liq"; return 1; }
+  # The rule stands down on a safe-transition seam (`not safe_on`, read from
+  # liq_safe_* stamps no case here carries); defined only when radio.liq has it.
+  if grep -qE '^  safe_on = ' "$radio"; then
+    { echo "  safe_on = false"; cat "$WORK/eqp-rule.liq"; } > "$WORK/eqp-rule.tmp" && mv "$WORK/eqp-rule.tmp" "$WORK/eqp-rule.liq"
+  fi
 
   [ -f "$WORK/eqp-a.wav" ] || ffmpeg -v error -y -f lavfi -i "anoisesrc=color=pink:seed=11:amplitude=0.25" -t 16 -ar 44100 -ac 2 "$WORK/eqp-a.wav"
   [ -f "$WORK/eqp-b.wav" ] || ffmpeg -v error -y -f lavfi -i "anoisesrc=color=pink:seed=97:amplitude=0.25" -t 16 -ar 44100 -ac 2 "$WORK/eqp-b.wav"

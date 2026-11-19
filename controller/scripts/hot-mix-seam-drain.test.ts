@@ -70,6 +70,9 @@ const plan = (item: Parameters<typeof queue.planHotMixSeam>[0], successor: Param
 beforeEach(() => {
   queue._hotMixStretchBuilt = async () => true;
   queue._hotMixBassBuilt = async () => true;
+  // The safe transition has its own tests below; off, every refusal is the
+  // plain crossfade these tests were written against.
+  queue._hotMixSafeBuilt = async () => false;
   queue.djLog.length = 0;
 });
 
@@ -364,4 +367,79 @@ test('phrase length 16 without the phrase mix: a 64-beat overlap on the searched
   assert.equal(successor.mixIn.holdSec, item.mixOut.leadSec);
   assert.equal(successor.mixIn.inCueSec, 0.2);
   assert.equal(item.track.crossSec, item.mixOut.leadSec);
+});
+
+// The safe transition (music/safe-out-policy.ts, radio.liq HOT MIX SAFE OUT):
+// a Hot Mix seam that cannot be beat-matched rides the outgoing bass out and
+// lets the incoming track in at full on its downbeat, never an unsynced
+// overlap. Blind set 5: acceptable on all three pairs.
+test('a gap past twice the step: the safe transition, stamped on both sides, tied by one id', async () => {
+  queue._hotMixSafeBuilt = async () => true;
+  await onAir({ enabled: true });
+  const { item, successor } = pairOf(A, C);
+  await plan(item, successor);
+  assert.equal(item.mixOut, undefined);
+  assert.ok(item.safeOut && successor.safeIn, queue.djLog.map((l) => l.message).join('\n'));
+  assert.equal(item.safeOut.id, successor.safeIn.id);
+  // A's bar lines at 0.5 + 2k s; the latest with a bar after it inside 300 s.
+  assert.equal(item.safeOut.barSec, 2);
+  assert.equal(item.safeOut.outCueSec, 298.5);
+  // C's first downbeat at 0.2 s, entered 0.1 s before it.
+  assert.equal(successor.safeIn.inCueSec, 0.1);
+  assert.equal(item.safeOut.leadSec, 2.1);
+  assert.equal(item.track.crossSec, 6.1, 'the two ride bars and the lead');
+  assert.equal(queue.liveSafeIn(successor), successor.safeIn);
+  assert.ok(queue.djLog.some((l) => /Hot Mix: safe transition .* past twice the 3 % sync limit\): outgoing bass out over 2 bars of 2s \(bar from the grid\), cut 298\.5s, incoming at full on its first downbeat, cue-in 0\.1s/.test(l.message)));
+  const out = getAnnotatedUri(item.track, { safeOut: item.safeOut, cueOutSec: item.safeOut.outCueSec });
+  assert.match(out, /liq_safe_out="2\.0000"/);
+  assert.match(out, /liq_safe_lead="2\.1000"/);
+  assert.doesNotMatch(getAnnotatedUri(item.track, { safeOut: item.safeOut, mixOut: { id: 'x', leadSec: 16, end: null } }), /liq_safe_out/,
+    'never beside a Hot Mix seam\'s own stamps');
+  for (const key of ['liq_safe_out', 'liq_safe_lead']) assert.ok(RADIO_LIQ.includes(`"${key}"`), `radio.liq reads ${key}`);
+  assert.ok(RADIO_LIQ.includes('"hotmix_safe"'), 'the capability the controller asks');
+});
+
+test('the safe transition: never across a show change, never on a mixer without it', async () => {
+  await onAir({ enabled: true });
+  queue._hotMixSafeBuilt = async () => true;
+  let p = pairOf(A, C);
+  await queue.planHotMixSeam(p.item, p.successor, { trim: NO_TRIM, endSecs: [300], boundaryCueSec: 280 });
+  assert.equal(p.item.safeOut, undefined);
+  assert.ok(queue.djLog.some((l) => /plain crossfade .*the show changes at this seam/.test(l.message)));
+  queue._hotMixSafeBuilt = async () => false;
+  p = pairOf(A, C);
+  await plan(p.item, p.successor);
+  assert.equal(p.item.safeOut, undefined);
+  assert.ok(queue.djLog.some((l) => /plain crossfade .*the mixer has no safe transition: rebuild the broadcast image/.test(l.message)));
+});
+
+test('the safe transition covers the other refusals too: a mixer without the stretch, a track outside the library', async () => {
+  await onAir({ enabled: true });
+  queue._hotMixSafeBuilt = async () => true;
+  queue._hotMixStretchBuilt = async () => false;
+  let p = pairOf(A, B);
+  await plan(p.item, p.successor);
+  assert.ok(p.item.safeOut, 'a beat-matchable pair on a mixer without the stretch');
+  assert.equal(p.item.mixOut, undefined);
+  queue._hotMixStretchBuilt = async () => true;
+  p = pairOf(A, { ...B, id: '' } as typeof B);
+  await plan(p.item, p.successor);
+  assert.ok(p.item.safeOut, 'no library id on the incoming side');
+  assert.equal(p.successor.safeIn, undefined, 'no grid: it keeps its own cue-in');
+});
+
+test('a re-plan clears the safe stamps, and the seam into a track stands only while its planner is ahead', async () => {
+  queue._hotMixSafeBuilt = async () => true;
+  await onAir({ enabled: true });
+  const { item, successor } = pairOf(A, C);
+  await plan(item, successor);
+  assert.ok(item.safeOut && successor.safeIn);
+  queue.upcoming = [successor];
+  assert.equal(queue.liveSafeIn(successor), null, 'its planner is gone');
+  queue.upcoming = [item, successor];
+  const p2 = pairOf(A, B);
+  item.safeOut = p2.item.safeOut;
+  await plan(p2.item, p2.successor);
+  assert.equal(p2.item.safeOut, undefined, 'a pair it can mix is the beat-matched seam');
+  assert.ok(p2.item.mixOut);
 });

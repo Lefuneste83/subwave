@@ -722,6 +722,11 @@ def cross_stamps(m) =
     # crossfade the controller's own liq_cross_duration already sizes.
     mix_lead = if hot_mix_stretch() then float_of_string(default=-1., m["liq_mix_lead"]) else -1. end
     own = if mix_lead >= 0. then mix_lead + clip_seam_slack + mix_out_late_room(m) else own end
+    # A Hot Mix safe transition (HOT MIX SAFE OUT in dj_transition): the
+    # outgoing bass ride (two bars) and the lead, aligned like a clip seam.
+    safe_bar = float_of_string(default=-1., m["liq_safe_out"])
+    safe_lead = float_of_string(default=-1., m["liq_safe_lead"])
+    own = if lead < 0. and mix_lead < 0. and safe_bar > 0. and safe_lead > 0. then safe_lead + 2. * safe_bar + clip_seam_slack else own end
     stamps = [
       ("liq_cross_start_duration", string(cross_prev_end())),
       ("liq_cross_end_duration", string(own)),
@@ -914,10 +919,38 @@ def dj_transition(a, b) =
   mix_a_q = if mix_a_q < 0.85 or mix_a_q > 1.15 then 1. else mix_a_q end
   mix_seam_lead = mix_lead - mix_late / mix_r + mix_a_late / mix_a_q
   mix_max_d = mix_lead + clip_seam_slack + mix_out_late_room(a.metadata) + frame.duration()
+  # HOT MIX SAFE OUT (music/safe-out-policy.ts): a Hot Mix seam the controller
+  # could not beat-match (a tempo gap past twice the step, no trusted grid, a
+  # coast track) must never overlap two unsynced kicks. The outgoing track
+  # carries its bar (`liq_safe_out`) and the lead from the incoming track's
+  # first sample to its own end (`liq_safe_lead`: one bar plus the incoming
+  # pre-roll before its first downbeat); cross_stamps buffered two bars more.
+  # Its bass is ridden out over those two bars, the incoming track enters at
+  # full with its downbeat on the outgoing bar line (aligned like a clip seam:
+  # it waits d - lead), and the outgoing highs fade over the last bar. Chosen
+  # by the operator's blind set 5: acceptable on all three pairs, against two
+  # for an echo out, one for a quick cut and one for the plain crossfade.
+  # Not on a clip or Hot Mix seam, a jingle, a bed or break, or a show-change
+  # cut; a buffer that does not fit is logged and stays the plain crossfade.
+  safe_bar = float_of_string(default=-1., a.metadata["liq_safe_out"])
+  safe_lead = float_of_string(default=-1., a.metadata["liq_safe_lead"])
+  safing = safe_bar > 0. and safe_lead > 0. and clip_lead < 0. and mix_lead < 0.
+    and a.metadata["subwave_jingle"] != "true" and b.metadata["subwave_jingle"] != "true"
+    and a.metadata["liq_show_fade"] != "true"
+    and a.metadata["subwave_clip"] != "1" and b.metadata["subwave_clip"] != "1"
+    and a.metadata["subwave_kind"] == "" and b.metadata["subwave_kind"] == ""
+  safe_max_d = safe_lead + 2. * safe_bar + clip_seam_slack + frame.duration()
   b_delay =
     if clip_lead >= 0. and d > seam_lead and d <= clip_max_d then d - seam_lead
     elsif mix_lead >= 0. and d > mix_seam_lead and d <= mix_max_d then d - mix_seam_lead
+    elsif safing and d > safe_lead and d <= safe_max_d then d - safe_lead
     else 0. end
+  safe_on = safing and b_delay > 0.
+  if safe_on then
+    log(label="hotmix", level=3, "safe out: buffered #{d}s, bar #{safe_bar}s, lead #{safe_lead}s: outgoing bass ridden out from #{d - 3. * safe_bar}s to #{d - safe_bar}s, incoming at full from #{b_delay}s, outgoing highs out by #{d}s")
+  elsif safing then
+    log(label="hotmix", level=2, "safe out: buffer #{d}s does not fit the lead #{safe_lead}s + two bars of #{safe_bar}s: plain crossfade")
+  end
   if mix_lead >= 0. then
     log(label="hotmix", level=3, "buffered #{d}s, lead #{mix_lead}s, cue-in landing #{mix_late}s at x#{mix_r}, outgoing cue-in landing #{mix_a_late}s: incoming waits #{b_delay}s")
     if b_delay == 0. then
@@ -989,18 +1022,18 @@ def dj_transition(a, b) =
   end
   jingle_out = a.metadata["subwave_jingle"] == "true"
   jingle_in = b.metadata["subwave_jingle"] == "true"
-  washing = a.metadata["liq_washout"] == "true" and not boundary_fading and not mixed
-  looping = a.metadata["liq_loop"] == "true" and not washing and not boundary_fading and not mixed
-  sweeping = b.metadata["liq_sweep"] == "true" and not looping and not boundary_fading and not jingle_out and not mixed
-  dissolving = b.metadata["liq_dissolve"] == "true" and not washing and not looping and not boundary_fading and not jingle_out and not mixed
-  chopping = b.metadata["liq_chop"] == "true" and not washing and not looping and not boundary_fading and not jingle_out and not mixed
+  washing = a.metadata["liq_washout"] == "true" and not boundary_fading and not mixed and not safe_on
+  looping = a.metadata["liq_loop"] == "true" and not washing and not boundary_fading and not mixed and not safe_on
+  sweeping = b.metadata["liq_sweep"] == "true" and not looping and not boundary_fading and not jingle_out and not mixed and not safe_on
+  dissolving = b.metadata["liq_dissolve"] == "true" and not washing and not looping and not boundary_fading and not jingle_out and not mixed and not safe_on
+  chopping = b.metadata["liq_chop"] == "true" and not washing and not looping and not boundary_fading and not jingle_out and not mixed and not safe_on
   # A plain song-to-song seam: no gesture flag on either side (a flag the queue
   # stripped as a loser never reaches here, so any flag present means a gesture
   # owns the fades), no jingle, no stem-blend clip, no bed or pause break
   # (subwave_kind is set only on those items, never on a song).
   def flagged(m, k) = m[k] == "true" end
   equal_power_seam =
-    equal_power_crossfade()
+    equal_power_crossfade() and not safe_on
     and not jingle_in and not jingle_out
     and a.metadata["subwave_clip"] != "1" and b.metadata["subwave_clip"] != "1"
     and a.metadata["subwave_kind"] == "" and b.metadata["subwave_kind"] == ""
@@ -1048,6 +1081,32 @@ def dj_transition(a, b) =
         1. - x
       end
       bass_cut(gain=ride_gain, ride_src)
+    else
+      a_source
+    end
+  # HOT MIX SAFE OUT, outgoing side (timings above): dry until two bars before
+  # the incoming downbeat, its bass ridden out linearly over them (the bass
+  # move's LR4 crossfade), then its highs faded out linearly over the last
+  # bar. Gains read once a frame, as every fade here. From the raw a.source:
+  # no gesture or other fader is armed on a safe seam.
+  a_source =
+    if safe_on then
+      safe_src = a.source
+      safe_ride_from = d - 3. * safe_bar
+      safe_ride_to = d - safe_bar
+      def safe_ride() =
+        e = source.elapsed(safe_src)
+        if e <= safe_ride_from then 1.
+        elsif e >= safe_ride_to then 0.
+        else 1. - (e - safe_ride_from) / (safe_ride_to - safe_ride_from) end
+      end
+      def safe_level() =
+        e = source.elapsed(safe_src)
+        if e <= safe_ride_to then 1.
+        elsif e >= d then 0.
+        else 1. - (e - safe_ride_to) / (d - safe_ride_to) end
+      end
+      amplify(override=null, safe_level, bass_cut(gain=safe_ride, safe_src))
     else
       a_source
     end
@@ -1143,7 +1202,7 @@ def dj_transition(a, b) =
   # incoming arrives lows-first (b-side block further down). Armed only between
   # COMPATIBLE tracks (mix.effectAllowedFor). At e=0 the HPF sits at 30 Hz, i.e.
   # transparent, so the engage is seamless.
-  blending = b.metadata["liq_blend"] == "true" and not looping and not boundary_fading and not jingle_out and not mixed
+  blending = b.metadata["liq_blend"] == "true" and not looping and not boundary_fading and not jingle_out and not mixed and not safe_on
   a_source =
     if blending then
       log("DJ blend: spectral handover into the next track (d=#{d}s)")
@@ -1549,6 +1608,9 @@ def dj_transition(a, b) =
   # spans the full d: one slack (0.1 s) longer than the incoming fade over an
   # eight-bar overlap, inaudible, and every other seam stays as it was.
   b_fade = if b_delay > 0. then d - b_delay else b_fade end
+  # A safe-out seam's incoming track enters at full on its downbeat: 10 ms
+  # only, against a click at a cue-in mid-waveform.
+  b_fade = if safe_on then 0.01 else b_fade end
   b_source =
     if equal_power_seam then
       equal_power_fade(span=b_fade, rising=true, b.source)
@@ -2897,6 +2959,17 @@ server.register(
 # BASS MOVE in dj_transition); placed without it, it is the trim that lost the
 # operator's blind tests. So the controller asks this before placing one: an
 # older mixer answers "unknown command" and the seam is searched as before.
+# The safe transition (HOT MIX SAFE OUT in dj_transition): the controller
+# stamps liq_safe_out/liq_safe_lead only for a mixer that answers true here;
+# an older one answers "unknown command" and the seam stays the plain
+# crossfade it was.
+server.register(
+  "hotmix_safe",
+  description="Whether this mixer runs the DJ Hot Mix safe transition",
+  usage="hotmix_safe",
+  fun(_) -> "true"
+)
+
 server.register(
   "hotmix_bass",
   description="Whether this mixer runs the DJ Hot Mix bass move",

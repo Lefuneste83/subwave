@@ -275,6 +275,25 @@ export async function hotMixBassBuilt(): Promise<boolean> {
   }
 }
 
+// Whether the running mixer runs the Hot Mix safe transition (radio.liq, HOT
+// MIX SAFE OUT): a seam that cannot be beat-matched rides the outgoing bass out
+// and lets the incoming track in on its downbeat. Fails closed like the bass
+// move: an older mixer answers "unknown command" and keeps the plain
+// crossfade. Cached for a minute and dropped on every restart.
+const hotMixSafeCache = cachedAsync(
+  async () => (await sendCommand('hotmix_safe', 2000)).trim().split(/\s+/)[0] === 'true',
+  { ttlMs: 60_000 },
+);
+onMixerRestart(() => hotMixSafeCache.invalidate());
+
+export async function hotMixSafeBuilt(): Promise<boolean> {
+  try {
+    return await hotMixSafeCache.get();
+  } catch {
+    return false;
+  }
+}
+
 // Guaranteed real telnet round-trip: invalidating first drops any in-flight
 // take too. Operator-triggered surfaces only (Doctor) — putting this on a poll
 // reinstates the per-request connection the cache exists to remove.

@@ -166,12 +166,12 @@ export function outAt(p: Profile, src: number): number {
 
 // ─── Grids ──────────────────────────────────────────────────────────────────
 
-const periodOf = (seg: GridSegment) => seg.periodUs / 1e6;
-const segStart = (seg: GridSegment) => seg.anchorMs / 1000;
+export const periodOf = (seg: GridSegment) => seg.periodUs / 1e6;
+export const segStart = (seg: GridSegment) => seg.anchorMs / 1000;
 const segEnd = (seg: GridSegment) => segStart(seg) + (seg.beats - 1) * periodOf(seg);
 
 // Segments whose beat is the track's beat, with a known bar phase.
-function trustedSegments(side: SeamSide): GridSegment[] {
+export function trustedSegments(side: SeamSide): GridSegment[] {
   if (!side.bpm || side.bpm <= 0) return [];
   const main = 60 / side.bpm;
   return side.segments.filter((seg) => seg.downbeatMs != null && seg.beats >= 8 && seg.periodUs > 0
@@ -179,7 +179,7 @@ function trustedSegments(side: SeamSide): GridSegment[] {
 }
 
 // Downbeats of a segment, in file seconds, ascending.
-function downbeats(seg: GridSegment, beatsPerBar: number): number[] {
+export function downbeats(seg: GridSegment, beatsPerBar: number): number[] {
   const p = periodOf(seg);
   const db = seg.downbeatMs! / 1000;
   const first = db - Math.floor((db - segStart(seg)) / (p * beatsPerBar) + 1e-9) * p * beatsPerBar;
