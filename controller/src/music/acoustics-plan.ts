@@ -63,6 +63,9 @@ export interface PlanCapabilities {
   // `=== true`: unknown is NOT planned, unlike CLAP/Demucs, because an analyzer
   // that predates the facet would read a grid-only item as a full analysis.
   grid?: boolean | null;
+  // The per-bar structure (library-db/structure.ts). Planned only on `=== true`,
+  // the grid's rule: an analyzer that predates the facet would refuse it.
+  structure?: boolean | null;
   // Tail answers carry the tail's loudness curve (tail v3). A placed tail
   // stored without one (`no-curve`) is re-planned only on `=== true`, the
   // same rule as loudness.
@@ -108,8 +111,10 @@ export interface WorkItem {
 // (placeTail): re-reading it could not place it.
 // 'stem-scan' / 'stem-budget': a regular run's stems-only item left outside the
 // stem priority scan, or past the stem budget's free slots (regular-run-plan.ts).
-// 'no-grid': the analyzer does not positively report the beat grid.
-export type SkipReason = 'no-clap' | 'no-demucs' | 'no-tail-vocal' | 'no-whole-file' | 'no-curve' | 'no-edges' | 'no-grid' | 'year-known' | 'year-off' | 'limit' | 'stem-scan' | 'stem-budget';
+// 'no-grid': the analyzer does not positively report the beat grid; for the
+// structure, the track has no grid to measure its bars on (not due).
+// 'no-structure': the analyzer does not positively report the structure.
+export type SkipReason = 'no-clap' | 'no-demucs' | 'no-tail-vocal' | 'no-whole-file' | 'no-curve' | 'no-edges' | 'no-grid' | 'no-structure' | 'year-known' | 'year-off' | 'limit' | 'stem-scan' | 'stem-budget';
 
 export interface FacetPlanCount {
   facet: Facet;
@@ -214,11 +219,12 @@ function tailCurveHeld(cell: FacetCell | undefined, capabilities: PlanCapabiliti
 }
 
 // The facet rows planAcoustics reads for `facets`: a vocal plan also judges
-// each track's tail and edges (tailWithVocal). Callers load the state with it.
+// each track's tail and edges (tailWithVocal), a structure plan whether the
+// track has a grid. Callers load the state with it.
 export function planStateFacets(facets: readonly Facet[]): Facet[] {
-  return facets.includes('vocal')
-    ? FACETS.filter((f) => facets.includes(f) || f === 'tail' || f === 'edges')
-    : FACETS.filter((f) => facets.includes(f));
+  const vocal = facets.includes('vocal');
+  const structure = facets.includes('structure');
+  return FACETS.filter((f) => facets.includes(f) || (vocal && (f === 'tail' || f === 'edges')) || (structure && f === 'grid'));
 }
 
 export function requestFor(facets: readonly Facet[]): WorkRequest {
@@ -252,6 +258,9 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
     // (still due) and `edges` not at all: a guaranteed no-op.
     if (WHOLE_FILE_FACETS.includes(f) && input.capabilities.wholeFile === false) return 'no-whole-file';
     if (f === 'grid' && input.capabilities.grid !== true) return 'no-grid';
+    if (f === 'structure' && input.capabilities.structure !== true) return 'no-structure';
+    // Measured on the track's grid (a no-bars grid has settled the row already).
+    if (f === 'structure' && !input.state.get(id)?.get('grid')) return 'no-grid';
     if (f === 'tail' && tailCurveHeld(cell, input.capabilities)) return 'no-curve';
     if (f === 'year' && input.capabilities.yearLookups === false) return 'year-off';
     if (f === 'year' && cell?.status === 'ok') return 'year-known';
@@ -332,6 +341,14 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
         '(track_grid); a grid passing its gate (grid-policy.ts) replaces the bpm, and the bars when the downbeats agree ' +
         '(the old values kept: npm run grid-apply -- --revert)' +
         (input.capabilities.grid !== true ? ' — the analyzer does not report the beat grid (heavy image built WITH_BEAT_GRID=1 needed), so nothing is planned' : ''),
+    );
+  }
+  if (facets.includes('structure')) {
+    warnings.push(
+      'structure: per-bar kick, bass, mids, highs and melody on the track\'s own grid (one whole-file decode per track, ' +
+        'numpy/scipy, no model); only tracks whose grid has trusted bars (run `--facets grid` first), files over 30 min ' +
+        'are left unmeasurable; stored on its own (track_structure), read by `npm run structure-report`, used by nothing on air yet' +
+        (input.capabilities.structure !== true ? ' — the analyzer does not report the structure (rebuild it), so nothing is planned' : ''),
     );
   }
   const yearItems = items.filter((i) => i.facets.includes('year')).length;

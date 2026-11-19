@@ -578,6 +578,56 @@ async def test_source_size_contract():
     assert "source_size" not in worker_calls[2], worker_calls
 
 
+async def test_structure_contract():
+    """The per-bar structure: the grid it is measured on reaches the worker
+    verbatim, and a structure request (alone or with the whole-file facets)
+    takes the one-shot whole-file lane, never a pool worker; with a window
+    facet it goes to the pool. /health reports the capability from the
+    workers' ready line."""
+    grid = {"beats_per_bar": 4, "decoded_ms": 340000,
+            "segments": [{"anchorMs": 480, "periodUs": 483871, "beats": 700, "downbeatMs": 480}]}
+    once_calls, pool_calls = [], []
+
+    async def once(payload):
+        once_calls.append(payload)
+        return {"ok": True, "facets": {"structure": {"status": "ok", "data": {}}}, "source": {"kind": "whole-file"}}
+
+    async def pool(payload):
+        pool_calls.append(payload)
+        return {"ok": True, "facets": {}, "source": {"kind": "path"}}
+
+    saved_once, saved_request = server.run_whole_file_once, server.analyzer_pool.request
+    server.run_whole_file_once = once
+    server.analyzer_pool.request = pool
+    try:
+        await server.analyze(server.AnalyzeRequest(url="http://navi/stream", facets=["structure"], structure_grid=grid))
+        await server.analyze(server.AnalyzeRequest(url="http://navi/stream", facets=["edges", "structure"], structure_grid=grid))
+        await server.analyze(server.AnalyzeRequest(url="http://navi/stream", facets=["head", "structure"], structure_grid=grid))
+        await server.analyze(server.AnalyzeRequest(url="http://navi/stream", facets=["edges"]))
+    finally:
+        server.run_whole_file_once, server.analyzer_pool.request = saved_once, saved_request
+    assert [c["facets"] for c in once_calls] == [["structure"], ["edges", "structure"], ["edges"]], once_calls
+    assert once_calls[0] == {"id": "1", "url": "http://navi/stream", "facets": ["structure"], "structure_grid": grid}, once_calls
+    assert "structure_grid" not in once_calls[2], once_calls
+    assert [c["facets"] for c in pool_calls] == [["head", "structure"]], pool_calls
+    assert pool_calls[0]["structure_grid"] == grid, pool_calls
+    assert not server.StdioWorker._wants_models({"facets": ["structure"]})
+    assert "structure" in server.WHOLE_FILE_LANE_FACETS and "structure" not in server.MODEL_FACETS
+
+    worker = server.StdioWorker("t", "python3", "x.py")
+    worker.ready_meta = {"structure_capable": True}
+    saved_workers = server.analyzer_pool.workers
+    server.analyzer_pool.workers = [worker]
+    saved_ready = worker.ready
+    worker.ready = True
+    try:
+        health = await server.health()
+    finally:
+        server.analyzer_pool.workers = saved_workers
+        worker.ready = saved_ready
+    assert health["analyze_structure_capable"] is True, health
+
+
 async def main():
     test_concurrency_env_validation()
     test_whole_file_timeout_env_matches_the_worker()
@@ -594,6 +644,7 @@ async def main():
     await test_facet_contract()
     await test_stems_windows_and_pool_size_contract()
     await test_source_size_contract()
+    await test_structure_contract()
 
 
 asyncio.run(main())

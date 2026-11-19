@@ -2222,6 +2222,365 @@ def facet_grid(src):
         return _failed(e)
 
 
+# --- Per-bar structure (the `structure` facet) --------------------------------
+# What a DJ hears bar by bar, on the track's OWN beat grid (the `grid` facet's,
+# which the controller sends in the request as `structure_grid`: this worker
+# never reads the library). The controller's rules
+# (controller/src/music/structure-policy.ts) find the first and last hard kick
+# from these arrays, for the operator's transition recipe: the outgoing track
+# leaves after its last hard kick + N bars, the incoming one enters N bars
+# before its first hard kick, its bass punched in on that kick.
+#
+# Ported from the offline prototype the operator validated by ear on real
+# tracks (scratch/onair/trim/barmeasure.py + kickstrength.py). Per bar, levels
+# in dB against the track's own loud bars (the STRUCTURE_REF_PERCENTILE of the
+# bar values), so the thresholds read the same on any master:
+#   kick    the < 100 Hz zero-phase low-passed RMS envelope (30 ms window): its
+#           peak in [beat - 20 ms, beat + 60 ms], the median over the bar's beats;
+#   kicks   beats whose < 150 Hz envelope rise within ±50 ms of the grid beat
+#           reaches STRUCTURE_KICK_HIT_SHARE of the track's loud hits;
+#   bass    40-120 Hz mean power between the kicks (beat fraction 0.35-0.85);
+#   mid     250 Hz-4 kHz mean power;  high  > 4 kHz mean power;
+#   level   the whole band's mean power (the prototype's silence test: a bar
+#           under -35 dB is silent);
+#   melody  how tonal the mids are: the bar's mean, over 4096-sample Hann
+#           frames (hop 2048) centred in it, of -10*log10(spectral flatness) of
+#           the 250 Hz-4 kHz magnitude spectrum (geometric over arithmetic
+#           mean). 0 dB = noise-like (or silence), higher = clearer pitched
+#           lines; an absolute figure, not against the loud bars.
+# Stored as the 0.5 dB step AT OR BELOW the measurement (floor, never round to
+# nearest: a kick at -4.2 dB rounded to -4.0 would pass the -4 dB hard-kick
+# test; measured on the 98 prototype tracks, nearest rounding moved the first
+# hard kick on 18 of them), levels floored at STRUCTURE_FLOOR_DB. Bars run from each
+# grid segment's downbeat phase (as the controller's gridBarsWithin), and a bar
+# the decoded audio does not hold whole is left out; `runs` ([startMs, barUs,
+# count]) map them to seconds.
+#
+# The whole-file lane (no librosa, no model): one ffmpeg decode of the whole
+# file to mono f32 at 22,050 Hz, then scipy Butterworth filters (scipy ships
+# with numpy in every analyzer image; it is imported here only, so no other
+# request of the one-shot lane pays for it). Files over STRUCTURE_MAX_SECONDS
+# (DJ sets, live recordings: no transition material) are `too-long`, from the
+# grid's decoded length without a decode, or from the decode itself (it reads
+# at most one second past the bound). Memory: the decode (~5 MB a minute of
+# audio) plus one block of filtering (STRUCTURE_BLOCK_S).
+
+STRUCTURE_VERSION = 1
+STRUCTURE_SR = 22050
+STRUCTURE_MAX_SECONDS = 1800.0
+STRUCTURE_FLOOR_DB = -99.0
+STRUCTURE_REF_PERCENTILE = 90
+STRUCTURE_KICK_HIT_SHARE = 0.3
+STRUCTURE_FRAME = 4096
+# The rules read DJ bars of four beats (8-bar phrases, a kick on 3 of the 4
+# beats). Beat This! reads a 4/4 house track as 2 beats per bar on ~10 % of the
+# library (production, 18 Nov: 4,794 of 50,163 grids with trusted bars): its
+# downbeats are then every other one of ours, so such a grid is measured in
+# four-beat bars from its own downbeat. Any other meter (3, 5, 6, 7) has no
+# four-beat bar to measure: unmeasurable / odd-meter, today's transition.
+STRUCTURE_BEATS_PER_BAR = 4
+STRUCTURE_METERS = (2, 4)
+# A segment whose tempo is off the track's main tempo by more than this is a
+# misreading (a double-time stretch, a chance segment in a breakdown), not a
+# place to count bars: the same band as grid-policy.ts STEADY_TEMPO_BAND.
+STRUCTURE_TEMPO_BAND = 0.04
+STRUCTURE_HOP = 2048
+
+
+def _module_installed(name):
+    """find_spec without its raise: a module already in sys.modules with no
+    __spec__ (a test's stand-in, a half-imported package) raises ValueError,
+    and a capability probe on the ready line must never raise."""
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def structure_capable():
+    """numpy + scipy for the filters, ffmpeg for the decode."""
+    return _module_installed("numpy") and _module_installed("scipy") and shutil.which("ffmpeg") is not None
+
+
+def _finite_number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def parse_structure_grid(raw):
+    """The request's `structure_grid` ({beats_per_bar, decoded_ms, segments:
+    [{anchorMs, periodUs, beats, downbeatMs}]}, the stored grid's own shape),
+    in seconds; None when malformed."""
+    if not isinstance(raw, dict):
+        return None
+    bpb = raw.get("beats_per_bar")
+    if not isinstance(bpb, int) or isinstance(bpb, bool) or not 2 <= bpb <= 7:
+        return None
+    segs_in = raw.get("segments")
+    if not isinstance(segs_in, list) or not segs_in:
+        return None
+    segs = []
+    for s in segs_in:
+        if not isinstance(s, dict):
+            return None
+        a, p, n, d = s.get("anchorMs"), s.get("periodUs"), s.get("beats"), s.get("downbeatMs")
+        if not (_finite_number(a) and _finite_number(p) and _finite_number(n)) or p <= 0 or n < 2:
+            return None
+        if d is not None and not _finite_number(d):
+            return None
+        segs.append({"anchor_s": a / 1000.0, "period_s": p / 1e6, "beats": int(n),
+                     "downbeat_s": None if d is None else d / 1000.0})
+    dec = raw.get("decoded_ms")
+    return {"beats_per_bar": bpb, "segments": segs, "decoded_s": dec / 1000.0 if _finite_number(dec) and dec > 0 else None}
+
+
+def structure_measure_grid(grid):
+    """The grid the structure is measured on: four-beat bars, and only the
+    segments whose tempo agrees with the track's main tempo (the period
+    covering the most TIME: a double-time misreading holds twice the beats in
+    the same span, so a beat count would elect it) to within
+    STRUCTURE_TEMPO_BAND. None for a meter other than STRUCTURE_METERS."""
+    if grid["beats_per_bar"] not in STRUCTURE_METERS:
+        return None
+    by_period = {}
+    for s in grid["segments"]:
+        by_period[s["period_s"]] = by_period.get(s["period_s"], 0.0) + s["beats"] * s["period_s"]
+    main = max(by_period.items(), key=lambda kv: kv[1])[0]
+    segs = [s for s in grid["segments"] if abs(s["period_s"] - main) <= STRUCTURE_TEMPO_BAND * main]
+    return {**grid, "beats_per_bar": STRUCTURE_BEATS_PER_BAR, "segments": segs}
+
+
+def structure_bars(grid, duration_s):
+    """[(start_s, period_s)] of every bar on the grid the audio holds whole:
+    each segment's downbeat phase, one bar every beats_per_bar beats across the
+    segment (half a beat either side, as gridBarsWithin), sorted; a bar that
+    starts inside the previous one (two segments overlapping) is dropped."""
+    bpb = grid["beats_per_bar"]
+    out = []
+    for s in grid["segments"]:
+        if s["downbeat_s"] is None:
+            continue
+        per = s["period_s"]
+        bar = per * bpb
+        lo = s["anchor_s"] - per / 2
+        hi = s["anchor_s"] + (s["beats"] - 1) * per + per / 2
+        j = math.ceil((lo - s["downbeat_s"]) / bar - 1e-9)
+        while True:
+            t = s["downbeat_s"] + j * bar
+            if t > hi:
+                break
+            if t >= 0 and t + bar <= duration_s + 1e-9:
+                out.append((t, per))
+            j += 1
+    out.sort()
+    kept = []
+    for t, per in out:
+        if kept and t < kept[-1][0] + kept[-1][1] * bpb - per / 2:
+            continue
+        kept.append((t, per))
+    return kept
+
+
+def _structure_runs(bars, bpb):
+    runs = []
+    for t, per in bars:
+        bar_us = int(round(per * bpb * 1e6))
+        if runs and runs[-1][1] == bar_us and abs(runs[-1][0] / 1000.0 + runs[-1][2] * bar_us / 1e6 - t) < 0.002:
+            runs[-1][2] += 1
+        else:
+            runs.append([int(round(t * 1000)), bar_us, 1])
+    return runs
+
+
+def _half_db(v):
+    return max(STRUCTURE_FLOOR_DB, math.floor(float(v) * 2 + 1e-9) / 2)
+
+
+def _structure_block(ss, np, seg, sr, a, bars, bpb):
+    """The per-bar sums of one block of bars, from `seg` = the samples from
+    index `a` (the block's bars plus STRUCTURE_MARGIN_S either side). Returns
+    (hits rows, bass, mid, high, level, kick) for `bars`, unreferenced."""
+    beat_idx = [[int((t + j * per) * sr) - a for j in range(bpb)] for t, per in bars]
+    spans = [(int(t * sr) - a, int((t + bpb * per) * sr) - a) for t, per in bars]
+
+    def butter(kind, f):
+        return ss.butter(4, f, kind, fs=sr, output="sos")
+
+    # Kick hits: the rise of the < 150 Hz envelope (2 ms mean of |x|) near
+    # each grid beat (barmeasure.py).
+    lo = ss.sosfilt(butter("lowpass", 150), seg)
+    np.abs(lo, out=lo)
+    n2 = max(1, int(round(0.002 * sr)))
+    env = ss.oaconvolve(lo, np.ones(n2) / n2, mode="same")
+    del lo
+    rise = np.diff(env, prepend=env[0])
+    del env
+    np.maximum(rise, 0, out=rise)
+    w = int(0.05 * sr)
+    hits = [[float(rise[max(0, c - w):c + w].max()) if c + w < len(rise) else 0.0 for c in row] for row in beat_idx]
+    del rise
+
+    # Bass between the kicks, per beat, then the bar's mean.
+    ba = ss.sosfilt(butter("bandpass", [40, 120]), seg)
+    ba *= ba
+    bass = []
+    for (t, per), (i0, _) in zip(bars, spans):
+        vals = []
+        for j in range(bpb):
+            s0, s1 = int((t + (j + 0.35) * per) * sr) - a, int((t + (j + 0.85) * per) * sr) - a
+            vals.append(float(ba[s0:s1].mean()) if s1 > s0 else 0.0)
+        bass.append(float(np.mean(vals)))
+    del ba
+
+    def bar_power(x):
+        x *= x
+        return [float(x[i0:i1].mean()) for i0, i1 in spans]
+
+    mid = bar_power(ss.sosfilt(butter("bandpass", [250, 4000]), seg))
+    high = bar_power(ss.sosfilt(butter("highpass", 4000), seg))
+    level = bar_power(seg.astype(np.float64))
+
+    # Kick level (kickstrength.py): < 100 Hz zero-phase low-pass, 30 ms RMS
+    # envelope, its peak in [beat - 20 ms, beat + 60 ms], the bar's median.
+    lo = ss.sosfiltfilt(butter("lowpass", 100), seg)
+    lo *= lo
+    n30 = int(0.03 * sr)
+    env = ss.oaconvolve(lo, np.ones(n30) / n30, mode="same")
+    del lo
+    np.maximum(env, 0, out=env)
+    np.sqrt(env, out=env)
+    w = int(0.06 * sr)
+    kick = [float(np.median([env[max(0, c - w // 3):c + w].max() if c + w < len(env) else 0.0 for c in row]))
+            for row in beat_idx]
+    return hits, bass, mid, high, level, kick
+
+
+# The filters run over blocks of about STRUCTURE_BLOCK_S of bars with
+# STRUCTURE_MARGIN_S of audio either side, never over the whole track at once:
+# a 30-minute file then needs the decode plus a few blocks' worth of float64,
+# not several float64 copies of the whole file (~1.7 GB measured). The margin
+# holds every filter's start-up and the zero-phase pass's edge: at 2 s the
+# 40-120 Hz band has rung down by far more than the 0.5 dB rounding, so each
+# bar reads as it does on the whole-track filter.
+STRUCTURE_BLOCK_S = 60.0
+STRUCTURE_MARGIN_S = 2.0
+
+
+def measure_structure(y, sr, grid):
+    """The `structure` data of mono samples `y` at `sr` on `grid`
+    (parse_structure_grid), or None when the audio holds no bar of it. Pure:
+    numpy + scipy only."""
+    import numpy as np
+    import scipy.signal as ss
+
+    y = np.asarray(y, dtype=np.float32)
+    duration_s = len(y) / sr
+    bars = structure_bars(grid, duration_s)
+    if not bars:
+        return None
+    bpb = grid["beats_per_bar"]
+    nb = len(bars)
+    hits, bass, mid, high, level, kick = [], [], [], [], [], []
+    i = 0
+    while i < nb:
+        g0 = bars[i][0]
+        j = i + 1
+        while j < nb and bars[j][0] + bars[j][1] * bpb - g0 <= STRUCTURE_BLOCK_S:
+            j += 1
+        g1 = bars[j - 1][0] + bars[j - 1][1] * bpb
+        a = max(0, int((g0 - STRUCTURE_MARGIN_S) * sr))
+        z = min(len(y), int((g1 + STRUCTURE_MARGIN_S) * sr) + 1)
+        parts = _structure_block(ss, np, y[a:z], sr, a, bars[i:j], bpb)
+        for acc, part in zip((hits, bass, mid, high, level, kick), parts):
+            acc.extend(part)
+        i = j
+    hits = np.asarray(hits, dtype=np.float64)
+
+    # Melody: -10*log10(spectral flatness) of the 250 Hz-4 kHz magnitudes.
+    n = STRUCTURE_FRAME
+    hann = np.hanning(n).astype(np.float32)
+    freqs = np.fft.rfftfreq(n, 1.0 / sr)
+    band = (freqs >= 250) & (freqs <= 4000)
+    starts = np.arange(0, max(0, len(y) - n + 1), STRUCTURE_HOP)
+    tonal = np.zeros(len(starts))
+    for k in range(0, len(starts), 256):
+        idx = starts[k:k + 256]
+        frames = np.stack([y[s:s + n] for s in idx]) * hann
+        mag = np.abs(np.fft.rfft(frames, axis=1))[:, band].astype(np.float64) + 1e-10
+        flat = np.exp(np.mean(np.log(mag), axis=1)) / np.mean(mag, axis=1)
+        tonal[k:k + len(idx)] = -10.0 * np.log10(np.clip(flat, 1e-12, 1.0))
+    centres = (starts + n / 2) / sr
+    melody = np.zeros(nb)
+    for i, (t, per) in enumerate(bars):
+        a, z = np.searchsorted(centres, [t, t + bpb * per])
+        melody[i] = float(tonal[a:z].mean()) if z > a else 0.0
+
+    def pct(x):
+        return float(np.percentile(x, STRUCTURE_REF_PERCENTILE)) if len(x) else 0.0
+
+    def power_db(x):
+        ref = max(pct(x), 1e-12)
+        return [_half_db(10 * math.log10(max(v, 1e-12) / ref)) for v in x]
+
+    ref_hit = pct(hits.ravel())
+    kicks = [int(sum(1 for h in row if h > 0 and h >= STRUCTURE_KICK_HIT_SHARE * ref_hit)) for row in hits]
+    ref_kick = max(pct(kick), 1e-9)
+    return {
+        "structure_version": STRUCTURE_VERSION,
+        "runs": _structure_runs(bars, bpb),
+        "kick": [_half_db(20 * math.log10(max(v, 1e-9) / ref_kick)) for v in kick],
+        "kicks": kicks,
+        "bass": power_db(bass),
+        "mid": power_db(mid),
+        "high": power_db(high),
+        "level": power_db(level),
+        "melody": [max(0.0, round(float(v) * 2) / 2) for v in melody],
+        "decoded_ms": int(round(duration_s * 1000)),
+    }
+
+
+def decode_structure(src):
+    """The whole of `src` as mono float32 at STRUCTURE_SR, at most one second
+    past STRUCTURE_MAX_SECONDS. Raises with ffmpeg's first real error line,
+    every URL cut to scheme + host."""
+    import numpy as np
+
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("ffmpeg not found")
+    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-threads", "1",
+           "-i", src, "-map", "0:a:0", "-vn", "-ac", "1", "-ar", str(STRUCTURE_SR),
+           "-t", f"{STRUCTURE_MAX_SECONDS + 1.0:.3f}", "-f", "f32le", "pipe:1"]
+    proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, timeout=WHOLE_FILE_TIMEOUT_S)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {ffmpeg_failure_reason(proc.stderr.decode('utf-8', 'replace'))}")
+    return np.frombuffer(proc.stdout, dtype=np.float32)
+
+
+def facet_structure(src, raw_grid):
+    """The `structure` facet over the whole track on the request's grid: ok +
+    the per-bar arrays, unmeasurable (no source, no grid, too long, no bar in
+    the audio), or failed (the decode; its reason names no credentials)."""
+    if not src:
+        return _unmeasurable("no-whole-file-source")
+    grid = parse_structure_grid(raw_grid)
+    if grid is None:
+        return _unmeasurable("no-grid")
+    if grid["decoded_s"] is not None and grid["decoded_s"] > STRUCTURE_MAX_SECONDS:
+        return _unmeasurable("too-long")
+    grid = structure_measure_grid(grid)
+    if grid is None:
+        return _unmeasurable("odd-meter")
+    try:
+        y = decode_structure(src)
+        if len(y) / STRUCTURE_SR > STRUCTURE_MAX_SECONDS:
+            return _unmeasurable("too-long")
+        data = measure_structure(y, STRUCTURE_SR, grid)
+        if data is None:
+            return _unmeasurable("no-bars")
+        return _ok(data)
+    except Exception as e:  # noqa: BLE001
+        return {"status": "failed", "reason": redact_urls(str(e))[:500]}
+
+
 # The vocal gate, split out of the detector so it's testable without torch /
 # demucs / real audio (scripts/vocal_gate_test.py). Takes the vocal-stem RMS
 # envelope and the FULL-MIX RMS envelope (same hop) and returns [{startMs,endMs}]
@@ -3471,6 +3830,9 @@ def facet_loudness(y_src, sr):
 # that says which stored versions are whole-file at all.
 WHOLE_FILE_LOUDNESS_VERSION = 2
 WHOLE_FILE_FACETS = ("loudness", "edges")
+# What the one-shot --whole-file lane answers: the whole-file facets and the
+# per-bar structure (its own decode; numpy/scipy, no librosa, no model).
+WHOLE_FILE_LANE_FACETS = WHOLE_FILE_FACETS + ("structure",)
 # Below the BS.1770 absolute gate nothing counts: ffmpeg prints -70 LUFS for
 # digital silence. Treated as "no loudness", like measure_loudness's -inf.
 _WHOLE_LOUDNESS_FLOOR_LUFS = -69.9
@@ -4362,7 +4724,7 @@ def analyze(
 # A request without `facets` keeps analyze()'s flat response, byte for byte.
 # ---------------------------------------------------------------------------
 
-FACET_NAMES = ("head", "loudness", "tail", "clap", "vocal", "stems", "edges", "grid")
+FACET_NAMES = ("head", "loudness", "tail", "clap", "vocal", "stems", "edges", "grid", "structure")
 
 
 class FacetRequestError(ValueError):
@@ -5202,7 +5564,7 @@ def parse_stems_windows(raw):
 
 
 def analyze_facets(librosa, source, facets, stems_dir=None, want_tail_vocals=False, stems_require_marker=False,
-                   whole_input=None, tail_window=None, stems_windows=None, source_size=None):
+                   whole_input=None, tail_window=None, stems_windows=None, source_size=None, structure_grid=None):
     """Compute exactly `facets` from an opened source. Each facet answers on
     its own: ok + data, unmeasurable + reason (this file can't give it at this
     version), unavailable + reason (this engine can't: no CLAP / no Demucs), or
@@ -5437,6 +5799,9 @@ def analyze_facets(librosa, source, facets, stems_dir=None, want_tail_vocals=Fal
     # loudness v2 (its own decode, mono at 22,050 Hz, for the model).
     if "grid" in wanted:
         out["grid"] = facet_grid(whole_input)
+    # So does the per-bar structure, on the grid the controller sent.
+    if "structure" in wanted:
+        out["structure"] = facet_structure(whole_input, structure_grid)
 
     return {name: out[name] for name in FACET_NAMES if name in out}
 
@@ -5482,16 +5847,20 @@ def analyze_facet_request(librosa, req):
     # The whole-file facets stream the music server's URL (or read a local
     # copy known to be complete); `stream_url` rides along with a path request.
     whole_input = whole_file_input(req.get("path"), req.get("complete"), req.get("stream_url") or req.get("url"))
-    if all(f in WHOLE_FILE_FACETS or f == "grid" for f in facets):
+    if all(f in WHOLE_FILE_LANE_FACETS or f == "grid" for f in facets):
         # Nothing here needs the capped download the window facets decode:
         # fetching it would read up to ANALYZE_MAX_BYTES for no use. The grid
         # streams the whole file too (its own mono decode, for the model); it
         # never reaches the one-shot --whole-file lane, which holds no model.
+        # The structure does, on the grid the request carries.
         result = whole_file_facets(whole_input, facets)
         if "grid" in facets:
             result["grid"] = facet_grid(whole_input)
+        if "structure" in facets:
+            result["structure"] = facet_structure(whole_input, req.get("structure_grid"))
         edges = result.get("edges") or {}
-        dur_ms = (edges.get("data") or {}).get("decoded_duration_ms")
+        dur_ms = (edges.get("data") or {}).get("decoded_duration_ms") or \
+            ((result.get("structure") or {}).get("data") or {}).get("decoded_ms")
         return {
             "facets": {name: result[name] for name in FACET_NAMES if name in result},
             "source": {"kind": "whole-file", "duration_s": round(dur_ms / 1000.0, 3) if dur_ms else None,
@@ -5507,6 +5876,7 @@ def analyze_facet_request(librosa, req):
             tail_window=req.get("tail_window"),
             stems_windows=parse_stems_windows(req.get("stems_windows")),
             source_size=req.get("source_size"),
+            structure_grid=req.get("structure_grid"),
         )
         described = source.describe()
         if fallback:
@@ -5524,8 +5894,8 @@ def whole_file_once(stream_in, stream_out):
     try:
         req = json.loads(stream_in.readline() or "{}")
         facets = parse_facets(req.get("facets"))
-        if not all(f in WHOLE_FILE_FACETS for f in facets):
-            raise FacetRequestError(f"--whole-file serves only the whole-file facets ({', '.join(WHOLE_FILE_FACETS)})")
+        if not all(f in WHOLE_FILE_LANE_FACETS for f in facets):
+            raise FacetRequestError(f"--whole-file serves only the whole-file facets ({', '.join(WHOLE_FILE_LANE_FACETS)})")
         out = {"ok": True, **analyze_facet_request(None, req)}
     except Exception as e:  # noqa: BLE001 — reported, never a traceback
         out = {"ok": False, "error": redact_urls(str(e))[:500]}
@@ -5609,6 +5979,9 @@ def main():
         # installed, not yet loaded: a failed load rides back as
         # capability_loss()["beat_grid"]. Older workers never emit the key.
         "grid_capable": grid_capable() and shutil.which("ffmpeg") is not None,
+        # The per-bar structure (numpy + scipy + ffmpeg, no model). Older
+        # workers never emit the key; the controller plans it only on true.
+        "structure_capable": structure_capable(),
         # Version signal: tail answers carry the short-term loudness curve
         # (tail v3). Older workers never emit the key; the controller re-plans
         # a placed tail stored without a curve only on `=== true`.

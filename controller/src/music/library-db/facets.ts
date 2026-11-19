@@ -18,6 +18,8 @@
 //   vocal     vocal_ranges_json (+ the outro's tail vocal ranges)
 //   stems     stems_at (the stem-cache attempt stamp)
 //   edges     edge_lead_ms, edge_tail_ms, decoded_duration_ms
+//   structure per-bar kick/bass/mid/high/melody on the beat grid (opt-in,
+//             its own table: library-db/structure.ts)
 //   year      original_year from MusicBrainz, for era-suspect tracks only. Not
 //             an analyzer facet: no audio, one MusicBrainz lookup per track
 //             (music/original-year-policy.ts). A trusted year needs no lookup
@@ -46,8 +48,11 @@ import { YEAR_MAX_ATTEMPTS, yearRetryDue } from '../original-year-policy.js';
 import { eraSuspectSql } from '../era-suspect.js';
 import { parseLoudnessCurve } from '../loudness-curve.js';
 import { GRID_FACET_VERSION, GRID_SOURCE_SELECT, ensureGridTable, type GridStatus } from './grid.js';
+import {
+  STRUCTURE_FACET_VERSION, STRUCTURE_SOURCE_SELECT, deriveStructureRow, ensureStructureTable, type StructureSourceRow,
+} from './structure.js';
 
-export const FACETS = ['head', 'loudness', 'tail', 'clap', 'vocal', 'stems', 'edges', 'grid', 'year'] as const;
+export const FACETS = ['head', 'loudness', 'tail', 'clap', 'vocal', 'stems', 'edges', 'grid', 'structure', 'year'] as const;
 export type Facet = (typeof FACETS)[number];
 // The facets the audio analyzer produces. An analysis failure (analyze_fail_count,
 // analyze_error) counts against these only: it says nothing about a MusicBrainz
@@ -61,8 +66,9 @@ export function isAnalysisFacet(f: Facet): f is AnalysisFacet {
 // failure history (library-db/grid.ts): never planned by a regular run, never
 // given the track's shared analysis failure count, never counted as a library
 // problem when unmeasurable. The whole-track beat grid is one (heavy analyzer
-// only; a track with no steady pulse has none, and that is no fault).
-export const OPT_IN_FACETS: readonly Facet[] = ['grid'];
+// only; a track with no steady pulse has none, and that is no fault), and so is
+// the per-bar structure measured on it (library-db/structure.ts).
+export const OPT_IN_FACETS: readonly Facet[] = ['grid', 'structure'];
 export function isOptInFacet(f: Facet): boolean {
   return OPT_IN_FACETS.includes(f);
 }
@@ -84,6 +90,9 @@ export type FacetStatus = 'ok' | 'unmeasurable' | 'failed';
 // from the same whole-file decode.
 // grid = the whole-track beat grid (Beat This!, library-db/grid.ts); its
 // version is the analyzer's GRID_VERSION, read off its own table.
+// structure = the per-bar structure on that grid (library-db/structure.ts); its
+// version is the analyzer's STRUCTURE_VERSION, one below when the grid it was
+// measured on has been re-measured since.
 // tail v3 = a placed window (v2) whose outro carries the short-term loudness
 // curve the audible-end cut of a fade reads (music/loudness-curve.ts); v2 = a
 // window ending where the music stops (placed from the stored edges), without
@@ -99,6 +108,7 @@ export const FACET_VERSIONS: Readonly<Record<Facet, number>> = {
   stems: 1,
   edges: 1,
   grid: GRID_FACET_VERSION,
+  structure: STRUCTURE_FACET_VERSION,
   year: 1,
 };
 
@@ -201,6 +211,11 @@ export function placedTailMovedBy(
 
 // The facets read off one whole-file decode rather than the analysis windows.
 export const WHOLE_FILE_FACETS: readonly Facet[] = ['loudness', 'edges'];
+// What the analyzer's one-shot whole-file lane answers (no librosa, no model):
+// the whole-file facets and the opt-in structure, which decodes the whole
+// file too. Only the routing reads this (analyze.ts: no staged copy, the wide
+// concurrency); the automatic whole-file backfill plans WHOLE_FILE_FACETS.
+export const WHOLE_FILE_LANE_FACETS: readonly Facet[] = [...WHOLE_FILE_FACETS, 'structure'];
 
 // THE rule for "are this track's loudness figures the whole-file measurement",
 // which nothing measuring less may overwrite. From this loudness_version up,
@@ -228,7 +243,7 @@ export type FacetSource = 'seed' | 'full' | 'capped' | 'unknown' | 'url' | 'anal
 
 // What a facet status is derived from: the `tracks` columns, reduced to flags
 // in SQL (FACET_SOURCE_SELECT) so the seed never loads the JSON payloads.
-export interface FacetSourceRow {
+export interface FacetSourceRow extends StructureSourceRow {
   analysis_version: number | null;
   has_loudness: number;      // loudness_lufs IS NOT NULL
   has_tail_silence: number;  // tail_silence_ms IS NOT NULL
@@ -272,7 +287,8 @@ export const FACET_SOURCE_SELECT =
    original_year IS NOT NULL                          AS has_original_year,
    original_year_source,
    original_year_checked_at IS NOT NULL               AS year_checked,
-   ${GRID_SOURCE_SELECT}`;
+   ${GRID_SOURCE_SELECT},
+   ${STRUCTURE_SOURCE_SELECT}`;
 
 export interface DerivedFacet {
   facet: Facet;
@@ -379,6 +395,11 @@ export function deriveFacetRows(
       reason: row.grid_reason ?? null, attempts: row.grid_attempts ?? 0, measuredVersion: true,
     });
   }
+
+  // The structure's state is its own table's, read against the grid it needs
+  // (structure.ts deriveStructureRow): never the track's failure count.
+  const structure = deriveStructureRow(row);
+  if (structure) out.push({ facet: 'structure', ...structure, measuredVersion: true });
 
   // Year. Its rows never take the analysis failure count.
   if (!row.year_suspect) {
@@ -604,8 +625,10 @@ export function facetDerivationStamp(): string {
   // (`no-curve`, one version below): the stations that ran the pass early.
   // Revision 7 marks a placed tail without its loudness curve `no-curve`
   // (upstream's own revision 6, which a fork station had already passed).
-  // Adding a facet (year, grid) changes FACET_VERSIONS, which re-derives on its
-  // own; with no grid stored yet that re-derive leaves every row as it was.
+  // Adding a facet (year, grid, structure) changes FACET_VERSIONS, which
+  // re-derives on its own; with no grid stored yet that re-derive leaves every
+  // row as it was (a stored grid without trusted bars gains a settled
+  // `structure / no-bars` row).
   return JSON.stringify({ revision: 7, analysis: ANALYSIS_VERSION, facets: FACET_VERSIONS });
 }
 
@@ -629,6 +652,7 @@ export function resyncAllFacets(d: Database.Database): number {
   d.transaction(() => {
     d.prepare('DELETE FROM track_facet_status WHERE track_id NOT IN (SELECT id FROM tracks)').run();
     d.prepare('DELETE FROM track_grid WHERE track_id NOT IN (SELECT id FROM tracks)').run();
+    d.prepare('DELETE FROM track_structure WHERE track_id NOT IN (SELECT id FROM tracks)').run();
     const ids = (d.prepare('SELECT id FROM tracks').all() as Array<{ id: string }>).map(r => r.id);
     for (const id of ids) {
       syncTrackFacetsOn(d, id, { rederive: true });
@@ -646,6 +670,7 @@ export function resyncAllFacets(d: Database.Database): number {
 export function ensureFacetStatus(d: Database.Database): number {
   // FACET_SOURCE_SELECT reads it, so it exists before any derivation.
   ensureGridTable(d);
+  ensureStructureTable(d);
   d.exec(`CREATE TABLE IF NOT EXISTS track_facet_meta (
     pk    INTEGER PRIMARY KEY CHECK (pk = 1),
     stamp TEXT NOT NULL
@@ -798,11 +823,15 @@ export function facetNeedsIds(facet: Facet, limit?: number): string[] {
   if (facet === 'year') return yearLookupDueIds(Date.now(), limit);
   if (isOptInFacet(facet)) {
     // Its own attempts, never the track's analysis failure count (grid.ts).
+    // The structure is measured on a grid: a track without one is not due
+    // (the planner's `no-grid`); one whose bars are not trusted has a
+    // settled no-bars row.
+    const needsGrid = facet === 'structure' ? 'AND EXISTS (SELECT 1 FROM track_grid g WHERE g.track_id = t.id)' : '';
     const sql =
       `SELECT t.id FROM tracks t
          LEFT JOIN track_facet_status s ON s.track_id = t.id AND s.facet = ?
         WHERE (s.track_id IS NULL OR s.version < ? OR s.status = 'failed')
-          AND COALESCE(s.attempts, 0) < ${MAX_ANALYSIS_FAILURES}
+          AND COALESCE(s.attempts, 0) < ${MAX_ANALYSIS_FAILURES} ${needsGrid}
         ORDER BY t.id` + (limit && limit > 0 ? ` LIMIT ${Math.floor(limit)}` : '');
     return (requireDb().prepare(sql).all(facet, FACET_VERSIONS[facet]) as Array<{ id: string }>).map(r => r.id);
   }
@@ -883,7 +912,8 @@ export function facetCounts(): FacetCount[] {
       failed: r.failed ?? 0,
       missing,
       outdated: r.outdated ?? 0,
-      needs: missing + (r.dueRows ?? 0),
+      // A track without a grid has no structure to measure: not due.
+      needs: facet === 'structure' ? facetNeedsIds('structure').length : missing + (r.dueRows ?? 0),
     };
   });
 }

@@ -5,6 +5,7 @@
 import { requireDb } from './handle.js';
 import { WHOLE_FILE_LOUDNESS_EXTRAS, moveFacetRows, syncTrackFacets } from './facets.js';
 import { moveGridRow } from './grid.js';
+import { moveStructureRow } from './structure.js';
 import { touchGenreInputs } from './genre-inputs.js';
 import { canonicalId } from '../id-canonical.js';
 import { SEARCH_KEY_DDL } from './search-keys.js';
@@ -285,6 +286,7 @@ export function adoptRotatedIds(liveIds: ReadonlySet<string>): AdoptionResult {
       // Facet rows follow the merged columns: carry the old id's rows where the
       // new id has none, then re-derive from what the carry left on the row.
       moveGridRow(d, old, neu);
+      moveStructureRow(d, old, neu);
       moveFacetRows(old, neu);
       syncTrackFacets(neu);
       applied.push([old, neu]);

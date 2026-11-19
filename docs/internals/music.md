@@ -886,6 +886,54 @@ moved the tempo word of 16 %. Pinned by `scripts/grid-apply.test.ts`,
 `scripts/grid-report.test.ts`, `scripts/grid-facet.test.ts` and
 `scripts/analyzer_grid_test.py`.
 
+**The per-bar structure (`structure` facet, opt-in; nothing on air reads it
+yet).** It is groundwork for a DJ transition recipe: the outgoing track leaves
+after its last hard kick plus N bars, and the incoming one enters N bars before
+its first hard kick, with its bass punched in on that kick. A later step wires
+it into the transitions. `npm run analyze -- --facets structure [--ids-file f]`
+measures each bar of the track's own beat grid. The controller sends the grid
+in the request, so the worker never reads the library. Only a grid whose bars
+`grid-policy.ts` trusts is used (`gridDecision().bars`: the BPM gate plus a
+downbeat agreement of at least 0.75). A track with a grid that fails this
+settles as `unmeasurable / no-bars`, is never sent, and becomes due again once
+a re-measured grid gains its bars. A track with no grid is not due at all (the
+planner reports it as `no-grid`). A re-measured grid makes a stored row
+outdated, because `grid_at` records which grid the row was measured on. The
+work runs in the one-shot whole-file lane (`analyze_worker.facet_structure`):
+one ffmpeg decode to mono 22,050 Hz, then scipy Butterworth filters run block
+by block (about 70 MB for a 30-minute file), with no librosa and no model.
+Files over 30 minutes are `unmeasurable / too-long`. Bars are always four
+beats (the rules' 8-bar phrases): a grid read as 2 beats per bar (about 10 % of
+the grids with trusted bars) is measured in four-beat bars from its own
+downbeat, any other meter is `unmeasurable / odd-meter` without a decode, and
+a grid segment whose tempo is more than 4 % off the track's main tempo (the
+tempo covering the most time) is not counted. It is planned only on
+`analyze_structure_capable === true`, and never in a regular run or an
+automatic backfill. `track_structure` stores compact arrays per bar, in dB
+against the track's 90th-percentile bar and floored to the 0.5 dB step (rounding
+to the nearest step moved threshold decisions on 18 of 98 prototype tracks):
+- `kick`: the < 100 Hz zero-phase envelope peak at the beats, as a median;
+- `kicks`: the number of beats with a < 150 Hz hit;
+- `bass`: 40–120 Hz between the kicks;
+- `mid`: 250 Hz–4 kHz;
+- `high`: above 4 kHz;
+- `level`: the whole band (a bar under -35 dB is silent);
+- `melody`: the mean of −10·log10 of the spectral flatness of the 250 Hz–4 kHz
+  magnitude spectrum, in 4096-sample frames. 0 dB means noise; higher means
+  clearer pitched lines.
+
+`runs` (`[startMs, barUs, count]`) map the bars to seconds. The rules live in
+`music/structure-policy.ts`. A full bar has a kick ≥ −4 dB, bass > −12 dB, mids
+≥ −5.5 dB and a kick on at least 3 beats; a lone gap between two full bars is
+tolerated. The full section starts with the first run of 16 or more full bars.
+The first hard kick sits where the kick returns after the last dip of 4 or more
+bars in the 24 bars before that run, and the last hard kick is the end of the
+last run. These rules, ported from the prototype the operator validated by ear,
+produce no stored value, so changing a rule re-reads nothing. `npm run
+structure-report -- [--ids-file f] [--json]` prints them per track. Pinned by
+`scripts/structure-policy.test.ts`, `scripts/structure-facet.test.ts` and
+`scripts/analyzer_structure_test.py`.
+
 **Tail v3 adds the tail's short-term loudness curve, and a fade can be cut at
 its AUDIBLE end** (`transitions.fadeAudibleEnd`, off by default, and
 `transitions.fadeAudibleEndDb`, 15–35, default 20). The silence trim's absolute

@@ -28,9 +28,19 @@ import { probeListenerCount } from '../broadcast/listeners.js';
 import { sweepKeepLastFromDisk } from '../broadcast/pick-stems.js';
 import { planAcoustics, type AcousticsPlan, type WorkRequest } from './acoustics-plan.js';
 
-// The beat grid failed and nothing else was asked of the track: a failure for
-// the pass's systemic guard like any other, stamped on the grid row alone.
-class GridFailure extends Error {}
+// An opt-in facet (the beat grid, the structure) failed and nothing else was
+// asked of the track: a failure for the pass's systemic guard like any other,
+// stamped on that facet's own row alone (each carries its reason, and the
+// structure the grid it was asked on).
+type OptInFailures = { grid?: string; structure?: { reason: string; gridAt: string } };
+class OptInFailure extends Error {
+  constructor(readonly failed: OptInFailures) {
+    super([
+      ...(failed.grid != null ? [failed.grid] : []),
+      ...(failed.structure ? [failed.structure.reason] : []),
+    ].join('; '));
+  }
+}
 import { leadIds, planRegularRun, regularRunFacets } from './regular-run-plan.js';
 
 // Status events for the panel, mirrored to the `[analyze] …` console line.
@@ -672,12 +682,14 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
   let consecutiveFailures = 0;
   // Failure stamps held back until the pass proves it may hand them out: a
   // success flushes the buffer, the systemic guard tripping discards it.
-  let pendingFailureStamps: Array<{ id: string; reason: string; grid?: boolean }> = [];
+  let pendingFailureStamps: Array<{ id: string; reason: string; optIn?: OptInFailures }> = [];
   const flushFailureStamps = () => {
     for (const f of pendingFailureStamps) {
       try {
-        if (f.grid) db.writeGridResult(f.id, { failed: f.reason });
-        else db.recordAnalysisFailure(f.id, f.reason);
+        if (f.optIn) {
+          if (f.optIn.grid != null) db.writeGridResult(f.id, { failed: f.optIn.grid });
+          if (f.optIn.structure) db.writeStructureResult(f.id, { failed: f.optIn.structure.reason }, f.optIn.structure.gridAt);
+        } else db.recordAnalysisFailure(f.id, f.reason);
       } catch (stampErr: any) {
         // Never let bookkeeping end the pass.
         console.error(`[analyze] ${f.id} failure stamp failed: ${stampErr?.message || stampErr}`);
@@ -711,15 +723,16 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
   // planned for the whole-file facets alone is streamed whole by the analyzer:
   // neither has a capped download to stage (up to ANALYZE_MAX_BYTES read for
   // nothing).
+  // The structure decodes the whole file in the same lane (no model).
   const wholeFileOnly = (songId: string) => {
     const f = useFacets ? plannedFacets.get(songId) : undefined;
-    return !!f && f.length > 0 && f.every((x) => db.WHOLE_FILE_FACETS.includes(x));
+    return !!f && f.length > 0 && f.every((x) => db.WHOLE_FILE_LANE_FACETS.includes(x));
   };
   // The beat grid streams the whole file too, but holds a model: never the
   // whole-file lane, and never a staged copy either.
   const streamsWholeOnly = (songId: string) => {
     const f = useFacets ? plannedFacets.get(songId) : undefined;
-    return !!f && f.length > 0 && f.every((x) => db.WHOLE_FILE_FACETS.includes(x) || x === 'grid');
+    return !!f && f.length > 0 && f.every((x) => db.WHOLE_FILE_LANE_FACETS.includes(x) || x === 'grid');
   };
   const prefetch = (songId: string): Prefetch =>
     isRanged(songId) || streamsWholeOnly(songId)
@@ -778,13 +791,17 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
     const wantsVocal = facets.includes('vocal');
     const tailVocals = facets.includes('tail') && !wantsVocal && vocalBackfill;
     const lyricVocal = await lyricVocalFor(id, wantsVocal || tailVocals);
+    // The structure is measured on the track's trusted-bars grid, read now and
+    // sent with the request; a grid that lost its bars since the plan was made
+    // is not asked about (its row reads no-bars already).
+    const structureGrid = facets.includes('structure') ? db.structureGridOf(db.getGrid(id)) : null;
     const requestedFacets = facets.filter(f =>
-      !(f === 'vocal' && lyricVocal) && !(f === 'stems' && !stems_dir));
+      !(f === 'vocal' && lyricVocal) && !(f === 'stems' && !stems_dir) && !(f === 'structure' && !structureGrid));
     const res = requestedFacets.length ? await analyzer.analyzeFacets(
       id,
       {
         facets: requestedFacets, ranged, tailVocals: tailVocals && !lyricVocal, stems_dir, complete: localComplete,
-        tailWindow,
+        tailWindow, structureGrid,
       },
       ranged ? undefined : (localPath ?? undefined),
     ) : null;
@@ -811,9 +828,18 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
     // The grid's answer is written on its own (writeGridResult): its failure
     // is never the track's analysis failure (library-db/grid.ts).
     let gridResult: db.GridResult | null = null;
+    // The structure's the same way (writeStructureResult).
+    let structureResult: db.StructureResult | null = null;
     for (const f of requestedFacets) {
       const a = res?.facets[f];
       if (!a) continue;
+      if (f === 'structure') {
+        if (a.status === 'unavailable') continue;
+        if (a.status === 'failed') structureResult = { failed: a.reason ?? 'failed' };
+        else if (a.status === 'unmeasurable') structureResult = { unmeasurable: a.reason ?? 'not-measured', version: db.STRUCTURE_FACET_VERSION };
+        else structureResult = a.structure ? { structure: a.structure } : { failed: 'malformed structure answer' };
+        continue;
+      }
       if (f === 'grid') {
         if (a.status === 'unavailable') continue;
         if (a.status === 'failed') gridResult = { failed: a.reason ?? 'failed' };
@@ -899,28 +925,41 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
       }
     }
     const answered = facets.filter((f) => {
-      if (f === 'grid') return false;
+      if (f === 'grid' || f === 'structure') return false;
       if (f === 'vocal' && lyricVocal) return true;
       if (missed.has(f)) return false;
       const a = res?.facets[f];
       return a && a.status !== 'failed' && a.status !== 'unavailable';
     });
     const gridAnswered = gridResult != null && !('failed' in gridResult);
+    const structureAnswered = structureResult != null && !('failed' in structureResult);
+    const writeStructure = (r: db.StructureResult) => db.writeStructureResult(id, r, structureGrid!.gridAt, source);
     // Nothing usable came back: fail the track like a flat analysis would, so
-    // the pass's systemic-failure guard sees it. A grid that failed alone is
-    // a GridFailure: it counts for that guard, and is stamped on the grid row
-    // only (flushFailureStamps), never on the track's analysis failures.
+    // the pass's systemic-failure guard sees it. An opt-in facet (grid,
+    // structure) that failed alone is an OptInFailure: it counts for that
+    // guard, and is stamped on its own row only (flushFailureStamps), never on
+    // the track's analysis failures.
     if (failures.length > 0 && answered.length === 0) {
-      // A grid that did answer is kept; the other facets' failure still goes
-      // through the guard as the track's own.
+      // An opt-in facet that did answer is kept; the other facets' failure
+      // still goes through the guard as the track's own.
       if (gridAnswered) db.writeGridResult(id, gridResult!, source);
-      throw new Error([...failures, ...(gridResult && 'failed' in gridResult ? [db.facetFailure('grid', gridResult.failed)] : [])].join('; '));
+      if (structureAnswered) writeStructure(structureResult!);
+      throw new Error([
+        ...failures,
+        ...(gridResult && 'failed' in gridResult ? [db.facetFailure('grid', gridResult.failed)] : []),
+        ...(structureResult && 'failed' in structureResult ? [db.facetFailure('structure', structureResult.failed)] : []),
+      ].join('; '));
     }
-    if (answered.length === 0 && !gridAnswered) {
-      if (gridResult && 'failed' in gridResult) throw new GridFailure(gridResult.failed);
+    if (answered.length === 0 && !gridAnswered && !structureAnswered) {
+      const optIn: OptInFailures = {
+        ...(gridResult && 'failed' in gridResult ? { grid: gridResult.failed } : {}),
+        ...(structureResult && 'failed' in structureResult ? { structure: { reason: structureResult.failed, gridAt: structureGrid!.gridAt } } : {}),
+      };
+      if (optIn.grid != null || optIn.structure) throw new OptInFailure(optIn);
       return { kind: 'skipped' };
     }
     if (gridResult) db.writeGridResult(id, gridResult, source);
+    if (structureResult) writeStructure(structureResult);
     if (answered.length === 0) return { kind: 'analyzed', audioEmbedded: false, vocalAnalyzed: false };
     if (failures.length > 0) w.failed = failures.join('; ');
     if (wroteClap && !audioMetaStamped) {
@@ -1092,7 +1131,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
       const reason = String(err?.message || err);
       console.error(`[analyze] ${id} failed: ${reason}`);
       if (failureCountsAgainstTrack(consecutiveFailures)) {
-        pendingFailureStamps.push({ id, reason, ...(err instanceof GridFailure ? { grid: true } : {}) });
+        pendingFailureStamps.push({ id, reason, ...(err instanceof OptInFailure ? { optIn: err.failed } : {}) });
       } else if (consecutiveFailures === SYSTEMIC_FAILURE_RUN + 1) {
         logEvent(
           'warning',

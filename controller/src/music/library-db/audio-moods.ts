@@ -23,6 +23,7 @@ import {
 } from './tracks.js';
 import { deleteFacetRows } from './facets.js';
 import { deleteGridRow } from './grid.js';
+import { deleteStructureRow } from './structure.js';
 import { touchGenreInputs } from './genre-inputs.js';
 
 // Phase one of a calibrated pass: raw cosines only, since the per-mood
@@ -332,6 +333,7 @@ export function pruneMissingTracks(liveIds: ReadonlySet<string>): number {
       delAudioVec.run(id);
       deleteFacetRows(id);
       deleteGridRow(d, id);
+      deleteStructureRow(d, id);
     }
     touchGenreInputs(d);
   });
