@@ -2089,7 +2089,14 @@ class Queue {
       let why = placed.ok ? '' : placed.reason;
       if (placed.ok) {
         const w = placed.window;
-        const v = hotMixSeam.planHotMixSeam({ ...seamInput, window: { aStartSec: w.aStartSec, bEntrySec: w.bEntrySec } });
+        // The window's own length: the incoming intro may hold fewer bars
+        // than the show asks, and the kick lands on the cut only when the
+        // overlap is exactly the bars the window counted back.
+        const v = hotMixSeam.planHotMixSeam({
+          ...seamInput,
+          overlapBeats: w.bars * 4,
+          window: { aStartSec: w.aStartSec, bEntrySec: w.bEntrySec },
+        });
         if (v.ok) {
           verdict = v;
           phrase = { window: w, lastKick: placed.lastKick };

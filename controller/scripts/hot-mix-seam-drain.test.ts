@@ -283,6 +283,22 @@ test('phrase mix on, sixteen bars: B enters 16 bars before its kick, a 64-beat o
   assert.match(logText(), /\+16 bars, in at bar 49, first hard kick bar 65 at \+32s/);
 });
 
+test('phrase mix on, an intro shorter than the show asks: the overlap is the window\'s, the kick on the cut', async () => {
+  await onAir({ enabled: true, phraseMix: true, phraseBars: 16 });
+  // A 12-bar intro (first hard kick on bar 13) holds one 8-bar phrase, not 16.
+  const S = track('in-short-123', 123, 200);
+  structure('in-short-123', 200, B_BAR_US, 150, 13, 140);
+  const { item, successor } = pairOf(A, S);
+  await plan(item, successor);
+  assert.ok(item.mixOut && successor.mixIn, logText());
+  assert.ok(Math.abs(successor.mixIn.inCueSec - bBarSec(5)) < 1e-3, `${successor.mixIn.inCueSec}`);
+  // Eight bars of A: the overlap and A's cut follow the window, not the show's 16.
+  assert.ok(Math.abs(item.mixOut.leadSec - 16) < 1e-3, `${item.mixOut.leadSec}`);
+  assert.ok(Math.abs(item.mixOut.outCueSec - (0.5 + 108 * 2)) < 1e-3, `${item.mixOut.outCueSec}`);
+  assert.equal(successor.mixIn.punchSec, item.mixOut.leadSec);
+  assert.match(logText(), /\+8 bars, in at bar 5, first hard kick bar 13 at \+16s/);
+});
+
 test('phrase mix on, no structure on the incoming track: one booth line, then the seam as before', async () => {
   await onAir({ enabled: true, phraseMix: true });
   const { item, successor } = pairOf(A, Z);
