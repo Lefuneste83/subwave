@@ -42,7 +42,7 @@ test('the phrase length reaches the wire as a number, and the phrase mix rides t
   (show.hotMix as { phraseBars: unknown }).phraseBars = '24';
   const payload = showPayload(show);
   assert.equal(payload.hotMix.phraseBars, 24);
-  assert.equal(payload.hotMix.phraseMix, true, 'no control edits it yet, and a save must not drop it');
+  assert.equal(payload.hotMix.phraseMix, true, 'a save keeps it');
   assert.equal(schema.parse(payload).hotMix.phraseBars, 24);
   // A stored length off the list reads as 8, as the controller's load does.
   assert.equal(fromDisk({ enabled: true, phraseBars: 12 }).hotMix.phraseBars, 8);
