@@ -27,9 +27,9 @@
 // does, but never back into the bars where its full section starts, nor before
 // its own cue-in. The incoming side never enters before its silence trim.
 //
-// The bass move the recipe goes with (the outgoing track ridden down over the
-// transition, the incoming one's bass held off until a punch on its first hard
-// kick) is mixer work for a later step: this only says where the bars are.
+// The bass move the recipe goes with (the incoming bass held at its pot's
+// minimum until it swaps in on its first hard kick, music/bass-pot-policy.ts)
+// is the mixer's work: this only says where the bars are.
 import { barStartMs, PHRASE_BARS, type StructurePoints } from './structure-policy.js';
 
 type Runs = ReadonlyArray<readonly [number, number, number]>;

@@ -2,12 +2,13 @@
 // cannot be beat-matched (a tempo gap past twice the step, no trusted grid,
 // no downbeat near the incoming start, a coast track whose successor is not
 // known). Two unsynced kicks overlapping is the one thing the show must never
-// air, so the overlap carries no outgoing bass: the outgoing track's bass is
-// ridden out over the two bars before one of its bar lines, the incoming track
-// enters at full on its first downbeat AT that bar line, and the outgoing
-// highs fade over one bar after it. Chosen by the operator's blind set 5 (mix-
-// design §2m): acceptable on all three pairs, against 2 for an echo out, 1 for
-// a quick cut and 1 for the plain crossfade as it aired.
+// air, so the overlap carries no outgoing bass: the outgoing track plays on to
+// one of its bar lines, its bass pot goes to its minimum in 140 ms just
+// before the incoming track enters at full on its first downbeat AT that bar
+// line, and the outgoing highs fade over one bar after it. Chosen by the
+// operator's blind set 5 (mix-design §2m): acceptable on all three pairs,
+// against 2 for an echo out, 1 for a quick cut and 1 for the plain crossfade
+// as it aired; the pot's single cut then replaced a two-bar bass ride (§2o).
 //
 // Times are file seconds, which are output seconds at a track's end: the safe
 // transition stretches nothing, and a track mixed in has glided back to its
@@ -24,7 +25,8 @@ import type { GridSegment } from './library-db/grid.js';
 export const PRE_ROLL_SEC = 0.1;
 // No grid and no usable tempo tag: a bar of 120 BPM.
 export const FALLBACK_BAR_SEC = 2;
-// The outgoing bass ride, in bars before the bar line.
+// The bars buffered before the bar line: once the bass ride, now the outgoing
+// track played on before its pot's cut. The mixer's buffer counts them.
 export const RIDE_BARS = 2;
 
 export interface SafeSide {

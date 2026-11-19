@@ -807,26 +807,33 @@ def equal_power_fade(~span, ~rising, s) =
   amplify(override=null, gain, s)
 end
 
-# HOT MIX BASS MOVE (the phrase mix, music/phrase-mix-policy.ts): a track's
-# bass below BASS_SPLIT_HZ taken out by `gain` (1 = the track untouched, 0 =
-# its bass gone). The bass-off path is a Linkwitz-Riley high-pass (two cascaded
-# 2nd-order Butterworths: -24 dB an octave under the split, the band above
-# untouched), and the move CROSSFADES the dry track into it rather than
-# subtracting a low band from the dry one: dry minus a phase-shifted low-pass
-# is no high-pass (+3.5 dB at the split, 6 dB an octave below it), while at
-# gain 1 this is the dry source sample for sample, which the incoming side
-# must be before `cross` hands it back unprocessed (the branch vanishes at the
-# d boundary). Measured on 2.4.6 (60 + 1000 Hz tones): 60 Hz -24.6 dB, 1 kHz
-# unchanged. 120 Hz is the split the operator's blind tests were rendered at.
-# override=null on both amplifies, as everywhere in dj_transition.
-bass_split_hz = 120.
-def bass_cut(~gain, s) =
-  high = filter.iir.butterworth.high(frequency=bass_split_hz, order=2,
-    filter.iir.butterworth.high(frequency=bass_split_hz, order=2, s))
-  add(normalize=false, [
-    amplify(override=null, fun () -> gain(), s),
-    amplify(override=null, fun () -> 1. - gain(), high)
-  ])
+# DESK BASS POT (the Hot Mix bass move and the safe transition). A DJ manages
+# bass with each channel's low EQ pot, between its minimum and 0, while the
+# crossfader sets the tracks' RELATIVE level, and two tracks with significant
+# bass never play at once (two basslines at partial level beat against each
+# other: the pumping the operator hears on radio, which a club room hides).
+# The pot mimics a Pioneer DJM low EQ (70 Hz, -26 dB at minimum): two cascaded
+# first-order low shelves, each s - (1 - g) * lowpass1(s), a true shelf with no
+# dip anywhere (monotonic). Its minimum, bass_pot_min, is the shelf at -26 dB;
+# what that takes away is s - bass_pot_min(s); the pot adds `level` (0..1) of it
+# back, so 1 is the track (to float rounding) and 0 the desk's minimum. Never
+# the dry track blended with its own high-pass: that digs a notch that sweeps
+# through the bass as the blend moves (-46 dB at 120 Hz a third of the way,
+# heard as a wobble on every kick), and was the old bass_cut. The operator's
+# filter test chose this shelf (and found a 180 Hz one cut too much). Every
+# amplify passes override=null, as everywhere in dj_transition.
+bass_pot_floor_db = -26.
+bass_pot_centre_hz = 70.
+bass_pot_stage_g = pow(10., bass_pot_floor_db / 40.)
+bass_pot_corner_hz = bass_pot_centre_hz / pow(bass_pot_stage_g, 0.5)
+def bass_pot_stage(s) =
+  add(normalize=false, [s, amplify(override=null, 0. - (1. - bass_pot_stage_g),
+    filter.iir.butterworth.low(frequency=bass_pot_corner_hz, order=1, s))])
+end
+def bass_pot_min(s) = bass_pot_stage(bass_pot_stage(s)) end
+def bass_pot_lows(s) = add(normalize=false, [s, amplify(override=null, -1., bass_pot_min(s))]) end
+def bass_pot(~level, s) =
+  add(normalize=false, [bass_pot_min(s), amplify(override=null, fun () -> level(), bass_pot_lows(s))])
 end
 
 def dj_transition(a, b) =
@@ -925,11 +932,12 @@ def dj_transition(a, b) =
   # carries its bar (`liq_safe_out`) and the lead from the incoming track's
   # first sample to its own end (`liq_safe_lead`: one bar plus the incoming
   # pre-roll before its first downbeat); cross_stamps buffered two bars more.
-  # Its bass is ridden out over those two bars, the incoming track enters at
-  # full with its downbeat on the outgoing bar line (aligned like a clip seam:
-  # it waits d - lead), and the outgoing highs fade over the last bar. Chosen
-  # by the operator's blind set 5: acceptable on all three pairs, against two
-  # for an echo out, one for a quick cut and one for the plain crossfade.
+  # Its bass pot goes to its minimum in 140 ms just before the incoming track
+  # enters at full with its downbeat on the outgoing bar line (aligned like a
+  # clip seam: it waits d - lead), and the outgoing highs fade over the last
+  # bar. Chosen by the operator's blind set 5: acceptable on all three pairs,
+  # against two for an echo out, one for a quick cut and one for the plain
+  # crossfade; the pot's single cut then beat the old two-bar ride (set 8).
   # Not on a clip or Hot Mix seam, a jingle, a bed or break, or a show-change
   # cut; a buffer that does not fit is logged and stays the plain crossfade.
   safe_bar = float_of_string(default=-1., a.metadata["liq_safe_out"])
@@ -947,7 +955,7 @@ def dj_transition(a, b) =
     else 0. end
   safe_on = safing and b_delay > 0.
   if safe_on then
-    log(label="hotmix", level=3, "safe out: buffered #{d}s, bar #{safe_bar}s, lead #{safe_lead}s: outgoing bass ridden out from #{d - 3. * safe_bar}s to #{d - safe_bar}s, incoming at full from #{b_delay}s, outgoing highs out by #{d}s")
+    log(label="hotmix", level=3, "safe out: buffered #{d}s, bar #{safe_bar}s, lead #{safe_lead}s: outgoing bass pot to its minimum by #{b_delay - 0.01}s, incoming at full from #{b_delay}s, outgoing highs out by #{d}s")
   elsif safing then
     log(label="hotmix", level=2, "safe out: buffer #{d}s does not fit the lead #{safe_lead}s + two bars of #{safe_bar}s: plain crossfade")
   end
@@ -995,28 +1003,37 @@ def dj_transition(a, b) =
   # A Hot Mix seam is the beat-matched blend itself: no gesture on either side.
   # The controller strips them first; this keeps an old stamp from arming one.
   mixed = mix_lead >= 0.
-  # HOT MIX BASS MOVE (the phrase mix: the controller placed this seam on both
-  # tracks' measured kicks, music/phrase-mix-policy.ts). A carries
-  # liq_mix_bass="ride": its bass is ridden down from where B enters to its own
-  # end, linearly, under its fade. B carries liq_mix_punch, the output seconds
-  # after its planned start at which its first hard kick plays: B enters with
-  # its bass off, and the bass jumps back over 140 ms that END 10 ms BEFORE the
-  # kick, so the first hard beat lands with full bass (a ramp across the kick
-  # blunted it in the blind renders). In B's own time the kick comes
+  # HOT MIX BASS MOVE (music/bass-pot-policy.ts: every beat-mixed seam on a
+  # controller that saw hotmix_pots; before it, only a phrase-mix seam). Each
+  # track's bass rides its own DESK BASS POT. A carries liq_mix_bass: "build"
+  # tames its pot to the minimum over liq_mix_build output seconds before the
+  # swap; "hold", and "ride" from an older controller, keep it up until then.
+  # B carries liq_mix_punch, the output seconds after its planned start of the
+  # downbeat at A's end (on a phrase-mix seam, its first hard kick): B enters
+  # with its pot at the minimum, and the pots swap over 140 ms that END 10 ms
+  # BEFORE that beat, so it lands with full bass (a ramp across the kick
+  # blunted it in the blind renders) and the two basslines never overlap. In B's own time the kick comes
   # late / r earlier than planned, B having started that far into its file.
   # Only on an aligned seam (b_delay > 0) with both stamps; the ramp must also
   # finish a frame before the incoming branch ends, where `cross` hands B back
   # unprocessed. Anything else is logged and the seam keeps its plain bass.
   mix_punch =
-    if mixed and b_delay > 0. and a.metadata["liq_mix_bass"] == "ride" then
+    if mixed and b_delay > 0. and list.mem(a.metadata["liq_mix_bass"], ["hold", "build", "ride"]) then
       float_of_string(default=-1., b.metadata["liq_mix_punch"])
     else -1. end
   mix_kick = mix_punch - mix_late / mix_r
   mix_punch_end = min(mix_kick - 0.01, d - b_delay - frame.duration())
   mix_punch_start = mix_punch_end - 0.14
   bass_moving = mix_punch > 0. and mix_punch_start >= 0.
+  # The outgoing pot: held at 0 ("hold", and "ride" from an older controller),
+  # or tamed down to its minimum over `liq_mix_build` output seconds before the
+  # swap ("build"), the build-up. Either way it reaches the minimum in the same
+  # 140 ms the incoming pot opens, so the two basslines never overlap.
+  mix_build = if a.metadata["liq_mix_bass"] == "build" then float_of_string(default=0., a.metadata["liq_mix_build"]) else 0. end
+  mix_build = if mix_build < 0. or mix_build > b_delay + mix_punch_start then 0. else mix_build end
+  build_note = if mix_build > 0. then "tamed to its minimum over #{mix_build}s" else "held" end
   if bass_moving then
-    log(label="hotmix", level=3, "bass move: outgoing bass ridden down from #{b_delay}s to #{d}s, incoming bass in from #{b_delay + mix_punch_start}s to #{b_delay + mix_punch_end}s, its first hard kick at #{b_delay + mix_kick}s")
+    log(label="hotmix", level=3, "bass move: outgoing bass #{build_note} until #{b_delay + mix_punch_start}s, swapped by #{b_delay + mix_punch_end}s: incoming bass in, its first hard kick at #{b_delay + mix_kick}s")
   elsif mix_punch != -1. then
     log(label="hotmix", level=2, "bass move: the punch at #{mix_punch}s does not fit the incoming #{d - b_delay}s: plain bass")
   end
@@ -1065,51 +1082,68 @@ def dj_transition(a, b) =
     else
       fade.out(duration=a_fade, initial_metadata=a.metadata, a.source)
     end
-  # HOT MIX BASS MOVE, outgoing side (timings above): from B's entry to A's
-  # end, its bass ridden linearly to nothing. A gain getter, read once a frame:
-  # over a 16 s ride a 20 ms step is a tenth of a percent, and it starts a few
-  # frames ahead of B's entry (measured 69 ms, -0.04 dB there). Measured: its
-  # lows -2.8 / -6.7 / -13.2 dB a quarter, half and three quarters through
-  # (linear: -2.5 / -6.0 / -12.0), its highs -0.1 dB.
+  # HOT MIX BASS MOVE, outgoing side (timings above). The crossfader moves the
+  # outgoing track's level as on any seam, but its bass rides its own pot: the
+  # pot's minimum (everything but the bass) takes the same fader as a plain
+  # seam, and the bass it holds back is added from the unfaded track at the
+  # pot's level, so the bass keeps its energy through the blend ("hold"), or
+  # is tamed down to the minimum over the build ("build"), and in either case
+  # is at the minimum by the swap, as the incoming pot opens. At the start
+  # (pot at 0, fader at 1) this is the track itself. The gain is read once a
+  # frame, so the 140 ms swap moves in frame steps, like the incoming pot.
   a_source =
     if bass_moving then
-      ride_src = a_source
-      def ride_gain() =
-        e = source.elapsed(ride_src)
-        span = d - b_delay
-        x = if e <= b_delay then 0. elsif e >= d then 1. else (e - b_delay) / span end
-        1. - x
+      pot_src = a.source
+      p0 = b_delay + mix_punch_start
+      p1 = b_delay + mix_punch_end
+      def out_open() =
+        e = source.elapsed(pot_src)
+        build =
+          if mix_build <= 0. or e <= p0 - mix_build then 1.
+          elsif e >= p0 then 0.
+          else 1. - (e - (p0 - mix_build)) / mix_build end
+        flick = if e <= p0 then 1. elsif e >= p1 then 0. else 1. - (e - p0) / (p1 - p0) end
+        build * flick
       end
-      bass_cut(gain=ride_gain, ride_src)
+      rest = bass_pot_min(pot_src)
+      rest =
+        if equal_power_seam then equal_power_fade(span=d, rising=false, rest)
+        else fade.out(duration=a_fade, initial_metadata=a.metadata, rest) end
+      add(normalize=false, [rest, amplify(override=null, out_open, bass_pot_lows(pot_src))])
     else
       a_source
     end
-  # HOT MIX SAFE OUT, outgoing side (timings above): dry until two bars before
-  # the incoming downbeat, its bass ridden out linearly over them (the bass
-  # move's LR4 crossfade), then its highs faded out linearly over the last
-  # bar. Gains read once a frame, as every fade here. From the raw a.source:
-  # no gesture or other fader is armed on a safe seam.
+
+  # HOT MIX SAFE OUT, outgoing side (timings above): the track itself until
+  # the swap, its bass pot turned to the minimum in 140 ms that end 10 ms
+  # before the incoming track's first sample (its pre-roll before the
+  # downbeat), so the two basses never overlap, then its highs faded out
+  # linearly over the last bar. A long bass ride pumps (the operator's rule),
+  # so the pot moves once, fast. Gains read once a frame, as every fade here.
+  # From the raw a.source: no gesture or other fader is armed on a safe seam.
   a_source =
     if safe_on then
       safe_src = a.source
-      safe_ride_from = d - 3. * safe_bar
-      safe_ride_to = d - safe_bar
-      def safe_ride() =
+      safe_cut_to = b_delay - 0.01
+      safe_cut_from = safe_cut_to - 0.14
+      safe_fade_from = d - safe_bar
+      def safe_open() =
         e = source.elapsed(safe_src)
-        if e <= safe_ride_from then 1.
-        elsif e >= safe_ride_to then 0.
-        else 1. - (e - safe_ride_from) / (safe_ride_to - safe_ride_from) end
+        if e <= safe_cut_from then 1.
+        elsif e >= safe_cut_to then 0.
+        else 1. - (e - safe_cut_from) / (safe_cut_to - safe_cut_from) end
       end
       def safe_level() =
         e = source.elapsed(safe_src)
-        if e <= safe_ride_to then 1.
+        if e <= safe_fade_from then 1.
         elsif e >= d then 0.
-        else 1. - (e - safe_ride_to) / (d - safe_ride_to) end
+        else 1. - (e - safe_fade_from) / (d - safe_fade_from) end
       end
-      amplify(override=null, safe_level, bass_cut(gain=safe_ride, safe_src))
+      amplify(override=null, safe_level, bass_pot(level=safe_open, safe_src))
     else
       a_source
     end
+
   # SWEEP ENVELOPE — riding the filter out of a track. Cutoffs move in
   # LOG-frequency space (pow) throughout; linear Hz ramps read as
   # nothing-then-everything.
@@ -1701,8 +1735,9 @@ def dj_transition(a, b) =
   # on 2.4.6 (Fuego -> Aurora), steps every 20 ms, done 52 ms ahead of its
   # planned end, the steps' added highs 15 dB under the high-pass's own phase
   # residual (no click). The stdlib fade.in is the same per-frame amplify
-  # (mkfade), so it buys no accuracy. After the ramp B is the dry track sample
-  # for sample (measured).
+  # (mkfade), so it buys no accuracy. The pot is the desk shelf above: at its
+  # minimum through the blend, open to 0 in the ramp, and then the track itself,
+  # which it must be before `cross` hands B back unprocessed.
   b_source =
     if bass_moving then
       punch_src = b_source
@@ -1712,7 +1747,7 @@ def dj_transition(a, b) =
         elsif e >= mix_punch_end then 1.
         else (e - mix_punch_start) / (mix_punch_end - mix_punch_start) end
       end
-      bass_cut(gain=punch_gain, punch_src)
+      bass_pot(level=punch_gain, punch_src)
     else
       b_source
     end
@@ -2955,7 +2990,7 @@ server.register(
   fun(_) -> if hot_mix_stretch() then "true" else "false" end
 )
 
-# The phrase mix places a seam on the kicks for the bass move above (HOT MIX
+# The phrase mix places a seam on the kicks for the bass move (HOT MIX
 # BASS MOVE in dj_transition); placed without it, it is the trim that lost the
 # operator's blind tests. So the controller asks this before placing one: an
 # older mixer answers "unknown command" and the seam is searched as before.
@@ -2974,6 +3009,16 @@ server.register(
   "hotmix_bass",
   description="Whether this mixer runs the DJ Hot Mix bass move",
   usage="hotmix_bass",
+  fun(_) -> if hot_mix_stretch() then "true" else "false" end
+)
+
+# The per-track bass pots (DESK BASS POT): the controller stamps every
+# beat-mixed seam with liq_mix_bass="build" only for a mixer that answers true;
+# an older one reads only the phrase mix's "ride".
+server.register(
+  "hotmix_pots",
+  description="Whether this mixer runs the DJ Hot Mix bass pots",
+  usage="hotmix_pots",
   fun(_) -> if hot_mix_stretch() then "true" else "false" end
 )
 

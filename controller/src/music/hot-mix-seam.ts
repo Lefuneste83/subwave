@@ -342,11 +342,16 @@ export interface MixOutStamps {
   // A phrase-mix seam: the outgoing bass ridden down over the overlap
   // (radio.liq HOT MIX BASS MOVE reads it as liq_mix_bass="ride").
   bassRide?: { fromSec: number; toSec: number };
+  // The bass pots (music/bass-pot-policy.ts), on a mixer that has them: the
+  // outgoing bass tamed down over `buildSec` output seconds before the swap
+  // (liq_mix_bass="build", liq_mix_build). Written instead of `bassRide`.
+  bassBuild?: { buildSec: number };
 }
 export interface MixInStamps extends StartStretch {
   id: string;
-  // A phrase-mix seam: output seconds after B starts at which its first hard
-  // kick plays, where its bass punches back in (liq_mix_punch).
+  // Output seconds after B starts at which its bass swaps in (liq_mix_punch):
+  // the downbeat at the outgoing end, which on a phrase-mix seam is its first
+  // hard kick.
   punchSec?: number;
 }
 

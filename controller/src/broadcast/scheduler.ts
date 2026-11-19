@@ -666,8 +666,8 @@ async function refreshAutoPlaylistInner(canPublish: () => boolean): Promise<Refr
   // In a Hot Mix show a coast track's exit is never beat-matched (the
   // controller plans no seam out of it; the first track after a mixer restart
   // is one), so each entry carries the safe transition (music/safe-out-policy.ts,
-  // radio.liq HOT MIX SAFE OUT): its bass ridden out before a bar line, cut a
-  // bar later, whatever follows entering at full there. Only for a mixer that
+  // radio.liq HOT MIX SAFE OUT): its bass pot cut at a bar line, the track cut
+  // a bar later, whatever follows entering at full there. Only for a mixer that
   // has it; anything the policy cannot place keeps its plain crossfade.
   const safeCoast = hotMixOf(show) != null && await hotMixSafeBuilt();
   const lines = ['#EXTM3U', ...pool.map((t: any) => {

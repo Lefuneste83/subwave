@@ -275,8 +275,27 @@ export async function hotMixBassBuilt(): Promise<boolean> {
   }
 }
 
+// Whether the running mixer runs the per-track bass pots (radio.liq, DESK BASS
+// POT): every beat-mixed Hot Mix seam then tames the outgoing bass and swaps
+// the incoming one in at the outgoing end (music/bass-pot-policy.ts). An older
+// mixer answers "unknown command" and reads only the phrase mix's ride. Fails
+// closed and is cached like the bass move.
+const hotMixPotsCache = cachedAsync(
+  async () => (await sendCommand('hotmix_pots', 2000)).trim().split(/\s+/)[0] === 'true',
+  { ttlMs: 60_000 },
+);
+onMixerRestart(() => hotMixPotsCache.invalidate());
+
+export async function hotMixPotsBuilt(): Promise<boolean> {
+  try {
+    return await hotMixPotsCache.get();
+  } catch {
+    return false;
+  }
+}
+
 // Whether the running mixer runs the Hot Mix safe transition (radio.liq, HOT
-// MIX SAFE OUT): a seam that cannot be beat-matched rides the outgoing bass out
+// MIX SAFE OUT): a seam that cannot be beat-matched cuts the outgoing bass
 // and lets the incoming track in on its downbeat. Fails closed like the bass
 // move: an older mixer answers "unknown command" and keeps the plain
 // crossfade. Cached for a minute and dropped on every restart.
