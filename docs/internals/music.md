@@ -1147,7 +1147,7 @@ Pinned by `scripts/hot-mix-policy.test.ts` (the rules and the saved shape), `scr
 
 ## The admin preview player (Library rows)
 
-A Library row's cover is a play button: the operator hears a library track in his own browser, never on air, with a bar under the row to seek. One audio element serves the whole admin (`web/components/admin/library/preview-player.ts`), so starting a track stops the one before, and the preview stops when the last table leaves the screen.
+A Library row's cover (Browse, Search, Tracks, Liked and History) is a play button: the operator hears a library track in his own browser, never on air, with a bar under the row to seek. One audio element serves the whole admin (`web/components/admin/library/preview-player.ts`), so starting a track stops the one before, and the preview stops when the last table leaves the screen.
 
 An `<audio>` element cannot send the console's Basic header, so the controller hands an admin a short-lived signed link (`POST /library/:id/preview`, `routes/library/preview.ts`): an HMAC over the track id and an expiry (6 h), keyed by a per-process secret, so a restart voids every link and a leaked one exposes that one track's audio for a few hours. `GET /library/preview/:id?exp=&sig=` streams Navidrome's `stream` with `format=raw` (the original file) and forwards `Range`, so the browser seeks on real bytes; nothing is buffered, and the upstream request ends when the browser goes away. Subsonic `stream` does not scrobble, so a preview moves no play count. The blocklist governs airplay, not the operator's ears: a never-play track still previews. The call counts in `/debug` as `stream` / `admin-preview`.
 
