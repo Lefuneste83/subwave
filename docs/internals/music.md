@@ -1145,6 +1145,12 @@ How a DJ runs a beat-mixed set, as the operator laid it down: up to a 3–4 % ga
 
 Pinned by `scripts/hot-mix-policy.test.ts` (the rules and the saved shape), `scripts/hot-mix-pick-paths.test.ts` (the real pick paths, the request route, a steer, a cold load), `scripts/hot-mix-seam.test.ts` (who moves, where, the timelines, the overlap length and the phrase window), `scripts/phrase-mix-policy.test.ts` (the kick-anchored placement), `scripts/hot-mix-seam-drain.test.ts` (the queue's stamps, the phrase mix and its fallback, the annotate keys radio.liq reads, the stretch switch), `scripts/percussion-phase.test.ts` and `web/components/admin/shows/hot-mix.test.ts`. The renders and measurements behind the numbers are `tmp/hotmix-e2e/` in the fork's tracker workspace.
 
+## The admin preview player (Library rows)
+
+A Library row's cover is a play button: the operator hears a library track in his own browser, never on air, with a bar under the row to seek. One audio element serves the whole admin (`web/components/admin/library/preview-player.ts`), so starting a track stops the one before, and the preview stops when the last table leaves the screen.
+
+An `<audio>` element cannot send the console's Basic header, so the controller hands an admin a short-lived signed link (`POST /library/:id/preview`, `routes/library/preview.ts`): an HMAC over the track id and an expiry (6 h), keyed by a per-process secret, so a restart voids every link and a leaked one exposes that one track's audio for a few hours. `GET /library/preview/:id?exp=&sig=` streams Navidrome's `stream` with `format=raw` (the original file) and forwards `Range`, so the browser seeks on real bytes; nothing is buffered, and the upstream request ends when the browser goes away. Subsonic `stream` does not scrobble, so a preview moves no play count. The blocklist governs airplay, not the operator's ears: a never-play track still previews. The call counts in `/debug` as `stream` / `admin-preview`.
+
 ## Scheduled tagging (#2282)
 
 `settings.tagger.auto` starts a tagger run once a station day at a set time, so new music reaches the air without an operator pressing Start. It is off by default (an absent block reads as `mode: 'off'`, so an upgrade changes nothing), and an off schedule costs one settings read per tick and one read of its own record per process: no Navidrome call, no listener probe.
