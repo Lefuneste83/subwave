@@ -1,7 +1,8 @@
 // The DJ Hot Mix safe transition's placement (music/safe-out-policy.ts): the
 // outgoing track cut one bar after one of its bar lines, the incoming track's
-// first downbeat on that bar line, the bass ridden out over the two bars
-// before it. Chosen by blind set 5 (bass-out acceptable 3/3).
+// first downbeat on that bar line, two bars buffered before it, where the
+// mixer once rode the bass out (now one quick pot cut at the line). Chosen by
+// blind set 5 (bass-out acceptable 3/3).
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { planSafeOut, safeCrossSec, PRE_ROLL_SEC, FALLBACK_BAR_SEC } from '../src/music/safe-out-policy.js';

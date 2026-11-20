@@ -16,6 +16,7 @@ import { aboveKnownTrackCeiling } from '../music/track-duration.js';
 import { anyCleanShow, heldBackFromShow } from '../music/explicit-policy.js';
 import * as silenceTrim from '../music/silence-trim.js';
 import * as hotMixSeam from '../music/hot-mix-seam.js';
+import * as bassPots from '../music/bass-pot-policy.js';
 import * as safeOutPolicy from '../music/safe-out-policy.js';
 import * as percussionPhase from '../music/percussion-phase.js';
 import { hotMixOf } from '../music/hot-mix-policy.js';
@@ -525,6 +526,8 @@ class Queue {
   // Whether it runs the bass move the phrase mix places seams for; a field too.
   _hotMixBassBuilt = () => liquidsoapControl.hotMixBassBuilt();
   _hotMixSafeBuilt = () => liquidsoapControl.hotMixSafeBuilt();
+  // Whether it runs the per-track bass pots (music/bass-pot-policy.ts); a field too.
+  _hotMixPotsBuilt = () => liquidsoapControl.hotMixPotsBuilt();
   _bedCatalog = beds.catalog;
   _bedGetPath = beds.getPath;
   _writeHandoff = writeHandoff;
@@ -2176,15 +2179,30 @@ class Queue {
         }
       }
     }
+    const potsBuilt = await this._hotMixPotsBuilt();
     if (!this.upcoming.includes(item) || !this.upcoming.includes(successor) || successor.sent) return;
     const id = randomBytes(4).toString('hex');
     item.mixOut = { id, leadSec: plan.leadSec, end: plan.aEnd, outCueSec: plan.outCueSec };
     successor.mixIn = { id, ...plan.bStart, inCueSec: plan.inCueSec, ...(waitSec ? { waitSec } : {}) };
-    // The phrase mix's bass timings, for the mixer's bass move (radio.liq, HOT
-    // MIX BASS MOVE): A's bass ridden down over the overlap, B's punched back
-    // on its first hard kick, which moved with B's cue-in if the beat phase
-    // moved it.
-    if (phrase && plan.bPunchSec != null) {
+    // The bass, for the mixer's bass move (radio.liq, HOT MIX BASS MOVE). With
+    // the bass pots, every seam (music/bass-pot-policy.ts): A's bass tamed over
+    // the build, B's swapped in at A's end. On an older mixer only a phrase-mix
+    // seam moves the bass: A's ridden down over the overlap, B's punched on its
+    // first hard kick. Either swap point moves with B's cue-in if the beat
+    // phase moved it.
+    let bassNote = '';
+    const pots = potsBuilt
+      ? bassPots.planBassPots({
+        leadSec: plan.leadSec,
+        overlapBeats: phrase ? phrase.window.bars * 4 : seamInput.overlapBeats!,
+        beatsPerBar: aGrid.beatsPerBar,
+      })
+      : null;
+    if (pots) {
+      item.mixOut.bassBuild = { buildSec: pots.buildSec };
+      successor.mixIn.punchSec = hotMixSeam.punchAfterShift(pots.punchSec, plannedInCueSec, plan.inCueSec, waitSec, plan.bStart.tempo);
+      bassNote = `; bass: outgoing tamed over ${pots.buildSec}s, incoming in at +${pots.punchSec}s`;
+    } else if (phrase && plan.bPunchSec != null) {
       item.mixOut.bassRide = { fromSec: 0, toSec: plan.leadSec };
       successor.mixIn.punchSec = hotMixSeam.punchAfterShift(plan.bPunchSec, plannedInCueSec, plan.inCueSec, waitSec, plan.bStart.tempo);
     }
@@ -2208,7 +2226,7 @@ class Queue {
       const anchor = outAfter === phrase.lastKick ? 'last hard kick' : `${phrase.lastKick - outAfter} bars before the last hard kick`;
       phraseNote = `; phrase mix: out after bar ${outAfter} (${anchor}) +${w.bars} bars, in at bar ${w.bEntryBar}, first hard kick bar ${w.bPunchBar} at +${plan.leadSec}s`;
     }
-    this.log('mix', `Hot Mix seam ${pairTitle}: ${plan.aBpm} → ${plan.bBpm} BPM (${plan.gapPct > 0 ? '+' : ''}${plan.gapPct} %), ${moves}; overlap ${plan.leadSec}s, cut ${plan.outCueSec}s, cue-in ${plan.inCueSec}s; ${phaseNote}${phraseNote}`);
+    this.log('mix', `Hot Mix seam ${pairTitle}: ${plan.aBpm} → ${plan.bBpm} BPM (${plan.gapPct > 0 ? '+' : ''}${plan.gapPct} %), ${moves}; overlap ${plan.leadSec}s, cut ${plan.outCueSec}s, cue-in ${plan.inCueSec}s; ${phaseNote}${phraseNote}${bassNote}`);
   }
 
   // DJ Hot Mix safe transition (music/safe-out-policy.ts decides; this gathers

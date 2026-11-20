@@ -73,7 +73,61 @@ beforeEach(() => {
   // The safe transition has its own tests below; off, every refusal is the
   // plain crossfade these tests were written against.
   queue._hotMixSafeBuilt = async () => false;
+  // The bass pots have their own tests below; off, a mixer from before them.
+  queue._hotMixPotsBuilt = async () => false;
   queue.djLog.length = 0;
+});
+
+test('with the bass pots, a beat-mixed seam tames the outgoing bass over 8 bars and swaps the incoming in at the end', async () => {
+  await onAir({ enabled: true });
+  queue._hotMixPotsBuilt = async () => true;
+  const { item, successor } = pairOf(A, B);
+  await plan(item, successor);
+  assert.ok(item.mixOut && successor.mixIn, queue.djLog.map((l) => l.message).join('\n'));
+  // 8 bars of 4 beats at 120 BPM: 16 s, the whole overlap less the swap
+  assert.equal(item.mixOut.leadSec, 16);
+  assert.deepEqual(item.mixOut.bassBuild, { buildSec: 15.85 });
+  assert.equal(item.mixOut.bassRide, undefined);
+  assert.equal(successor.mixIn.punchSec, 16);
+  assert.match(queue.djLog.map((l) => l.message).join('\n'), /bass: outgoing tamed over 15\.85s, incoming in at \+16s/);
+  const keys = (uri: string) => uri.slice(0, uri.indexOf(':subhttp:'));
+  const out = keys(getAnnotatedUri(item.track, { mixOut: item.mixOut, cueOutSec: item.mixOut.outCueSec }));
+  assert.match(out, /liq_mix_bass="build",liq_mix_build="15\.8500"/);
+  assert.doesNotMatch(out, /"ride"/);
+  const inn = keys(getAnnotatedUri(successor.track, { mixIn: successor.mixIn, cueInSec: successor.mixIn.inCueSec }));
+  assert.match(inn, /liq_mix_punch="16\.0000"/);
+  for (const key of ['liq_mix_bass', 'liq_mix_build', 'liq_mix_punch']) assert.ok(RADIO_LIQ.includes(`"${key}"`), `radio.liq reads ${key}`);
+  assert.ok(RADIO_LIQ.includes('"build"'), 'radio.liq knows the build');
+});
+
+test('with the bass pots, a 16-bar seam builds over its last 8 bars only', async () => {
+  await onAir({ enabled: true, phraseBars: 16 });
+  queue._hotMixPotsBuilt = async () => true;
+  const { item, successor } = pairOf(A, B);
+  await plan(item, successor);
+  assert.equal(item.mixOut!.leadSec, 32);
+  assert.deepEqual(item.mixOut!.bassBuild, { buildSec: 16 });
+  assert.equal(successor.mixIn!.punchSec, 32);
+});
+
+test('with the bass pots, a phrase-mix seam builds too, its swap on the first hard kick', async () => {
+  await onAir({ enabled: true, phraseMix: true, phraseBars: 16 });
+  queue._hotMixPotsBuilt = async () => true;
+  const { item, successor } = pairOf(A, B);
+  await plan(item, successor);
+  assert.match(queue.djLog.map((l) => l.message).join('\n'), /phrase mix: out after bar 100[\s\S]*first hard kick bar 65 at \+32s; bass: outgoing tamed over 16s, incoming in at \+32s/);
+  assert.deepEqual(item.mixOut!.bassBuild, { buildSec: 16 });
+  assert.equal(item.mixOut!.bassRide, undefined);
+  assert.equal(successor.mixIn!.punchSec, 32);
+});
+
+test('without the bass pots, a plain beat-mixed seam moves no bass', async () => {
+  await onAir({ enabled: true });
+  const { item, successor } = pairOf(A, B);
+  await plan(item, successor);
+  assert.equal(item.mixOut!.bassBuild, undefined);
+  assert.equal(item.mixOut!.bassRide, undefined);
+  assert.equal(successor.mixIn!.punchSec, undefined);
 });
 
 test('a Hot Mix show stamps both sides of the seam, tied by one id', async () => {
