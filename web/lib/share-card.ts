@@ -1,4 +1,4 @@
-// The share card's colours (G26), from the station logo's pixels: pure, so it
+// The share card's colours, from the station logo's pixels: pure, so it
 // is tested without an image decoder. `app/og/route.js` decodes the logo to a
 // small RGBA grid and asks this for the card's background and text colours.
 //
@@ -8,7 +8,8 @@
 //   as one picture;
 // - a logo cut out on transparency gets its own dominant colour, darkened, so
 //   the shape stands out against a field of its own hue.
-// The text is near-white or near-black, whichever reads on that background.
+// `text`/`muted` are near-white or near-black, whichever reads on that
+// background (the card draws only the logo today; kept for any caption).
 
 export interface Rgb { r: number; g: number; b: number }
 
@@ -91,14 +92,4 @@ export function cardColours(rgba: Uint8Array, width: number, height: number): Ca
     text: light ? '#141210' : '#f4f1ec',
     muted: light ? 'rgba(20,18,16,0.62)' : 'rgba(244,241,236,0.66)',
   };
-}
-
-// The station name's size on the card: long names step down so they hold to
-// about three lines beside the logo.
-export function nameFontSize(name: string): number {
-  const n = name.trim().length;
-  if (n <= 12) return 88;
-  if (n <= 22) return 72;
-  if (n <= 36) return 58;
-  return 46;
 }

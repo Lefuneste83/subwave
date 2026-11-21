@@ -4,7 +4,7 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { cardColours, luminance, nameFontSize } from './share-card';
+import { cardColours, luminance } from './share-card';
 
 // A w×h RGBA grid filled by `fill(x, y)`.
 function grid(w: number, h: number, fill: (x: number, y: number) => [number, number, number, number]) {
@@ -41,10 +41,4 @@ test('a cut-out logo gets its own colour, darkened behind it', () => {
 test('a fully transparent image falls back to a dark card', () => {
   const c = cardColours(grid(4, 4, () => [0, 0, 0, 0]), 4, 4);
   assert.equal(c.background, '#100e0c');
-});
-
-test('long station names step down in size', () => {
-  assert.equal(nameFontSize('Kiss FM'), 88);
-  assert.equal(nameFontSize('Southern Star Radio'), 72);
-  assert.ok(nameFontSize('The Very Long Name Of A Community Radio Station') < 58);
 });
