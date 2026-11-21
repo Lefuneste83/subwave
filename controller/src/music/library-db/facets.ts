@@ -62,10 +62,12 @@ export const ANALYSIS_FACETS = FACETS.filter((f): f is AnalysisFacet => f !== 'y
 export function isAnalysisFacet(f: Facet): f is AnalysisFacet {
   return f !== 'year';
 }
-// Facets only an explicit `--facets` run measures, with their own state and
-// failure history (library-db/grid.ts): never planned by a regular run, never
-// given the track's shared analysis failure count, never counted as a library
-// problem when unmeasurable. The whole-track beat grid is one (heavy analyzer
+// Opt-in facets, with their own state and failure history
+// (library-db/grid.ts): measured by an explicit `--facets` run, and by a
+// regular run only while a show has Hot Mix on (analyze.ts runBeatGridSteps,
+// music/beat-grid-run-policy.ts), never by the legacy pass; never given the
+// track's shared analysis failure count, never counted as a library problem
+// when unmeasurable. The whole-track beat grid is one (heavy analyzer
 // only; a track with no steady pulse has none, and that is no fault), and so is
 // the per-bar structure measured on it (library-db/structure.ts).
 export const OPT_IN_FACETS: readonly Facet[] = ['grid', 'structure'];
@@ -887,6 +889,12 @@ export interface FacetCount {
 
 // Per-facet counts for the coverage preview and the consistency check.
 export function facetCounts(): FacetCount[] {
+  return facetCountsOf(FACETS);
+}
+
+// The same counts for some facets only (the Library panel's beat grid and
+// structure rows, library-coverage.ts), in FACETS order.
+export function facetCountsOf(facets: readonly Facet[]): FacetCount[] {
   const d = requireDb();
   const total = (d.prepare('SELECT COUNT(*) AS n FROM tracks').get() as { n: number }).n;
   const stmt = d.prepare(
@@ -899,7 +907,7 @@ export function facetCounts(): FacetCount[] {
        COUNT(*)                     AS rows
      FROM track_facet_status WHERE facet = ?`,
   );
-  return FACETS.map((facet) => {
+  return FACETS.filter((f) => facets.includes(f)).map((facet) => {
     const v = FACET_VERSIONS[facet];
     const r = stmt.get(v, facet === 'year' ? YEAR_MAX_ATTEMPTS : FACET_MAX_ATTEMPTS, v, facet) as Record<string, number | null>;
     const rows = r.rows ?? 0;
