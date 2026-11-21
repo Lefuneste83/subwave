@@ -14,8 +14,12 @@ import { useTaggerRunLog } from './library/useTaggerRunLog';
 import { LibraryCounts, share, type LibraryOverview } from './library/LibraryCounts';
 import type { Tab } from './library/types';
 import { notify } from '../../lib/notify';
+import BeatGridRows from './library/BeatGridRows';
+import { beatGridRows, type BeatGridCoverage } from './library/beat-grid-coverage';
 
-export interface Coverage {
+// The beat grid and structure fields (gridWanted, gridMeasured, …) are
+// BeatGridCoverage's, read by the Hot Mix rows (library/beat-grid-coverage.ts).
+export interface Coverage extends BeatGridCoverage {
   // The counts line (controller music/library-overview.ts); null until the first
   // background count lands, absent on an older controller.
   overview?: LibraryOverview | null;
@@ -404,6 +408,8 @@ export default function TaggingPanel(p: TaggingPanelProps) {
   // 'pending-heavy' = lean/older engine that can't do this dimension.
   const audioStatus = p.coverage?.audioStatus;
   const vocalStatus = p.coverage?.vocalStatus;
+  // Shown while a show has Hot Mix on, or once a grid or structure is stored.
+  const gridRows = beatGridRows(p.coverage, analysisOff);
 
   // How you GET the heavy analyzer depends on the backend.
   const analyzerIsLocal = p.coverage?.analysisBackend === 'local';
@@ -467,6 +473,7 @@ export default function TaggingPanel(p: TaggingPanelProps) {
               ? `vocal ${vpct}%`
               : vocalStatus === 'pending-heavy' ? 'vocal waiting' : 'vocal on')
           : 'vocal off',
+        ...(gridRows[0] ? [gridRows[0].pct != null ? `grid ${gridRows[0].pct}%` : 'grid on'] : []),
       ].join(' · ');
   // A dim/model mismatch would fail the tag run, so this drives a blocking
   // one-click re-embed prompt rather than a cryptic tagger error.
@@ -977,6 +984,7 @@ export default function TaggingPanel(p: TaggingPanelProps) {
             )}
           </div>
         )}
+        <BeatGridRows rows={gridRows} />
         <div className="flex flex-wrap items-center gap-x-3.5 gap-y-2 border-t border-dashed border-separator-strong pt-3">
           <span className="caption flex items-center gap-2">
             <Moon size={13} /> Quiet times · analyse only while idle

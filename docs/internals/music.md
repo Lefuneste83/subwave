@@ -642,7 +642,9 @@ file beyond the curve's frames, two bytes per 100 ms (`FrameLog`). Ten rules:
    facet plan (`regular-run-plan.ts`, B24: one scope engine, so a GUI run
    converges to the CLI's `--where needs` end state): head, tail and the
    opt-in CLAP / vocal / stems where needs, never loudness or edges (in the
-   facet protocol `loudness` IS the whole-file measurement, lane 1's). The
+   facet protocol `loudness` IS the whole-file measurement, lane 1's), and,
+   while a show has Hot Mix on, the beat grid and the structure as two steps
+   of their own (*Hot Mix's grid and structure in a regular run*). The
    first slice is then the tracks that plan reads with head or tail due
    (`leadIds`), so an outdated or end-of-file tail is re-planned and placed
    from fresh edges; a stored tail whose edges are still missing is not
@@ -852,10 +854,11 @@ offbeat is joined back onto the grid it left. Measured against Traktor grids on
 150 library tracks: tempo right 99 % (librosa's 40 s window 65 %), whole-track
 beats on the grid F 0.99 (librosa whole-track 0.60), downbeats on the bar line
 82 %. It lives in its own table (`library-db/grid.ts`, `track_grid`) with its
-own status, reason and attempts: the facet is planned only by `--facets grid`
-and only on `analyze_grid_capable === true` (unknown is not planned, since an
-older analyzer would read a grid-only item as a full analysis), never by a
-regular run; its failures never touch `analyze_fail_count` (which gates the
+own status, reason and attempts: the facet is planned by `--facets grid`, and
+by a regular run while a show has Hot Mix on (*Hot Mix's grid and structure in
+a regular run*, below), only on `analyze_grid_capable === true` (unknown is not
+planned, since an older analyzer would read a grid-only item as a full
+analysis), never by the legacy pass; its failures never touch `analyze_fail_count` (which gates the
 regular retries) and a regular failure never fans out onto it; an unmeasurable
 grid (no steady pulse) is no "Needs you" item. A grid that passes
 `music/grid-policy.ts` replaces the head analysis's `bpm`, and its beats and bar
@@ -886,11 +889,11 @@ moved the tempo word of 16 %. Pinned by `scripts/grid-apply.test.ts`,
 `scripts/grid-report.test.ts`, `scripts/grid-facet.test.ts` and
 `scripts/analyzer_grid_test.py`.
 
-**The per-bar structure (`structure` facet, opt-in; nothing on air reads it
-yet).** It is groundwork for a DJ transition recipe: the outgoing track leaves
-after its last hard kick plus N bars, and the incoming one enters N bars before
-its first hard kick, with its bass punched in on that kick. A later step wires
-it into the transitions. `npm run analyze -- --facets structure [--ids-file f]`
+**The per-bar structure (`structure` facet, opt-in; a Hot Mix show's phrase
+mix reads it).** It is the DJ transition recipe's input: the outgoing track
+leaves after its last hard kick plus N bars, and the incoming one enters N bars
+before its first hard kick, with its bass punched in on that kick (*The phrase
+length and the phrase mix* under Hot Mix). `npm run analyze -- --facets structure [--ids-file f]`
 measures each bar of the track's own beat grid. The controller sends the grid
 in the request, so the worker never reads the library. Only a grid whose bars
 `grid-policy.ts` trusts is used (`gridDecision().bars`: the BPM gate plus a
@@ -908,8 +911,8 @@ the grids with trusted bars) is measured in four-beat bars from its own
 downbeat, any other meter is `unmeasurable / odd-meter` without a decode, and
 a grid segment whose tempo is more than 4 % off the track's main tempo (the
 tempo covering the most time) is not counted. It is planned only on
-`analyze_structure_capable === true`, and never in a regular run or an
-automatic backfill. `track_structure` stores compact arrays per bar, in dB
+`analyze_structure_capable === true`, by `--facets structure` and by a regular
+run while a show has Hot Mix on (below), never by the legacy pass. `track_structure` stores compact arrays per bar, in dB
 against the track's 90th-percentile bar and floored to the 0.5 dB step (rounding
 to the nearest step moved threshold decisions on 18 of 98 prototype tracks):
 - `kick`: the < 100 Hz zero-phase envelope peak at the beats, as a median;
@@ -933,6 +936,28 @@ produce no stored value, so changing a rule re-reads nothing. `npm run
 structure-report -- [--ids-file f] [--json]` prints them per track. Pinned by
 `scripts/structure-policy.test.ts`, `scripts/structure-facet.test.ts` and
 `scripts/analyzer_structure_test.py`.
+
+**Hot Mix's grid and structure in a regular run.** While a show has Hot Mix on
+(`hotMixStretchWanted`, the rule the mixer's stretch switch follows), the
+planned regular run (Start tagging, Analyze audio: the facet plan described
+with the whole-file lane above) also measures both, after the model lane and
+before the rest of the whole-file lane: one `grid` plan `where needs` over the
+library, the tracks the run just analysed first, then one `structure` plan,
+made only after the grid step has written. A structure is measured on the grid
+stored when it is planned, so planned together a new track would have none
+(`no-grid`) and wait a whole run. Each step honours the run's `--limit`, logs
+its `regular run: <facet> N planned of M due` line and is non-fatal; the stats
+carry them as `beatGrid`. Each needs the analyzer's positive answer
+(`music/beat-grid-run-policy.ts`): one that says it cannot, or has not said,
+gets nothing planned for that facet and one warning per run, and the structure
+still runs on stored grids when only the grid is missing. Without a Hot Mix
+show nothing is planned and nothing is said; the legacy pass never measures
+them. `/library/coverage` counts measured grids and structures (and the tracks
+due) in `refresh()` only, and the Library tagging panel shows a row for each
+while a Hot Mix show exists or a grid is stored. Pinned by
+`scripts/beat-grid-run-policy.test.ts`,
+`scripts/beat-grid-regular-run.test.ts` and
+`scripts/beat-grid-coverage.test.ts`.
 
 **Tail v3 adds the tail's short-term loudness curve, and a fade can be cut at
 its AUDIBLE end** (`transitions.fadeAudibleEnd`, off by default, and

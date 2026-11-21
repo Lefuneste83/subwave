@@ -8,7 +8,7 @@ import * as subsonic from './subsonic.js';
 import * as library from './library.js';
 import * as db from './library-db.js';
 import * as analyzer from './analyzer.js';
-import { vocalActivityWanted, audioEmbeddingWanted } from './analyze.js';
+import { vocalActivityWanted, audioEmbeddingWanted, beatGridWanted } from './analyze.js';
 import { activeModelLabel, EMBED_TEXT_VERSION } from './embeddings.js';
 import { dimensionStatus } from './coverage-status.js';
 import { getOverview, refreshOverview } from './library-overview.js';
@@ -32,6 +32,17 @@ const cache: CoverageCache = {
 // so counted where the library is (refresh(), and the operator's mark), never
 // on the read path. null = not counted yet.
 let vectorCounts: (db.VectorFreshnessCounts & { countedAt: string }) | null = null;
+// The beat grid and structure rows (the opt-in facets a regular run measures
+// while a show has Hot Mix on): tracks measured ok, and tracks the planner
+// would take `where needs`. Counted with the vectors, never on the read path.
+interface BeatGridCounts {
+  gridMeasured: number;
+  gridDue: number;
+  structureMeasured: number;
+  structureDue: number;
+  countedAt: string;
+}
+let beatGridCounts: BeatGridCounts | null = null;
 let inflight: Promise<void> | null = null;
 
 // Only total + scannedAt persist; scanning/scanError describe this process.
@@ -43,6 +54,8 @@ interface StoredCount {
   scannedAt: string;
   // Absent on a file from before #2313, and until the first count.
   vectors?: db.VectorFreshnessCounts & { countedAt: string };
+  // Absent on an older file, and until the first count.
+  beatGrid?: BeatGridCounts;
 }
 
 const isCount = (n: unknown): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 0;
@@ -52,12 +65,19 @@ function parseVectorCounts(v: any): StoredCount['vectors'] | null {
   return { forgottenSound: v.forgottenSound, forgottenSoundQueued: v.forgottenSoundQueued, dirty: v.dirty, countedAt: v.countedAt };
 }
 
+function parseBeatGridCounts(v: Partial<Record<keyof BeatGridCounts, unknown>> | null | undefined): BeatGridCounts | null {
+  if (!v || !isCount(v.gridMeasured) || !isCount(v.gridDue) || !isCount(v.structureMeasured) || !isCount(v.structureDue)) return null;
+  if (typeof v.countedAt !== 'string' || Number.isNaN(new Date(v.countedAt).getTime())) return null;
+  return { gridMeasured: v.gridMeasured, gridDue: v.gridDue, structureMeasured: v.structureMeasured, structureDue: v.structureDue, countedAt: v.countedAt };
+}
+
 // A missing, corrupt or nonsensical file reads as "never counted"; never throws.
 function loadStoredCount(): void {
   try {
     if (!existsSync(COUNT_FILE)) return;
     const parsed = JSON.parse(readFileSync(COUNT_FILE, 'utf8')) as Partial<StoredCount>;
     vectorCounts = parseVectorCounts(parsed?.vectors) ?? null;
+    beatGridCounts = parseBeatGridCounts(parsed?.beatGrid);
     const total = parsed?.total;
     const scannedAt = parsed?.scannedAt;
     if (typeof total !== 'number' || !Number.isFinite(total) || total < 0) return;
@@ -75,6 +95,7 @@ function persistCount(): void {
     const store: StoredCount = {
       version: 1, total: cache.total, scannedAt: cache.scannedAt,
       ...(vectorCounts ? { vectors: vectorCounts } : {}),
+      ...(beatGridCounts ? { beatGrid: beatGridCounts } : {}),
     };
     const tmp = `${COUNT_FILE}.tmp`;
     writeFileSync(tmp, JSON.stringify(store, null, 2));
@@ -100,6 +121,8 @@ let analysisAvail: {
   vocalCapable: boolean | null;
   audioError: string | null;
   vocalError: string | null;
+  gridCapable: boolean | null;
+  structureCapable: boolean | null;
   checkedAt: number;
 } | null = null;
 let analysisProbeInflight: Promise<void> | null = null;
@@ -117,6 +140,8 @@ function refreshAnalysisAvail() {
         vocalCapable: analyzer.vocalActivityAvailable(),
         audioError: analyzer.audioEmbeddingError(),
         vocalError: analyzer.vocalActivityError(),
+        gridCapable: analyzer.gridAvailable(),
+        structureCapable: analyzer.structureAvailable(),
         checkedAt: Date.now(),
       };
     } catch {
@@ -124,6 +149,7 @@ function refreshAnalysisAvail() {
         available: false, backend: 'none',
         audioCapable: null, vocalCapable: null,
         audioError: null, vocalError: null,
+        gridCapable: null, structureCapable: null,
         checkedAt: Date.now(),
       };
     } finally {
@@ -182,9 +208,25 @@ export function countVectors(): void {
   }
 }
 
+// Recount the beat grid and structure rows. Synchronous SQL over library.db
+// (the facet table); never throws, like countVectors().
+function countBeatGrid(): void {
+  try {
+    const [g, s] = db.facetCountsOf(['grid', 'structure']);
+    beatGridCounts = {
+      gridMeasured: g.ok, gridDue: g.needs, structureMeasured: s.ok, structureDue: s.needs,
+      countedAt: new Date().toISOString(),
+    };
+    persistCount();
+  } catch (err) {
+    console.warn(`[library-coverage] could not count beat grids: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 async function doScan() {
   cache.scanning = true;
   cache.scanError = null;
+  countBeatGrid();
   countVectors();
   try {
     let count = 0;
@@ -333,6 +375,17 @@ export async function get() {
     vectorsCountedAt: vectorCounts?.countedAt ?? null,
     audioStatus,
     vocalStatus,
+    // The beat grid and structure rows: a show has Hot Mix on (so a regular
+    // run measures them), what the analyzer reports (null = unknown), and the
+    // counts as of `beatGridCountedAt`, the last refresh(); null until counted.
+    gridWanted: beatGridWanted(),
+    gridAvailable: analysisAvail ? analysisAvail.gridCapable : null,
+    structureAvailable: analysisAvail ? analysisAvail.structureCapable : null,
+    gridMeasured: beatGridCounts?.gridMeasured ?? null,
+    gridDue: beatGridCounts?.gridDue ?? null,
+    structureMeasured: beatGridCounts?.structureMeasured ?? null,
+    structureDue: beatGridCounts?.structureDue ?? null,
+    beatGridCountedAt: beatGridCounts?.countedAt ?? null,
     // The Library page's counts line (library-overview.ts); null when the
     // library cannot be read, and the line then hides.
     overview: getOverview(overviewHintOf(tagged, analysed)),
