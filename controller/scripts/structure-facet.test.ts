@@ -23,8 +23,9 @@
 //   - an unmeasurable structure (too long) is no "Needs you" item;
 //   - a replaced file and a pruned track drop it; an ID rotation moves it (the
 //     new id's own row wins); a re-derive drops orphan rows;
-//   - the planner plans `structure` only on a positive capability, and a
-//     regular run never plans it;
+//   - the planner plans `structure` only on a positive capability, and the
+//     regular run's model lane never plans it (its own Hot Mix step:
+//     beat-grid-regular-run.test.ts);
 //   - a structure-only plan streams by URL (no capped download), carries the
 //     grid in the request, and writes the row; one that fails alone is
 //     stamped on the structure row, never on analyze_fail_count;
@@ -304,7 +305,7 @@ test('a replaced file and a pruned track drop the structure; an ID rotation move
   assert.equal(db.getStructure('ghost'), null);
 });
 
-test('the planner plans structure only on a positive capability; a regular run never does', () => {
+test('the planner plans structure only on a positive capability; the model lane never does', () => {
   barred('p1');
   track('p2'); // no grid
   const plan = (structure: boolean | null | undefined, ids = ['p1']) => P.planAcoustics({

@@ -26,7 +26,9 @@ import {
 } from './analyze-capability.js';
 import { probeListenerCount } from '../broadcast/listeners.js';
 import { sweepKeepLastFromDisk } from '../broadcast/pick-stems.js';
-import { planAcoustics, type AcousticsPlan, type WorkRequest } from './acoustics-plan.js';
+import { planAcoustics, planStateFacets, type AcousticsPlan, type WorkRequest } from './acoustics-plan.js';
+import { hotMixStretchWanted } from '../settings/liquidsoap.js';
+import { beatGridRunDecision, newTracksFirst } from './beat-grid-run-policy.js';
 
 // An opt-in facet (the beat grid, the structure) failed and nothing else was
 // asked of the track: a failure for the pass's systemic guard like any other,
@@ -94,6 +96,17 @@ export function vocalActivityWanted(): boolean {
 // The audio twin of vocalActivityWanted(), so the panel doesn't re-derive it.
 export function audioEmbeddingWanted(): boolean {
   return audioBackfillDefault();
+}
+
+// A show has Hot Mix on, so a regular run measures the beat grid and the
+// structure (beat-grid-run-policy.ts). Read by /library/coverage too, so the
+// panel shows those rows on the same rule. Unreadable settings read as off.
+export function beatGridWanted(): boolean {
+  try {
+    return hotMixStretchWanted(settings.get());
+  } catch {
+    return false;
+  }
 }
 
 // Quiet-times gate (#1099) — same env-wins-on precedence as the toggles above,
@@ -182,6 +195,9 @@ export interface AnalyzeStats {
   // The opt-in whole-file backfill that followed the pass (absent when it
   // did not run).
   wholeFile?: { analyzed: number; failed: number; scope: number };
+  // The beat grid and structure steps of a planned regular run while a show
+  // has Hot Mix on, both steps summed (absent when neither measured a track).
+  beatGrid?: { analyzed: number; failed: number; scope: number };
 }
 
 // Provenance label stamped into audio_embedding_meta; the worker owns the model.
@@ -271,8 +287,10 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   if (opts.plan) return runAnalysisPassOnce(opts);
   // One scope engine (B24): where the whole-file lane is on and the analyzer
   // speaks the facet protocol, a regular run plans from the facet table like
-  // the CLI (regular-run-plan.ts), so a GUI run converges to the same state.
-  // A forced redo (--re-analyze) and every other station keep the legacy pass.
+  // the CLI (regular-run-plan.ts), so a GUI run converges to the same state;
+  // while a show has Hot Mix on it also measures the beat grid and the
+  // structure (runBeatGridSteps). A forced redo (--re-analyze) and every other
+  // station keep the legacy pass, which never measures those two.
   if (!opts.reAnalyze && (await plannedRegularRunAvailable())) return runPlannedRegularPass(opts);
   // The whole-file facets ride a regular run only when the operator opted in,
   // as facet plans (same quiet gate, same failure rules). The regular pass
@@ -311,8 +329,9 @@ async function plannedRegularRunAvailable(): Promise<boolean> {
 
 // The regular run as a facet plan (regular-run-plan.ts has the order and why):
 // the whole-file lane first for the tracks about to be read with head or tail
-// due, then the model lane's plan, then the rest of the whole-file lane. The
-// widening decisions (and their notices) are the legacy pass's own.
+// due, then the model lane's plan, then (while a show has Hot Mix on) the beat
+// grid and the structure measured on it, then the rest of the whole-file lane.
+// The widening decisions (and their notices) are the legacy pass's own.
 async function runPlannedRegularPass(opts: AnalyzeOptions): Promise<AnalyzeStats> {
   const backend = analyzer.backendLabel();
   const audio = backfillDecision({
@@ -361,12 +380,13 @@ async function runPlannedRegularPass(opts: AnalyzeOptions): Promise<AnalyzeStats
     headroom: await stemCacheStore.headroomTracks(),
     existing: await stemCacheStore.cachedTrackIdSet(),
   }));
-  for (const c of plan.byFacet) {
-    if (c.matched === 0) continue;
-    const skipped = Object.entries(c.skipped).map(([k, v]) => `${k} ${v}`).join(', ');
-    console.log(`[analyze] regular run: ${c.facet} ${c.planned} planned of ${c.matched} due${skipped ? ` (skipped: ${skipped})` : ''}`);
-  }
+  logRegularPlan(plan);
   const stats = await runAnalysisPassOnce({ ...opts, plan });
+  // Before the rest of lane 1: the tracks just analysed already have their
+  // whole-file figures (the lead slice), and what is left there is the
+  // library's backlog (hours when the lane is first switched on), which must
+  // not hold back the grid a Hot Mix show plays new tracks on.
+  const beatGrid = stats.available ? await runBeatGridSteps(opts.limit, ids, plan.items.map(i => i.id)) : null;
   const rest = stats.available
     ? await runWholeFileBackfill({ limit: opts.limit, ids: undefined, label: '', noticeSkip: true })
     : null;
@@ -377,7 +397,69 @@ async function runPlannedRegularPass(opts: AnalyzeOptions): Promise<AnalyzeStats
         scope: (lead?.scope ?? 0) + (rest?.scope ?? 0),
       }
     : null;
-  return wholeFile ? { ...stats, wholeFile } : stats;
+  return { ...stats, ...(wholeFile ? { wholeFile } : {}), ...(beatGrid ? { beatGrid } : {}) };
+}
+
+function logRegularPlan(plan: AcousticsPlan): void {
+  for (const c of plan.byFacet) {
+    if (c.matched === 0) continue;
+    const skipped = Object.entries(c.skipped).map(([k, v]) => `${k} ${v}`).join(', ');
+    console.log(`[analyze] regular run: ${c.facet} ${c.planned} planned of ${c.matched} due${skipped ? ` (skipped: ${skipped})` : ''}`);
+  }
+}
+
+// The opt-in beat grid, then the structure, for every track that needs them
+// (`--where needs`, the tracks this run just analysed first), while a show
+// has Hot Mix on (beat-grid-run-policy.ts decides, and words the notice). The
+// structure is measured on the grid stored when it is planned, so its plan is
+// made only once the grid step has written: planned together, a new track has
+// no grid yet (`no-grid`) and would wait a whole run for its structure. Each
+// step is non-fatal, like a whole-file slice. null when neither measured a
+// track, so a run without Hot Mix returns the stats it always did.
+async function runBeatGridSteps(
+  limit: number | undefined,
+  ids: readonly string[],
+  analysed: readonly string[],
+): Promise<AnalyzeStats['beatGrid'] | null> {
+  if (!beatGridWanted()) return null;
+  // An unknown answer can be a probe that reached the sidecar while its pool
+  // was still starting: ask once more first, as the whole-file lane does.
+  if (analyzer.gridAvailable() == null || analyzer.structureAvailable() == null) {
+    await analyzer.refreshCapabilities().catch(() => {});
+  }
+  const decision = beatGridRunDecision({
+    hotMix: true, gridCapable: analyzer.gridAvailable(), structureCapable: analyzer.structureAvailable(),
+  });
+  if (decision.notice) logEvent('warning', decision.notice);
+  const order = newTracksFirst(ids, analysed);
+  const total = { analyzed: 0, failed: 0, scope: 0 };
+  let ran = false;
+  for (const facet of ['grid', 'structure'] as const) {
+    if (!decision[facet]) continue;
+    const label = facet === 'grid' ? 'Beat grid' : 'Track structure';
+    try {
+      const plan = planAcoustics({
+        ids: order,
+        facets: [facet],
+        where: { kind: 'needs' },
+        // Read now: the structure step sees the grids the grid step just wrote.
+        state: db.loadFacetState(planStateFacets([facet])),
+        capabilities: { clap: null, demucs: null, tailVocal: null, grid: facet === 'grid', structure: facet === 'structure' },
+        limit,
+      });
+      logRegularPlan(plan);
+      if (plan.items.length === 0) continue;
+      logEvent('info', `${label} for Hot Mix: ${plan.items.length.toLocaleString('en-GB')} tracks to measure`);
+      const s = await runAnalysisPassOnce({ plan });
+      total.analyzed += s.analyzed;
+      total.failed += s.failed;
+      total.scope += s.scope;
+      ran = true;
+    } catch (err) {
+      logEvent('warning', `${label} failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return ran ? total : null;
 }
 
 // One slice of the whole-file backfill. `ids` limits it to those tracks

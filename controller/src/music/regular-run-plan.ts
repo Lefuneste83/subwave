@@ -13,7 +13,13 @@
 //     stems, where needs. Loudness and edges never ride it: in the facet
 //     protocol `loudness` IS the whole-file measurement, so it belongs to lane 1
 //     (wide, no Python models), never to the model pool.
-// Then the rest of lane 1 (the library outside lane 2), as before.
+// Then, only while a show has Hot Mix on (beat-grid-run-policy.ts), the
+// opt-in beat grid and the structure, each its own `where needs` plan over the
+// library, the tracks lane 2 just read first: the grid, then the structure
+// planned from the state AFTER the grid step wrote, since a structure is
+// measured on the grid stored when it is planned (a new track has none
+// before). Without Hot Mix neither is planned. Then the rest of lane 1 (the
+// library outside lane 2), as before.
 //
 // Differences from the legacy widenings it replaces (needsAnalysisIds,
 // unanalysedAudioIds, needsVocalIds, needsStemsIds):
@@ -25,6 +31,8 @@
 //    music/stem-priority.ts order, capped at the cache's headroom less what the
 //    other items will write, because the budget always binds on a real library
 //    and this slice IS which tracks get stems.
+// The grid and structure never ride this plan (regularRunFacets): they are
+// planned by analyze.ts's own steps, on the analyzer's positive answer.
 // Only used where the whole-file lane is on and the analyzer speaks the facet
 // protocol (both fork-side). Every other station keeps the legacy pass,
 // byte-identical.

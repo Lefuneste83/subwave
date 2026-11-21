@@ -17,7 +17,8 @@
 //   - a replaced file and a pruned track drop the grid; an ID rotation moves
 //     it (the new id's own row wins);
 //   - the planner plans `grid` only on a positive capability (unknown = not
-//     planned, unlike CLAP), and a regular run never plans it;
+//     planned, unlike CLAP), and the regular run's model lane never plans it
+//     (its own Hot Mix step: beat-grid-regular-run.test.ts);
 //   - a grid-only plan streams by URL (no capped download), writes the grid
 //     and leaves bpm/beats/bars as they were; a grid that fails alone is
 //     stamped on the grid row, never on analyze_fail_count;
@@ -216,7 +217,7 @@ test('a replaced file and a pruned track drop the grid; an ID rotation moves it'
   assert.equal(db.getGrid('g7'), null);
 });
 
-test('the planner plans grid only on a positive capability; a regular run never does', () => {
+test('the planner plans grid only on a positive capability; the model lane never does', () => {
   track('p1');
   const plan = (grid: boolean | null | undefined) => P.planAcoustics({
     ids: ['p1'], facets: ['grid'], where: { kind: 'needs' }, state: db.loadFacetState(['grid']),

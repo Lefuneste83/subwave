@@ -347,7 +347,7 @@ export function planAcoustics(input: PlanInput): AcousticsPlan {
     warnings.push(
       'structure: per-bar kick, bass, mids, highs and melody on the track\'s own grid (one whole-file decode per track, ' +
         'numpy/scipy, no model); only tracks whose grid has trusted bars (run `--facets grid` first), files over 30 min ' +
-        'are left unmeasurable; stored on its own (track_structure), read by `npm run structure-report`, used by nothing on air yet' +
+        'are left unmeasurable; stored on its own (track_structure), read by `npm run structure-report` and a Hot Mix show\'s phrase mix' +
         (input.capabilities.structure !== true ? ' — the analyzer does not report the structure (rebuild it), so nothing is planned' : ''),
     );
   }
