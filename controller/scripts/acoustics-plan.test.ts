@@ -608,11 +608,18 @@ test('URL fallback omits stems and leaves a stems-only job retryable', async () 
   const id = 'remote-stems';
   db.upsertTrackMeta(id, { title: id, duration: 214 });
   rejectSharedPath = true;
+  const lines: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => { lines.push(a.map(String).join(' ')); log(...a); };
+  const said = () => lines.filter((l) => l.startsWith('[analyze] Stems skipped for') && l.includes("station's state folder"));
   try {
     requests.length = 0;
     const stats = await runAnalysisPass({ plan: facetPlan([id], ['stems']) });
     assert.equal(requests.length, 1, 'no URL retry may force stems without a shared output dir');
     assert.equal(stats.analyzed, 0);
+    // Never silent: the pass says why the track got no stems, once.
+    assert.equal(said().length, 1, lines.join('\n'));
+    assert.match(said()[0], /Stems skipped for 1 track:/);
     assert.equal(sql().prepare('SELECT stems_at FROM tracks WHERE id = ?').pluck().get(id), null);
     assert.equal(facetPlan([id], ['stems'], 'needs').items.length, 1);
     requests.length = 0;
@@ -620,7 +627,9 @@ test('URL fallback omits stems and leaves a stems-only job retryable', async () 
     assert.equal(requests.length, 2);
     assert.deepEqual(requests[1]?.facets, ['head']);
     assert.equal(requests[1]?.stems_dir, undefined);
+    assert.equal(said().length, 2, 'said again by the pass whose head went by URL without stems');
   } finally {
+    console.log = log;
     rejectSharedPath = false;
     rmSync(root, { recursive: true, force: true });
   }
