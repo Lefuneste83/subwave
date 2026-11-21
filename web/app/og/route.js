@@ -7,21 +7,23 @@ import { ImageResponse } from 'next/og';
 // own absolute <meta og:image>.
 //
 // With a station logo set (Settings → Station, controller branding/
-// station-logo.ts), the card is the station's own (G26): the logo, fitted and
-// never cropped, beside the station name, on a background taken from the logo
-// (lib/share-card.ts). Without one, or when the controller can't be reached,
-// it is the stock SUB/WAVE card below, unchanged. Read per request so a new
+// station-logo.ts), the card is the station's own: the logo alone, fitted and
+// never cropped, on a background taken from the logo (lib/share-card.ts).
+// Without one, or when the controller can't be reached, it is the stock
+// SUB/WAVE card below, unchanged. Read per request so a new
 // logo shows without a rebuild; shared caches keep it an hour.
 
 import sharp from 'sharp';
-import { cardColours, nameFontSize } from '@/lib/share-card';
-import { DEFAULT_STATION, fetchStationIdentity } from '@/lib/station';
+import { cardColours } from '@/lib/share-card';
 
 export const contentType = 'image/png';
 export const dynamic = 'force-dynamic';
 
 const CONTROLLER_BASE = (process.env.CONTROLLER_INTERNAL_URL || 'http://localhost:7701').replace(/\/$/, '');
-const LOGO_BOX = 430;
+// The logo's box: the card less a margin, so a wide logo uses the width and a
+// square one the height.
+const LOGO_W = 1040;
+const LOGO_H = 510;
 const CACHE = { 'Cache-Control': 'public, max-age=3600' };
 
 const BG = '#100e0c';
@@ -49,7 +51,7 @@ async function fetchLogo() {
 // WebP included, which the card renderer can't read), and its colours.
 async function prepareLogo(buf) {
   const png = await sharp(buf)
-    .resize(LOGO_BOX, LOGO_BOX, { fit: 'inside', withoutEnlargement: false })
+    .resize(LOGO_W, LOGO_H, { fit: 'inside', withoutEnlargement: false })
     .png()
     .toBuffer({ resolveWithObject: true });
   const raw = await sharp(buf)
@@ -65,45 +67,22 @@ async function prepareLogo(buf) {
   };
 }
 
-function LogoCard({ logo, name }) {
-  const { colours } = logo;
+// The logo alone, centred and as large as the card's height allows: the
+// station name is already the preview's title, so the picture does not
+// repeat it.
+function LogoCard({ logo }) {
   return (
     <div
       style={{
         width: 1200,
         height: 630,
-        background: colours.background,
-        color: colours.text,
+        background: logo.colours.background,
         display: 'flex',
         alignItems: 'center',
-        padding: '0 80px',
-        gap: 72,
-        boxSizing: 'border-box',
+        justifyContent: 'center',
       }}
     >
-      <div style={{ width: LOGO_BOX, height: LOGO_BOX, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-        <img src={logo.src} width={logo.width} height={logo.height} alt="" />
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 22, flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 12,
-            color: colours.muted,
-            fontSize: 18,
-            letterSpacing: '0.28em',
-            textTransform: 'uppercase',
-            fontWeight: 700,
-          }}
-        >
-          <span style={{ width: 10, height: 10, borderRadius: '50%', background: colours.muted, display: 'block' }} />
-          <span>Live radio</span>
-        </div>
-        <div style={{ fontSize: nameFontSize(name), lineHeight: 1.02, fontWeight: 800, letterSpacing: '-0.02em' }}>
-          {name}
-        </div>
-      </div>
+      <img src={logo.src} width={logo.width} height={logo.height} alt="" />
     </div>
   );
 }
@@ -203,9 +182,8 @@ export async function GET() {
   const buf = await fetchLogo();
   if (buf) {
     try {
-      const [logo, id] = await Promise.all([prepareLogo(buf), fetchStationIdentity()]);
-      const name = id?.station?.trim() || DEFAULT_STATION;
-      return new ImageResponse(<LogoCard logo={logo} name={name} />, { width: 1200, height: 630, headers: CACHE });
+      const logo = await prepareLogo(buf);
+      return new ImageResponse(<LogoCard logo={logo} />, { width: 1200, height: 630, headers: CACHE });
     } catch {
       // An image sharp can't read: the stock card, never a broken preview.
     }
