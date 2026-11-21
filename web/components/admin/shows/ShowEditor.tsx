@@ -24,7 +24,6 @@ import {
   AllowlistSkipNotice,
   GuestPersonaPicker,
   IMAGING_PICKER_COPY,
-  JingleMixerNotice,
   ThemePicker,
   PlaylistPicker,
 } from './ShowPickers';
@@ -124,8 +123,6 @@ interface ShowEditorProps {
   jinglesStatus: PlaylistIndexStatus;
   beds: { id: string; name: string; songCount: null }[];
   bedsStatus: PlaylistIndexStatus;
-  // The mixer counts the rotate, so it cannot honour a jingle list.
-  jingleListIgnored: boolean;
   apiBase: string;
   adminFetch: (path: string, init?: RequestInit) => Promise<Response>;
   minTrackSeconds?: number;
@@ -162,7 +159,6 @@ export function ShowEditor({
   jinglesStatus,
   beds,
   bedsStatus,
-  jingleListIgnored,
   apiBase,
   adminFetch,
   minTrackSeconds,
@@ -1138,7 +1134,6 @@ export function ShowEditor({
                   on a jingle ignores the list.
                 </span>
               </PlaylistIdsField>
-              <JingleMixerNotice ignored={jingleListIgnored} listed={show.allowedJingles} />
               <AllowlistSkipNotice
                 kind="jingle"
                 listed={show.allowedJingles}

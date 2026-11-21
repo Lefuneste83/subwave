@@ -50,6 +50,7 @@ import { jinglePlacement, pickRotateJingle, onJingleRotateOwnerChange } from './
 import { overlayDue, overlayEnabled, overlayOffer, overlayOpening, overlayFits, overlayMixerStatus } from './jingle-overlay.js';
 import * as beds from './beds.js';
 import * as bedPolicy from './bed-policy.js';
+import * as jingleShowSync from './jingle-show-sync.js';
 import { allowedForShow } from './show-allowlist.js';
 import { vocalRunwayMs, segmentFitsRunway } from './vocal-runway.js';
 import * as session from './session.js';
@@ -528,6 +529,7 @@ class Queue {
   _hotMixSafeBuilt = () => liquidsoapControl.hotMixSafeBuilt();
   // Whether it runs the per-track bass pots (music/bass-pot-policy.ts); a field too.
   _hotMixPotsBuilt = () => liquidsoapControl.hotMixPotsBuilt();
+  _onMusicStartedForJingles = jingleShowSync.onMusicStarted;
   _bedCatalog = beds.catalog;
   _bedGetPath = beds.getPath;
   _writeHandoff = writeHandoff;
@@ -4436,6 +4438,11 @@ class Queue {
       this.log('playing', `${np.title} — ${np.artist}`, { source: 'auto' });
     }
 
+    // The outgoing show's confirmed final track hands the mixer's rotate the
+    // incoming show's jingle list now, before the seam that ends it (#2367).
+    // Ahead of the handoff runner, which first awaits the track's intro.
+    void this._onMusicStartedForJingles(this.current?.track ?? null);
+
     // Every real music start can confirm an overdue handoff, including an
     // untracked auto-playlist fallback. The runner waits for a tracked intro's
     // complete publication before taking the voice chain behind it.
@@ -4650,6 +4657,20 @@ class Queue {
     });
   }
 
+  // A pick cycle that arms on the track already on air (no held anchor) has
+  // also passed the music start that hands the mixer's rotate the incoming
+  // show's jingle list (onTrackStarted, #2367), so this hands it over. It runs
+  // straight after the arm, ahead of the boundary plan and the mic-pass render,
+  // which can take much of a short final track: seen live, armed five seconds
+  // into the final track with the pair rendered eighteen seconds later, and the
+  // list changed only at the roll. jingleShowSync re-checks that the record
+  // names the on-air track. Not private: scripts/jingle-show-list.test.ts.
+  confirmOnAirJingleList(armed: boolean, pickAnchorItem: QueueItem | null): boolean {
+    if (!armed || pickAnchorItem) return false;
+    void this._onMusicStartedForJingles(this.current?.track ?? null);
+    return true;
+  }
+
   // A pick cycle that arms the boundary handoff with NO held anchor records the
   // track already on air as the outgoing show's final track
   // (armBoundaryHandoff(pickCtx, this.current.track)). The pair is released by
@@ -4728,6 +4749,7 @@ class Queue {
         const finalTrack = pickAnchorItem?.track ?? this.current?.track ?? null;
         const finalTrackHandoff = handoffAnchorReachesBoundary(forecastNow, leadSec, nextBoundaryAt)
           && session.armBoundaryHandoff(pickCtx, finalTrack);
+        this.confirmOnAirJingleList(finalTrackHandoff, pickAnchorItem);
         if (finalTrackHandoff) {
           try {
             await programme.prepareBoundaryPlan(pickCtx);
