@@ -6,13 +6,15 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createPreviewPlayer, fmtClock, type PreviewAudio } from './preview-player';
+import { createPreviewPlayer, fmtClock, parseVolume, type PreviewAudio } from './preview-player';
 
 class FakeAudio implements PreviewAudio {
   src = '';
   currentTime = 0;
   duration = Number.NaN;
   paused = true;
+  volume = 1;
+  muted = false;
   failPlay = false;
   plays: string[] = [];
   private handlers = new Map<string, Array<() => void>>();
@@ -48,7 +50,7 @@ test('a press plays the track from a fresh link; a second press pauses, a third 
   await player.toggle('a', link('a'));
   assert.deepEqual(links, ['a']);
   assert.equal(audio.src, '/api/library/preview/a?exp=1&sig=x');
-  assert.deepEqual(player.getSnapshot(), { id: 'a', status: 'playing', time: 0, duration: 0 });
+  assert.deepEqual(player.getSnapshot(), { id: 'a', status: 'playing', time: 0, duration: 0, volume: 1, muted: false });
   await player.toggle('a', link('a'));
   assert.equal(player.getSnapshot().status, 'paused');
   assert.equal(audio.paused, true);
@@ -112,8 +114,58 @@ test('the end of the track, or stop, clears the preview', async () => {
   const { audio, player, link } = setup();
   await player.toggle('a', link('a'));
   audio.emit('ended');
-  assert.deepEqual(player.getSnapshot(), { id: null, status: null, time: 0, duration: 0 });
+  assert.deepEqual(player.getSnapshot(), { id: null, status: null, time: 0, duration: 0, volume: 1, muted: false });
   assert.equal(audio.src, '');
+});
+
+function memoryStore(initial: string | null = null) {
+  let value = initial;
+  return { get: () => value, set: (v: string) => { value = v; }, read: () => value };
+}
+
+test('the level is applied to the element, kept across previews and saved', async () => {
+  const audio = new FakeAudio();
+  const store = memoryStore();
+  const player = createPreviewPlayer(() => audio, store);
+  player.setVolume(0.4);
+  await player.toggle('a', async () => '/a');
+  assert.equal(audio.volume, 0.4, 'an element made after the change starts at the level');
+  player.stop();
+  assert.equal(player.getSnapshot().volume, 0.4, 'stopping keeps the level');
+  player.setVolume(0.7);
+  assert.equal(audio.volume, 0.7);
+  assert.equal(store.read(), '0.7');
+  player.setVolume(5);
+  assert.equal(player.getSnapshot().volume, 1, 'clamped');
+});
+
+test('the saved level is read back, and a bad one is full level', async () => {
+  const audio = new FakeAudio();
+  const player = createPreviewPlayer(() => audio, memoryStore('0.3:m'));
+  await player.toggle('a', async () => '/a');
+  assert.deepEqual([audio.volume, audio.muted], [0.3, true]);
+  assert.deepEqual(parseVolume('junk'), { volume: 1, muted: false });
+  assert.deepEqual(parseVolume(null), { volume: 1, muted: false });
+  assert.deepEqual(parseVolume('0.25'), { volume: 0.25, muted: false });
+  const blocked = createPreviewPlayer(() => new FakeAudio(), { get: () => { throw new Error('denied'); }, set: () => { throw new Error('denied'); } });
+  blocked.setVolume(0.2);
+  assert.equal(blocked.getSnapshot().volume, 0.2, 'storage that throws changes nothing else');
+});
+
+test('mute toggles; raising the level unmutes; unmuting at zero comes back at half', async () => {
+  const audio = new FakeAudio();
+  const store = memoryStore();
+  const player = createPreviewPlayer(() => audio, store);
+  await player.toggle('a', async () => '/a');
+  player.toggleMute();
+  assert.equal(audio.muted, true);
+  assert.equal(store.read(), '1:m');
+  player.setVolume(0.6);
+  assert.deepEqual([audio.muted, audio.volume], [false, 0.6]);
+  player.setVolume(0);
+  player.toggleMute();
+  player.toggleMute();
+  assert.deepEqual([audio.muted, audio.volume], [false, 0.5]);
 });
 
 test('the clock reads m:ss', () => {

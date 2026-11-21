@@ -18,6 +18,8 @@ export interface PreviewSnapshot {
   status: PreviewStatus | null;
   time: number;      // seconds
   duration: number;  // seconds; 0 until the element knows
+  volume: number;    // 0..1, the operator's level, kept across previews
+  muted: boolean;
 }
 
 // The slice of HTMLAudioElement the store drives, so a test can stand one in.
@@ -26,6 +28,8 @@ export interface PreviewAudio {
   currentTime: number;
   readonly duration: number;
   readonly paused: boolean;
+  volume: number;
+  muted: boolean;
   play(): Promise<void>;
   pause(): void;
   removeAttribute(name: string): void;
@@ -33,11 +37,27 @@ export interface PreviewAudio {
   addEventListener(type: string, fn: () => void): void;
 }
 
-const IDLE: PreviewSnapshot = { id: null, status: null, time: 0, duration: 0 };
+// Where the level is kept between visits (localStorage in the browser).
+export interface VolumeStore {
+  get(): string | null;
+  set(value: string): void;
+}
 
-export function createPreviewPlayer(makeAudio: () => PreviewAudio) {
+const IDLE_TRACK = { id: null, status: null, time: 0, duration: 0 } as const;
+const IDLE: PreviewSnapshot = { ...IDLE_TRACK, volume: 1, muted: false };
+
+// "0.6" or "0.6:m" (muted); anything else is full level, unmuted.
+export function parseVolume(raw: string | null): { volume: number; muted: boolean } {
+  const m = /^(\d*\.?\d+)(:m)?$/.exec(raw ?? '');
+  const v = m ? Number(m[1]) : Number.NaN;
+  return { volume: Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 1, muted: !!m?.[2] };
+}
+
+export function createPreviewPlayer(makeAudio: () => PreviewAudio, store?: VolumeStore) {
   let audio: PreviewAudio | null = null;
-  let snap: PreviewSnapshot = IDLE;
+  let saved: { volume: number; muted: boolean } = { volume: 1, muted: false };
+  try { saved = parseVolume(store?.get() ?? null); } catch { /* storage blocked: full level */ }
+  let snap: PreviewSnapshot = { ...IDLE, ...saved };
   // Bumped by every start and stop, so a link that arrives after the operator
   // moved on is dropped instead of starting the wrong track.
   let generation = 0;
@@ -45,7 +65,8 @@ export function createPreviewPlayer(makeAudio: () => PreviewAudio) {
 
   const publish = (next: Partial<PreviewSnapshot>) => {
     const merged = { ...snap, ...next };
-    if (merged.id === snap.id && merged.status === snap.status && merged.time === snap.time && merged.duration === snap.duration) return;
+    if (merged.id === snap.id && merged.status === snap.status && merged.time === snap.time
+      && merged.duration === snap.duration && merged.volume === snap.volume && merged.muted === snap.muted) return;
     snap = merged;
     for (const l of listeners) l();
   };
@@ -54,6 +75,8 @@ export function createPreviewPlayer(makeAudio: () => PreviewAudio) {
   function element(): PreviewAudio {
     if (audio) return audio;
     const a = makeAudio();
+    a.volume = snap.volume;
+    a.muted = snap.muted;
     a.addEventListener('timeupdate', () => { if (snap.id) publish({ time: a.currentTime }); });
     a.addEventListener('durationchange', () => { if (snap.id) publish({ duration: knownDuration(a) }); });
     a.addEventListener('loadedmetadata', () => { if (snap.id) publish({ duration: knownDuration(a) }); });
@@ -72,7 +95,7 @@ export function createPreviewPlayer(makeAudio: () => PreviewAudio) {
       audio.removeAttribute('src');
       audio.load();
     }
-    publish(IDLE);
+    publish(IDLE_TRACK);
   }
 
   // Play `id`, or pause/resume it when it is already the preview. `link` asks
@@ -121,10 +144,35 @@ export function createPreviewPlayer(makeAudio: () => PreviewAudio) {
     publish({ time: t });
   }
 
+  function persist() {
+    try { store?.set(`${snap.volume}${snap.muted ? ':m' : ''}`); } catch { /* storage blocked */ }
+  }
+
+  // Moving the level up unmutes, as on any player; to zero is just quiet.
+  function setVolume(v: number) {
+    if (!Number.isFinite(v)) return;
+    const volume = Math.max(0, Math.min(1, v));
+    const muted = volume > 0 ? false : snap.muted;
+    if (audio) { audio.volume = volume; audio.muted = muted; }
+    publish({ volume, muted });
+    persist();
+  }
+
+  // Unmuting at zero would be silent: it brings the level back to half.
+  function toggleMute() {
+    const muted = !snap.muted;
+    const volume = !muted && snap.volume === 0 ? 0.5 : snap.volume;
+    if (audio) { audio.volume = volume; audio.muted = muted; }
+    publish({ volume, muted });
+    persist();
+  }
+
   return {
     toggle,
     seek,
     stop,
+    setVolume,
+    toggleMute,
     subscribe(l: () => void) { listeners.add(l); return () => { listeners.delete(l); }; },
     getSnapshot: () => snap,
   };
@@ -133,13 +181,34 @@ export function createPreviewPlayer(makeAudio: () => PreviewAudio) {
 export type PreviewPlayer = ReturnType<typeof createPreviewPlayer>;
 
 let shared: PreviewPlayer | null = null;
+const VOLUME_KEY = 'subwave_preview_volume';
 function sharedPlayer(): PreviewPlayer {
   shared ??= createPreviewPlayer(() => {
     const a = new Audio();
     a.preload = 'auto';
     return a;
+  }, {
+    get: () => localStorage.getItem(VOLUME_KEY),
+    set: (v) => localStorage.setItem(VOLUME_KEY, v),
   });
   return shared;
+}
+
+// Whether this browser lets a page set an audio element's level. iOS and
+// iPadOS Safari do not (the level is the hardware buttons'), and say so by
+// keeping `volume` at 1 whatever is written: there the bar offers mute only.
+let volumeSettable: boolean | null = null;
+export function canSetVolume(): boolean {
+  if (volumeSettable != null) return volumeSettable;
+  if (typeof window === 'undefined') return true;
+  try {
+    const probe = new Audio();
+    probe.volume = 0.5;
+    volumeSettable = probe.volume === 0.5;
+  } catch {
+    volumeSettable = false;
+  }
+  return volumeSettable;
 }
 
 // Tables currently showing rows: the preview stops when the last one unmounts,
