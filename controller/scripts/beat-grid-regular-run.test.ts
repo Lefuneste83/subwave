@@ -135,6 +135,8 @@ after(async () => {
 async function hotMix(on: boolean) {
   await settings.update({
     shows: on ? [{ id: 's_mix', name: 'Night Set', personaId: settings.get().personas[0].id, hotMix: { enabled: true } }] : [],
+    // A switch on, so every audio-energy pass says a line (even "nothing to do").
+    embedding: { audioEnergy: { ...settings.get().embedding.audioEnergy, fillEmpty: true } },
   } as never);
 }
 
@@ -145,6 +147,11 @@ const at = (id: string, f: string) => requests.findIndex((q) => of(id)(q) && ask
 
 // A regular run with the whole-file lane on (the planned regular run), the
 // console lines it printed captured.
+// The closing zero-shot scoring (audio moods, descriptors, the library-wide
+// audio-energy check) says one [audio-energy] line per pass that runs it.
+const isEnergyLine = (l: string) => l.startsWith('[audio-energy]');
+let energyLinesWithoutHotMix = -1;
+
 async function regularRun(): Promise<{ stats: Awaited<ReturnType<typeof runAnalysisPass>>; lines: string[] }> {
   await analyzer.refreshCapabilities();
   const lines: string[] = [];
@@ -171,6 +178,7 @@ test('without Hot Mix a regular run sends no grid or structure request, and repo
   assert.ok(!('beatGrid' in stats), JSON.stringify(stats));
   assert.ok(!lines.some((l) => /beat grid|structure|Hot Mix/i.test(l)), lines.join('\n'));
   assert.equal(db.getGrid('off1'), null);
+  energyLinesWithoutHotMix = lines.filter(isEnergyLine).length;
 });
 
 test('with Hot Mix on, a new track is analysed, then gridded, then its structure measured on that grid', async () => {
@@ -195,6 +203,10 @@ test('with Hot Mix on, a new track is analysed, then gridded, then its structure
   assert.ok(lines.some((l) => /regular run: grid \d+ planned of \d+ due/.test(l)), lines.join('\n'));
   assert.ok(lines.some((l) => /regular run: structure \d+ planned of \d+ due/.test(l)), lines.join('\n'));
   assert.deepEqual(stats.beatGrid, { analyzed: 4, failed: 0, scope: 4 }, JSON.stringify(stats));
+  // The grid and structure steps write no vector, so they never repeat the
+  // library-wide scoring: as many audio-energy passes as without Hot Mix.
+  assert.ok(energyLinesWithoutHotMix > 0, 'the run without Hot Mix scored once at least');
+  assert.equal(lines.filter(isEnergyLine).length, energyLinesWithoutHotMix, lines.filter(isEnergyLine).join('\n'));
 
   // Converged: a second run asks for neither again.
   const again = await regularRun();

@@ -64,6 +64,11 @@ export interface AnalyzeOptions {
   // tracks, each with its own worker flags. reAnalyze and the four widenings
   // are ignored. Absent = today's pass, unchanged.
   plan?: AcousticsPlan;
+  // False: skip the closing zero-shot scoring (audio moods, descriptors, the
+  // library-wide audio-energy check). For a step that writes no CLAP vector
+  // (the beat grid, the structure), where it would only repeat the model
+  // lane's own pass over the same vectors.
+  scoreAudio?: boolean;
 }
 
 // Env wins ON, never off; else the admin toggle (settings.audio.embeddings).
@@ -450,7 +455,8 @@ async function runBeatGridSteps(
       logRegularPlan(plan);
       if (plan.items.length === 0) continue;
       logEvent('info', `${label} for Hot Mix: ${plan.items.length.toLocaleString('en-GB')} tracks to measure`);
-      const s = await runAnalysisPassOnce({ plan });
+      // No vector written: the model lane already scored this run's.
+      const s = await runAnalysisPassOnce({ plan, scoreAudio: false });
       total.analyzed += s.analyzed;
       total.failed += s.failed;
       total.scope += s.scope;
@@ -750,7 +756,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
   if (ids.length === 0) {
     console.log('[analyze] nothing to analyse — all tracks current');
     // Zero-shot scoring can still have work (older vectors, changed vocabulary).
-    await scoreAudioMoods();
+    if (opts.scoreAudio !== false) await scoreAudioMoods();
     return { available: true, backend, analyzed: 0, failed: 0, scope: 0, audioEmbedded: 0, vocalAnalyzed: 0 };
   }
   if (passStems) await stemCacheStore.markPassPending();
@@ -1339,8 +1345,8 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
 
   // Zero-shot audio moods and sound descriptors over the vectors this and past
   // passes wrote; no-op when there is nothing new or the backend has no text
-  // tower.
-  await scoreAudioMoods();
+  // tower. A step that wrote no vector skips it (scoreAudio false).
+  if (opts.scoreAudio !== false) await scoreAudioMoods();
 
   // The worker degrades silently when Demucs fails to load: every track reads
   // "ok" with vocal_ranges omitted, re-targeting the same tracks forever (#996).

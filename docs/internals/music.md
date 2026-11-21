@@ -947,7 +947,10 @@ made only after the grid step has written. A structure is measured on the grid
 stored when it is planned, so planned together a new track would have none
 (`no-grid`) and wait a whole run. Each step honours the run's `--limit`, logs
 its `regular run: <facet> N planned of M due` line and is non-fatal; the stats
-carry them as `beatGrid`. Each needs the analyzer's positive answer
+carry them as `beatGrid`. Neither writes a CLAP vector, so neither repeats the
+closing zero-shot scoring (audio moods, descriptors, the library-wide
+audio-energy check: `scoreAudio: false`), which the model lane already ran over
+this run's vectors. Each needs the analyzer's positive answer
 (`music/beat-grid-run-policy.ts`): one that says it cannot, or has not said,
 gets nothing planned for that facet and one warning per run, and the structure
 still runs on stored grids when only the grid is missing. Without a Hot Mix
