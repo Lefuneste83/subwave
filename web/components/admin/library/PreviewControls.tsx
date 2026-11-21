@@ -4,13 +4,13 @@
 // shows a cover: the cover as the play button, and the bar under the playing
 // row. The store behind them is preview-player.ts.
 
-import { Play, Pause, Loader2, AlertTriangle, X } from 'lucide-react';
+import { Play, Pause, Loader2, AlertTriangle, X, Volume1, Volume2, VolumeX } from 'lucide-react';
 import { Btn } from '../ui';
 import { cn } from '../../../lib/cn';
 import { useAdminAuth, ADMIN_API_URL } from '../../../lib/adminAuth';
 import { adminJson } from '../../../lib/admin-query';
 import { Thumb } from './bits';
-import { fmtClock, usePreviewPlayer, type PreviewPlayer, type PreviewSnapshot } from './preview-player';
+import { canSetVolume, fmtClock, usePreviewPlayer, type PreviewPlayer, type PreviewSnapshot } from './preview-player';
 import type { Track } from './types';
 
 // The shared player, and the signed link its <audio> element plays
@@ -61,7 +61,10 @@ export function PreviewButton({ track, snap, onPress, active }: {
 }
 
 // Under the row while its track is the preview: where it is, a bar to click or
-// drag to seek, and how long it runs.
+// drag to seek, how long it runs, and its own level beside the stop button
+// (a preview often runs with the station in another tab). The level slider
+// hides on narrow screens and where the browser cannot set it (iOS: the
+// hardware buttons own the level), leaving the mute button.
 export function PreviewBar({ track, snap, player }: { track: Track; snap: PreviewSnapshot; player: PreviewPlayer }) {
   const duration = snap.duration || track.duration || 0;
   return (
@@ -80,9 +83,36 @@ export function PreviewBar({ track, snap, player }: { track: Track; snap: Previe
         className="min-w-0 flex-1 accent-[var(--accent)]"
       />
       <span className="lib-preview-time">{snap.status === 'error' ? 'error' : fmtClock(duration)}</span>
+      <VolumeControl snap={snap} player={player} />
       <Btn sm onClick={() => player.stop()} title="Stop the preview" aria-label="Stop the preview">
         <X size={12} />
       </Btn>
     </div>
+  );
+}
+
+function VolumeControl({ snap, player }: { snap: PreviewSnapshot; player: PreviewPlayer }) {
+  const silent = snap.muted || snap.volume === 0;
+  const Icon = silent ? VolumeX : snap.volume < 0.5 ? Volume1 : Volume2;
+  const label = silent ? 'Unmute the preview' : 'Mute the preview';
+  return (
+    <span className="flex shrink-0 items-center gap-1.5">
+      <Btn sm onClick={() => player.toggleMute()} title={label} aria-label={label}>
+        <Icon size={12} />
+      </Btn>
+      {canSetVolume() && (
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.05}
+          value={snap.muted ? 0 : snap.volume}
+          onChange={e => player.setVolume(Number(e.target.value))}
+          aria-label="Preview volume"
+          aria-valuetext={`${Math.round((snap.muted ? 0 : snap.volume) * 100)} %`}
+          className="hidden w-20 accent-[var(--accent)] sm:block"
+        />
+      )}
+    </span>
   );
 }
