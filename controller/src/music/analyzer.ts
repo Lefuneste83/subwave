@@ -1363,6 +1363,11 @@ export interface FacetSourceInfo {
 export interface FacetAnalysis {
   facets: Partial<Record<FacetName, FacetAnswer>>;
   source: FacetSourceInfo;
+  // The sidecar could not read the controller's staged copy (422
+  // path_unavailable: its state mount is not the station's), so the request
+  // went again by URL without stems, or not at all when stems were all it
+  // asked. The caller says so once per pass (analyze.ts sharedStateNotice).
+  stemsWithoutSharedState?: true;
 }
 
 // Where the music stops, from the stored edges: the tail window ends there
@@ -1596,8 +1601,9 @@ export async function analyzeFacets(
     if (!(err instanceof AnalyzerPathUnavailableError)) throw err;
     // Same degrade as analyzePathWithUrlFallback: no stems without shared state.
     const facets = opts.facets.filter(f => f !== 'stems');
-    return facets.length ? facetRequest({ url, ...body, facets }, timeoutMs)
-      : { facets: {}, source: { kind: 'unknown', durationS: null, complete: null, fallback: null, bytesRead: null, size: null } };
+    const dropped = opts.facets.includes('stems') ? { stemsWithoutSharedState: true as const } : {};
+    return facets.length ? { ...(await facetRequest({ url, ...body, facets }, timeoutMs)), ...dropped }
+      : { facets: {}, source: { kind: 'unknown', durationS: null, complete: null, fallback: null, bytesRead: null, size: null }, ...dropped };
   }
 }
 

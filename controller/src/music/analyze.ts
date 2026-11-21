@@ -288,6 +288,19 @@ export function wholeFileSkipNotice(capability: boolean | null): string {
       '(rebuild the analyzer), or one whose workers were still starting; skipped this run, asked again next run';
 }
 
+// Stems need the analyzer to read the station's own state folder (the stem
+// cache lives in it): one whose state mount is down or not the station's
+// answers a staged path with 422 path_unavailable, and the track is analysed
+// by URL without its stems, or not at all when stems were all it was asked.
+// Nothing is stamped, so the planner asks again next run; said once per pass
+// with the count, never per track. Before this a mount that failed at the
+// analyzer host's boot cost every new track its stems for hours, unsaid.
+export function sharedStateNotice(tracks: number, stateRoot: string): string {
+  return `Stems skipped for ${tracks.toLocaleString('en-GB')} track${tracks === 1 ? '' : 's'}: the analyzer cannot read ` +
+    `the station's state folder (${stateRoot}) — its shared mount on the analyzer host is down or points elsewhere. ` +
+    'Mount it there and restart the analyzer; the tracks are asked again next run';
+}
+
 export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<AnalyzeStats> {
   if (opts.plan) return runAnalysisPassOnce(opts);
   // One scope engine (B24): where the whole-file lane is on and the analyzer
@@ -737,6 +750,8 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
   let rangedBytes = 0;
   let rangedSize = 0;
   const fallbackReasons = new Map<string, number>();
+  // Tracks whose stems the analyzer could not write: no shared state (sharedStateNotice).
+  let stemsWithoutSharedState = 0;
 
   // Pass-wide flags the tail of the pass reports on (sweep, Demucs warning).
   const passStems = plan ? !planStemsOffline && plan.items.some(i => i.request.stems) : stemCache;
@@ -893,6 +908,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
       },
       ranged ? undefined : (localPath ?? undefined),
     ) : null;
+    if (res?.stemsWithoutSharedState) stemsWithoutSharedState += 1;
     if (res?.source.kind === 'ranged') {
       rangedTracks += 1;
       rangedBytes += res.source.bytesRead ?? 0;
@@ -1114,7 +1130,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
             stems_require_marker: stems_dir ? true : undefined,
             embedding_only: embeddingOnly || undefined,
             ...placement,
-          }, () => { viaUrl = true; })
+          }, () => { viaUrl = true; if (stems_dir) stemsWithoutSharedState += 1; })
         : await analyzer.analyze(id, {
             embed,
             vocal,
@@ -1306,6 +1322,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
   for (const [why, n] of fallbackReasons) {
     console.log(`[analyze] ${n} track(s) fell back to the capped download: ${why}`);
   }
+  if (stemsWithoutSharedState > 0) logEvent('warning', sharedStateNotice(stemsWithoutSharedState, config.stateRoot));
 
   // Best-effort sweep of the staging dir in case a prefetch left an orphan.
   await rm(`${config.stateRoot}/analyze-tmp`, { recursive: true, force: true }).catch(() => {});

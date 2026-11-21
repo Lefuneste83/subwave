@@ -307,7 +307,9 @@ to `/var/sub-wave/analyze-tmp/` and hands that path to the analyzer. If the
 remote analyzer cannot read the path, it returns the typed `422
 path_unavailable` response and the controller retries that track by URL. That
 makes a share-less remote analyzer work without copying station state, though
-the remote service must then download each admitted track itself.
+the remote service must then download each admitted track itself. Stems are
+the exception: they are written into the station's state folder, so a track
+analysed by URL gets none, and each run's log says how many were skipped.
 
 Remote URL fetching is where bounded concurrency is useful: download/decode for
 some tracks can overlap inference on others. Set the same value on both hosts:
