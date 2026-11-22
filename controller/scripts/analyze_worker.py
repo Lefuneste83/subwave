@@ -1810,23 +1810,38 @@ GRID_MIN_BEATS = 16
 # no tempo, rather than a made-up one.
 GRID_MIN_COVERAGE = 0.5
 GRID_MIN_SECONDS = 10.0
-# The half-bar rescue (controller/src/music/grid-policy.ts decides; these two
-# thresholds mirror its GRID_WRITE_GATE.minHalfbar / minEdgeAgreement). Beat
-# This! often cannot tell beat 1 from beat 3 in the body of a 4/4 track: its
-# downbeats land on phase p and p+2 alternately, so the single-phase agreement
-# fails although the tempo grid is excellent. On the main segment the answer
-# reports the share of downbeats on that half-bar pair (`downbeat_halfbar`) and
-# how well the first and the last GRID_EDGE_BARS bars agree on one shared phase
-# (`downbeat_edge_agreement`, 0 when they pick different phases). When both
-# pass, the main segment's bar line is placed on the edges' phase: the edges
-# are what a transition uses. Validated offline on 122 library tracks: where
-# the bars already passed and the edges agreed, the edges' phase was the
-# trusted one in 56 of 56. Not a GRID_VERSION bump: the affected band is
-# re-measured explicitly.
+# The half-bar rescue (controller/src/music/grid-policy.ts decides whether to
+# trust the bars; these two thresholds mirror its GRID_WRITE_GATE.minDownbeat
+# Agreement / minHalfbar). Beat This! often cannot tell beat 1 from beat 3 in
+# the body of a 4/4 track: its downbeats land on phase p and p+2 alternately,
+# so the single-phase agreement fails although the tempo grid is excellent.
+# On the main segment the answer reports the share of downbeats on that
+# half-bar pair (`downbeat_halfbar`). In that case (agreement under the gate,
+# half-bar at or over GRID_MIN_HALFBAR, 4/4) the worker chooses which half is
+# the bar line (place_half_bar): the model's majority phase, unless the
+# track's biggest low-end change (the drop, drop_beat) lands one or two beats
+# after it, which says the bar line is the other half. Checked by blind
+# listening tests: the majority was right on 20 of 24 half-bar tracks, the
+# drop rule on 23 of 24. A grid that passes the agreement gate is never
+# touched. Not a GRID_VERSION bump: the affected band is re-measured
+# explicitly.
+GRID_MIN_DOWNBEAT_AGREEMENT = 0.75
 GRID_MIN_HALFBAR = 0.9
-GRID_MIN_EDGE_AGREEMENT = 0.75
-GRID_EDGE_BARS = 32
-GRID_EDGE_MIN_DOWNBEATS = 8
+# The drop detector (drop_beat): a 4th-order Butterworth low-pass, the RMS per
+# beat in dB, the jump between the medians of the GRID_DROP_WINDOW_BEATS beats
+# after and before each beat at least GRID_DROP_EDGE_S from both ends of the
+# track, the biggest one refined to the steepest one-beat rise within
+# GRID_DROP_REFINE_BEATS of it. A jump under GRID_DROP_MIN_DB is no clear
+# drop. Filtered in GRID_DROP_BLOCK_S blocks with GRID_DROP_MARGIN_S of
+# context each side (the filter's transient is a few ms), so a long mix never
+# holds a whole-track float64 copy.
+GRID_DROP_LOWPASS_HZ = 150.0
+GRID_DROP_WINDOW_BEATS = 16
+GRID_DROP_EDGE_S = 45.0
+GRID_DROP_REFINE_BEATS = 8
+GRID_DROP_MIN_DB = 10.0
+GRID_DROP_BLOCK_S = 60.0
+GRID_DROP_MARGIN_S = 2.0
 GRID_MAX_SECONDS = float(os.environ.get("ANALYZE_GRID_MAX_SECONDS", "").strip() or "7200")
 
 _gridder = None
@@ -2055,42 +2070,17 @@ def _merge_resumed_grids(segs, tol_s):
     return out
 
 
-def _downbeat_edges(ks, bpb):
-    """The half-bar rescue's scores for one segment's placed downbeat indices
-    (GRID_MIN_HALFBAR above): (halfbar, edge_agreement, edge_phase).
-
-    halfbar: share of the downbeats on the dominant phase or two beats away.
-    The head window holds the downbeats within GRID_EDGE_BARS bars of the
-    first one, the tail window those within GRID_EDGE_BARS bars of the last;
-    each window's phase is its most common index modulo bpb (the lower phase
-    on a tie, as fit_grid's own), its agreement that phase's share.
-    edge_agreement: the weaker window's agreement when both pick the same
-    phase, else 0; edge_phase: that phase (None when they differ).
-    All None unless bpb is 4; the edge pair None when a window holds fewer
-    than GRID_EDGE_MIN_DOWNBEATS downbeats."""
+def _downbeat_halfbar(ks, bpb):
+    """The share of one segment's placed downbeat indices on the dominant
+    phase (the most common index modulo bpb, the lower one on a tie, as
+    fit_grid's own) or two beats away. None unless bpb is 4."""
     if bpb != 4 or not ks:
-        return None, None, None
-    ks = sorted(ks)
-
-    def mode(window):
-        c = [0] * bpb
-        for k in window:
-            c[k % bpb] += 1
-        ph = max(range(bpb), key=lambda q: (c[q], -q))
-        return ph, c
-
-    phi, c = mode(ks)
-    halfbar = (c[phi] + c[(phi + 2) % bpb]) / len(ks)
-    span = GRID_EDGE_BARS * bpb
-    head = [k for k in ks if k < ks[0] + span]
-    tail = [k for k in ks if k > ks[-1] - span]
-    if len(head) < GRID_EDGE_MIN_DOWNBEATS or len(tail) < GRID_EDGE_MIN_DOWNBEATS:
-        return halfbar, None, None
-    hp, hc = mode(head)
-    tp, tc = mode(tail)
-    if hp != tp:
-        return halfbar, 0.0, None
-    return halfbar, min(hc[hp] / len(head), tc[tp] / len(tail)), hp
+        return None
+    c = [0] * bpb
+    for k in ks:
+        c[k % bpb] += 1
+    phi = max(range(bpb), key=lambda q: (c[q], -q))
+    return (c[phi] + c[(phi + 2) % bpb]) / len(ks)
 
 
 def fit_grid(beats, downbeats, tol_s=GRID_TOLERANCE_S, break_after=GRID_BREAK_AFTER,
@@ -2107,16 +2097,16 @@ def fit_grid(beats, downbeats, tol_s=GRID_TOLERANCE_S, break_after=GRID_BREAK_AF
 
     Downbeats are placed on the segment's grid by index: `beats_per_bar` is
     the most common spacing between consecutive downbeats (2..7), and the
-    phase the most common index modulo it. On the main segment (the most
-    beats) in 4/4, `downbeat_halfbar` and `downbeat_edge_agreement` are
-    _downbeat_edges' scores, and when both pass the half-bar rescue
-    (GRID_MIN_HALFBAR) that segment's phase is the edges' one.
+    phase the most common index modulo it. `downbeat_halfbar` is
+    _downbeat_halfbar's share on the main segment (`main_segment`, the most
+    beats); which half is the bar line is place_half_bar's call, not this
+    pure fit's.
 
     Returns None with too few beats, or when the segments hold under
     GRID_MIN_COVERAGE of them (no pulse), else {segments: [{anchor_s, period_s,
     first_k, last_k, hits, downbeat_s}], beats_per_bar, coverage, residual_s,
-    downbeat_agreement, downbeat_halfbar, downbeat_edge_agreement}; `anchor_s`
-    is the time of index 0, the segment's first beat."""
+    downbeat_agreement, downbeat_halfbar, main_segment}; `anchor_s` is the
+    time of index 0, the segment's first beat."""
     import numpy as np
 
     b = np.sort(np.asarray(beats, dtype=float))
@@ -2201,14 +2191,8 @@ def fit_grid(beats, downbeats, tol_s=GRID_TOLERANCE_S, break_after=GRID_BREAK_AF
     else:
         for s in segs:
             s["downbeat_s"] = None
-    halfbar = edge_agreement = None
-    if bpb:
-        main_si = max(range(len(segs)), key=lambda i: (segs[i]["last_k"], -i))
-        halfbar, edge_agreement, edge_phase = _downbeat_edges([k for (sj, k) in placed if sj == main_si], bpb)
-        if (edge_phase is not None and halfbar is not None and edge_agreement is not None
-                and halfbar >= GRID_MIN_HALFBAR and edge_agreement >= GRID_MIN_EDGE_AGREEMENT):
-            m = segs[main_si]
-            m["downbeat_s"] = m["anchor_s"] + edge_phase * m["period_s"]
+    main_si = max(range(len(segs)), key=lambda i: (segs[i]["last_k"], -i))
+    halfbar = _downbeat_halfbar([k for (sj, k) in placed if sj == main_si], bpb) if bpb else None
     hits = sum(s["hits"] for s in segs)
     return {
         "segments": [{k: v for k, v in s.items() if k != "ts"} for s in segs],
@@ -2217,7 +2201,7 @@ def fit_grid(beats, downbeats, tol_s=GRID_TOLERANCE_S, break_after=GRID_BREAK_AF
         "residual_s": float(np.median(residuals)) if residuals else None,
         "downbeat_agreement": agreement,
         "downbeat_halfbar": halfbar,
-        "downbeat_edge_agreement": edge_agreement,
+        "main_segment": main_si,
     }
 
 
@@ -2247,12 +2231,133 @@ def grid_answer(fit, beats_detected, decoded_s, model):
         "residual_ms": None if fit["residual_s"] is None else round(fit["residual_s"] * 1000, 1),
         "downbeat_agreement": None if fit["downbeat_agreement"] is None else round(fit["downbeat_agreement"], 3),
         "downbeat_halfbar": None if fit.get("downbeat_halfbar") is None else round(fit["downbeat_halfbar"], 3),
-        "downbeat_edge_agreement": (None if fit.get("downbeat_edge_agreement") is None
-                                    else round(fit["downbeat_edge_agreement"], 3)),
+        "downbeat_drop_db": None if fit.get("downbeat_drop_db") is None else round(fit["downbeat_drop_db"], 1),
+        "downbeat_phase": fit.get("downbeat_phase"),
         "main_share": round(main_span_us / 1_000_000 / decoded_s, 3) if decoded_s > 0 else None,
         "beats_detected": int(beats_detected),
         "decoded_ms": int(round(decoded_s * 1000)),
     }
+
+
+def beat_low_db(y, sr, beat_times, block_s=GRID_DROP_BLOCK_S):
+    """The level in dB of `y` low-passed at GRID_DROP_LOWPASS_HZ (4th-order
+    Butterworth, zero-phase) over each beat window [t_i, t_i+1), the last one
+    a median period long. An empty window (past the audio) reads -120 dB.
+    Filtered in blocks of about `block_s` seconds with GRID_DROP_MARGIN_S of
+    context each side. Pure: numpy + scipy."""
+    import numpy as np
+    import scipy.signal as ss
+
+    t = np.asarray(beat_times, dtype=float)
+    n = len(t)
+    out = np.full(n, -120.0)
+    if n == 0:
+        return out
+    period = float(np.median(np.diff(t))) if n > 1 else 0.0
+    ends = np.append(t[1:], t[-1] + period)
+    a_idx = np.clip(np.round(t * sr).astype(np.int64), 0, len(y))
+    z_idx = np.clip(np.round(ends * sr).astype(np.int64), 0, len(y))
+    sos = ss.butter(4, GRID_DROP_LOWPASS_HZ, "lowpass", fs=sr, output="sos")
+    margin = int(GRID_DROP_MARGIN_S * sr)
+    i = 0
+    while i < n:
+        j = i + 1
+        while j < n and z_idx[j] - a_idx[i] <= block_s * sr:
+            j += 1
+        lo = max(0, int(a_idx[i]) - margin)
+        hi = min(len(y), int(z_idx[j - 1]) + margin)
+        seg = np.asarray(y[lo:hi], dtype=np.float64)
+        if len(seg) > 3 * (2 * len(sos) + 1):
+            x = ss.sosfiltfilt(sos, seg)
+            cs = np.concatenate([[0.0], np.cumsum(x * x)])
+            for q in range(i, j):
+                a, z = int(a_idx[q]) - lo, int(z_idx[q]) - lo
+                if z > a:
+                    out[q] = 10.0 * np.log10((cs[z] - cs[a]) / (z - a) + 1e-12)
+        i = j
+    return out
+
+
+def drop_beat(y, sr, beat_times):
+    """The beat where the track's biggest low-end change lands: (beat index,
+    jump in dB), or (None, None) when no beat has GRID_DROP_WINDOW_BEATS
+    beats each side and sits more than GRID_DROP_EDGE_S from both ends.
+    jump(i) = median(dB[i:i+W]) - median(dB[i-W:i]) over beat_low_db; the
+    best i is refined, within GRID_DROP_REFINE_BEATS, to the beat maximising
+    dB[i] - dB[i-1] (the earliest on a tie). Pure: numpy + scipy."""
+    import numpy as np
+
+    t = np.asarray(beat_times, dtype=float)
+    n = len(t)
+    w = GRID_DROP_WINDOW_BEATS
+    if n < 2 * w:
+        return None, None
+    dur = len(y) / sr
+    db = beat_low_db(y, sr, t)
+    best, best_jump = None, None
+    for i in range(w, n - w + 1):
+        if t[i] <= GRID_DROP_EDGE_S or t[i] >= dur - GRID_DROP_EDGE_S:
+            continue
+        jump = float(np.median(db[i:i + w]) - np.median(db[i - w:i]))
+        if best_jump is None or jump > best_jump:
+            best, best_jump = i, jump
+    if best is None:
+        return None, None
+    lo = max(1, best - GRID_DROP_REFINE_BEATS)
+    hi = min(n - 1, best + GRID_DROP_REFINE_BEATS)
+    refined = max(range(lo, hi + 1), key=lambda i: (db[i] - db[i - 1], -i))
+    return int(refined), best_jump
+
+
+def choose_phase(majority_k, drop_k, jump_db, bpb):
+    """Which half of a half-bar split is the bar line: (phase, source).
+    With a clear drop (jump_db >= GRID_DROP_MIN_DB) at beat index drop_k,
+    d = (drop_k - majority_k) mod 4: the majority stands on d 0 or 3 (the
+    detector sometimes lands a beat early), the other half (majority + 2) on
+    d 1 or 2; source 'drop' either way. No drop, or a weak one: the majority,
+    source 'majority'. Outside 4/4: the majority, no source."""
+    if bpb != 4:
+        return majority_k % bpb, None
+    if drop_k is None or jump_db is None or jump_db < GRID_DROP_MIN_DB:
+        return majority_k % 4, "majority"
+    d = (drop_k - majority_k) % 4
+    return ((majority_k + 2) % 4 if d in (1, 2) else majority_k % 4), "drop"
+
+
+def place_half_bar(fit, y, sr):
+    """The half-bar case's bar line on fit_grid's result, in place: only in
+    4/4 when the downbeat agreement is under GRID_MIN_DOWNBEAT_AGREEMENT and
+    the main segment's half-bar share at or over GRID_MIN_HALFBAR (both on
+    the 3-place values the controller sees). Then the drop over the main
+    segment's grid beats picks the half (choose_phase); the segment's
+    downbeat moves two beats when it says so, kept at the earliest beat at or
+    after its anchor. Sets `downbeat_drop_db` (the jump, None when not
+    computed) and `downbeat_phase` ('drop' / 'majority', None outside the
+    case). Any other grid is left exactly as fitted."""
+    import numpy as np
+
+    fit["downbeat_drop_db"] = None
+    fit["downbeat_phase"] = None
+    agreement, halfbar = fit.get("downbeat_agreement"), fit.get("downbeat_halfbar")
+    if (fit.get("beats_per_bar") != 4 or agreement is None or halfbar is None
+            or round(agreement, 3) >= GRID_MIN_DOWNBEAT_AGREEMENT or round(halfbar, 3) < GRID_MIN_HALFBAR):
+        return fit
+    m = fit["segments"][fit["main_segment"]]
+    if m.get("downbeat_s") is None:
+        return fit
+    majority = int(round((m["downbeat_s"] - m["anchor_s"]) / m["period_s"])) % 4
+    beats = m["anchor_s"] + m["period_s"] * np.arange(int(m["last_k"]) + 1)
+    try:
+        drop_k, jump = drop_beat(y, sr, beats)
+    except Exception as ex:  # noqa: BLE001 — the majority stands, the grid still ships
+        log(f"grid: drop detection failed ({ex}); the majority bar line stands")
+        drop_k, jump = None, None
+    phase, source = choose_phase(majority, drop_k, jump, 4)
+    if phase != majority:
+        m["downbeat_s"] = m["anchor_s"] + phase * m["period_s"]
+    fit["downbeat_drop_db"] = jump
+    fit["downbeat_phase"] = source
+    return fit
 
 
 def decode_mono(src, sr=22050, max_s=GRID_MAX_SECONDS, timeout_s=None):
@@ -2288,6 +2393,7 @@ def facet_grid(src):
         fit = fit_grid(beats, downbeats)
         if fit is None:
             return _unmeasurable("no-beat")
+        place_half_bar(fit, y, sr)
         return _ok(grid_answer(fit, len(beats), decoded_s, gridder.model))
     except Exception as e:  # noqa: BLE001
         return _failed(e)
