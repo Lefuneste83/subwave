@@ -182,20 +182,20 @@ test('bars not trusted settle as no-bars; trusted bars make the track due', () =
 
 test('a half-bar grid has trusted bars: due, not no-bars', () => {
   // Body split between beat 1 and beat 3 (agreement 0.53), nearly every
-  // downbeat on that pair: grid-policy.ts trusts the bars, whichever rule
-  // placed the bar line (the drop, or the majority without a clear one).
-  const rescued = { downbeat_agreement: 0.53, downbeat_halfbar: 0.98, downbeat_drop_db: 14.2, downbeat_phase: 'drop' };
+  // downbeat on that pair: grid-policy.ts trusts the bars when a clear drop
+  // placed the bar line, and holds them when the majority was kept.
+  const rescued = { downbeat_agreement: 0.53, downbeat_halfbar: 0.98, downbeat_drop_db: 24.2, downbeat_phase: 'drop' };
   track('h1');
   grid('h1', rescued);
   const g = db.getGrid('h1')!;
-  assert.deepEqual([g.downbeatHalfbar, g.downbeatDropDb, g.downbeatPhase], [0.98, 14.2, 'drop']);
+  assert.deepEqual([g.downbeatHalfbar, g.downbeatDropDb, g.downbeatPhase], [0.98, 24.2, 'drop']);
   assert.equal(gridDecision(g).bars, true);
   assert.ok(db.structureGridOf(g));
   assert.equal(facetRow('h1'), undefined, 'no no-bars row');
   assert.ok(db.facetNeedsIds('structure').includes('h1'));
   track('h3');
   grid('h3', { ...rescued, downbeat_drop_db: null, downbeat_phase: 'majority' });
-  assert.equal(facetRow('h3'), undefined, 'no clear drop: the majority, still trusted');
+  assert.equal(facetRow('h3')?.reason, 'no-bars', 'no clear drop: the majority, held');
   // A half-bar share under 0.9: still no bars.
   track('h2');
   grid('h2', { ...rescued, downbeat_halfbar: 0.8 });
@@ -205,7 +205,7 @@ test('a half-bar grid has trusted bars: due, not no-bars', () => {
   sql().prepare(`DELETE FROM track_facet_status WHERE facet = 'structure'`).run();
   db.resyncAllFacets(sql());
   assert.equal(facetRow('h1'), undefined);
-  assert.equal(facetRow('h3'), undefined);
+  assert.equal(facetRow('h3')?.reason, 'no-bars');
   assert.equal(facetRow('h2')?.reason, 'no-bars');
   // A grid that loses the share (re-measured by an older worker) loses its bars.
   grid('h1', { downbeat_agreement: 0.53 });

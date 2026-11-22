@@ -144,7 +144,7 @@ test('the summary counts and the CSV', () => {
     R.compareGrid(track(), grid())!,
     R.compareGrid(track({ id: 'b', bpm: 62, title: 'Hello, "World"' }), grid())!,
     R.compareGrid(track({ id: 'c', bpm: 62 }), grid({ coverage: 0.5 }))!,
-    R.compareGrid(track({ id: 'd' }), grid({ downbeatAgreement: 0.53, downbeatHalfbar: 0.98, downbeatDropDb: 14.2, downbeatPhase: 'drop' }))!,
+    R.compareGrid(track({ id: 'd' }), grid({ downbeatAgreement: 0.53, downbeatHalfbar: 0.98, downbeatDropDb: 24.2, downbeatPhase: 'drop' }))!,
   ];
   const s = R.summariseGridReport(rows);
   assert.equal(s.tracks, 4);
@@ -161,7 +161,7 @@ test('the summary counts and the CSV', () => {
   // The half-bar case's columns: the share, the drop's jump, which rule placed the bar line.
   const head = csv.split('\r\n')[0];
   assert.ok(head.includes(',downbeatAgreement,downbeatHalfbar,downbeatDropDb,downbeatPhase,beatsPerBar,'), head);
-  assert.ok(csv.split('\r\n')[4].endsWith(',0.53,0.98,14.2,drop,4,true,true,'), csv.split('\r\n')[4]);
+  assert.ok(csv.split('\r\n')[4].endsWith(',0.53,0.98,24.2,drop,4,true,true,'), csv.split('\r\n')[4]);
   assert.ok(C.formatSummary(rows).some((l) => /tempo corrections the gate would write/.test(l)));
 });
 

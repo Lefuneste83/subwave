@@ -1832,14 +1832,16 @@ GRID_MIN_HALFBAR = 0.9
 # after and before each beat at least GRID_DROP_EDGE_S from both ends of the
 # track, the biggest one refined to the steepest one-beat rise within
 # GRID_DROP_REFINE_BEATS of it. A jump under GRID_DROP_MIN_DB is no clear
-# drop. Filtered in GRID_DROP_BLOCK_S blocks with GRID_DROP_MARGIN_S of
+# drop: the half-bar grid keeps the majority phase and the controller holds its
+# bars (grid-policy.ts), because weak drops were where the blind listening
+# tests found the wrong bar lines. Filtered in GRID_DROP_BLOCK_S blocks with GRID_DROP_MARGIN_S of
 # context each side (the filter's transient is a few ms), so a long mix never
 # holds a whole-track float64 copy.
 GRID_DROP_LOWPASS_HZ = 150.0
 GRID_DROP_WINDOW_BEATS = 16
 GRID_DROP_EDGE_S = 45.0
 GRID_DROP_REFINE_BEATS = 8
-GRID_DROP_MIN_DB = 10.0
+GRID_DROP_MIN_DB = 15.0
 GRID_DROP_BLOCK_S = 60.0
 GRID_DROP_MARGIN_S = 2.0
 GRID_MAX_SECONDS = float(os.environ.get("ANALYZE_GRID_MAX_SECONDS", "").strip() or "7200")

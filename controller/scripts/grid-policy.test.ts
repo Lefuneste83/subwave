@@ -39,28 +39,36 @@ test('half-bar absent or null: the single-phase rule exactly as before', () => {
   assert.deepEqual(gridDecision({ ...base, downbeatAgreement: 0.53, downbeatHalfbar: undefined }), held);
 });
 
-test('a half-bar split at or over 0.9 has trusted bars, whatever placed its bar line', () => {
-  const d = gridDecision({ ...base, downbeatAgreement: 0.53, downbeatHalfbar: 0.98 });
+test('a half-bar split at or over 0.9 has trusted bars when a clear drop placed its bar line', () => {
+  const drop = { downbeatPhase: 'drop' as const, downbeatDropDb: 22.6 };
+  const d = gridDecision({ ...base, downbeatAgreement: 0.53, downbeatHalfbar: 0.98, ...drop });
   assert.equal(d.bars, true);
   assert.deepEqual(d.held, []);
-  // At the threshold exactly.
-  assert.equal(gridDecision({ ...base, downbeatAgreement: 0.5, downbeatHalfbar: 0.9 }).bars, true);
-  // The worker's choice of half (the drop, or the majority without a clear
-  // one) never gates the trust.
-  assert.equal(gridDecision({ ...base, downbeatAgreement: 0.5, downbeatHalfbar: 0.95, downbeatPhase: 'majority', downbeatDropDb: null }).bars, true);
-  assert.equal(gridDecision({ ...base, downbeatAgreement: 0.5, downbeatHalfbar: 0.95, downbeatPhase: 'drop', downbeatDropDb: 4.2 }).bars, true);
+  // At both thresholds exactly.
+  assert.equal(gridDecision({ ...base, downbeatAgreement: 0.5, downbeatHalfbar: 0.9, downbeatPhase: 'drop', downbeatDropDb: 15 }).bars, true);
   // A passing single phase stays passing whatever the half-bar share says.
   assert.equal(gridDecision({ ...base, downbeatHalfbar: 0.5 }).bars, true);
 });
 
+test('a half-bar split left on the majority, or on a weak drop, keeps its bars held', () => {
+  const majority = gridDecision({ ...base, downbeatAgreement: 0.53, downbeatHalfbar: 0.98, downbeatPhase: 'majority', downbeatDropDb: null });
+  assert.equal(majority.bars, false);
+  assert.deepEqual(majority.held, ['bars: downbeat agreement 0.53, half-bar 0.98, no clear drop']);
+  const weak = gridDecision({ ...base, downbeatAgreement: 0.53, downbeatHalfbar: 0.98, downbeatPhase: 'drop', downbeatDropDb: 11.6 });
+  assert.equal(weak.bars, false);
+  assert.deepEqual(weak.held, ['bars: downbeat agreement 0.53, half-bar 0.98, drop 11.6 dB']);
+  // A share with no placement reported is not trusted either.
+  assert.equal(gridDecision({ ...base, downbeatAgreement: 0.53, downbeatHalfbar: 0.98 }).bars, false);
+});
+
 test('not rescued under 0.9: the held message names both scores', () => {
-  const half = gridDecision({ ...base, downbeatAgreement: 0.53, downbeatHalfbar: 0.89 });
+  const half = gridDecision({ ...base, downbeatAgreement: 0.53, downbeatHalfbar: 0.89, downbeatPhase: 'drop', downbeatDropDb: 30 });
   assert.equal(half.bars, false);
-  assert.deepEqual(half.held, ['bars: downbeat agreement 0.53, half-bar 0.89']);
+  assert.deepEqual(half.held, ['bars: downbeat agreement 0.53, half-bar 0.89, drop 30 dB']);
 });
 
 test('the rescue never bypasses the BPM gate, the metre or a placed downbeat', () => {
-  const rescue = { downbeatAgreement: 0.53, downbeatHalfbar: 0.98 };
+  const rescue = { downbeatAgreement: 0.53, downbeatHalfbar: 0.98, downbeatPhase: 'drop' as const, downbeatDropDb: 22.6 };
   const lowCoverage = gridDecision({ ...base, ...rescue, coverage: 0.5 });
   assert.equal(lowCoverage.bpm, false);
   assert.equal(lowCoverage.bars, false);
