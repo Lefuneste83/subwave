@@ -866,7 +866,30 @@ lines over the head window when the downbeats agree (otherwise both stay the
 head's, so they never disagree): most detected beats on the grid (coverage ≥
 0.8), the main tempo (±4 %, over every segment: a live drummer splits a steady
 song) on ≥ 0.6 of the track, at most 200 BPM (the only confident readings above
-it were double time; held, never halved), bars also downbeat agreement ≥ 0.75.
+it were double time; held, never halved), bars also downbeat agreement ≥ 0.75,
+or the half-bar rescue below.
+**The half-bar rescue (the edges rule).** Beat This! often cannot tell beat 1
+from beat 3 in the body of a 4/4 track: its downbeats land on phase p and p+2
+alternately, the single-phase agreement falls under 0.75, and the track had no
+bars (no structure facet, no phrase mix) although its tempo grid was excellent.
+On the main segment (the most beats) the worker also reports
+`downbeat_halfbar`, the share of downbeats on the dominant phase or two beats
+away, and `downbeat_edge_agreement`, the weaker of the first-32-bar and
+last-32-bar windows' single-phase agreement when both windows pick the same
+phase, 0 when they pick different ones (both null outside 4/4, the edge score
+null when a window holds under 8 downbeats). `gridDecision` also trusts the
+bars at half-bar ≥ 0.9 and edges ≥ 0.75 (`GRID_WRITE_GATE.minHalfbar`,
+`minEdgeAgreement`, mirrored by the worker's `GRID_MIN_HALFBAR`,
+`GRID_MIN_EDGE_AGREEMENT`), and the worker then places the main segment's bar
+line on the edges' phase: the edges are what a transition uses. An offline
+probe on 122 library tracks: on the tracks whose bars already passed, wherever
+the first and last 32 bars agreed on a phase it was the trusted phase (56 of
+56, no contradiction), and the rule rescues about 8 % of the failing band. A
+held, scored grid says why (`bars: downbeat agreement 0.53, half-bar 0.98,
+edges 0.00`). Rows measured before the scores existed hold null and decide
+exactly as before. GRID_VERSION is not bumped (a bump would re-plan every
+grid), so the affected band is re-measured explicitly: `npm run analyze --
+--facets grid --where all --ids-file <ids>`.
 The same decision covers the ENDING (`outro_json`'s `bpm`, `beats`, `bars`, every
 other outro field untouched): the tempo of the grid segment covering the tail
 window (an outro that slows keeps its own), and the grid's beats and downbeat
@@ -885,7 +908,7 @@ next tagging run re-embeds it. `npm run grid-report` is the read-only dry run
 (stored against grid tempo, octave and 3:2 fixes, tempo-word moves, bar shifts):
 on 300 library tracks (200 random) the gate replaced the BPM of 69 % of the
 random tracks with a grid, 17 % a real tempo fix (octave, 3:2, other), and
-moved the tempo word of 16 %. Pinned by `scripts/grid-apply.test.ts`,
+moved the tempo word of 16 %. Pinned by `scripts/grid-apply.test.ts`, `scripts/grid-policy.test.ts`,
 `scripts/grid-report.test.ts`, `scripts/grid-facet.test.ts` and
 `scripts/analyzer_grid_test.py`.
 
@@ -897,7 +920,8 @@ length and the phrase mix* under Hot Mix). `npm run analyze -- --facets structur
 measures each bar of the track's own beat grid. The controller sends the grid
 in the request, so the worker never reads the library. Only a grid whose bars
 `grid-policy.ts` trusts is used (`gridDecision().bars`: the BPM gate plus a
-downbeat agreement of at least 0.75). A track with a grid that fails this
+downbeat agreement of at least 0.75, or the half-bar rescue above; the
+facet's own grid JSON in `STRUCTURE_SOURCE_SELECT` carries both scores). A track with a grid that fails this
 settles as `unmeasurable / no-bars`, is never sent, and becomes due again once
 a re-measured grid gains its bars. A track with no grid is not due at all (the
 planner reports it as `no-grid`). A re-measured grid makes a stored row
