@@ -2196,9 +2196,29 @@ class Queue {
       }
     }
     const potsBuilt = await this._hotMixPotsBuilt();
+    const safeBuilt = await this._hotMixSafeBuilt();
     if (!this.upcoming.includes(item) || !this.upcoming.includes(successor) || successor.sent) return;
     const id = randomBytes(4).toString('hex');
     item.mixOut = { id, leadSec: plan.leadSec, end: plan.aEnd, outCueSec: plan.outCueSec };
+    // A partner that does not arrive in time (a late pick lets the coast in,
+    // a request lands between them) leaves the mixer this track's mix lead to
+    // fill with whatever comes: the safe transition, measured to the planned
+    // cut, which stays the cut (music/safe-out-policy.ts fallbackForPlannedCut,
+    // radio.liq HOT MIX SAFE OUT). Only for a mixer that has it; the planned
+    // partner's seam ignores it.
+    if (safeBuilt) {
+      const fallback = safeOutPolicy.fallbackForPlannedCut(safeOutPolicy.planSafeOut({
+        a: {
+          segments: aGrid.segments, beatsPerBar: aGrid.beatsPerBar, bpm: aGrid.bpm,
+          endSec: plan.outCueSec, cueInSec: seamInput.a.cueInSec,
+        },
+        b: null,
+      }), plan.outCueSec, plan.aEnd?.tempo ?? 1);
+      if (fallback) {
+        item.mixOut.safeFallback = fallback;
+        this.log('mix', `Hot Mix: safe fallback armed for a late partner of "${item.track.title}": bar ${fallback.barSec}s, incoming ${fallback.leadSec}s before the cut`);
+      }
+    }
     successor.mixIn = { id, ...plan.bStart, inCueSec: plan.inCueSec, ...(waitSec ? { waitSec } : {}) };
     // The bass, for the mixer's bass move (radio.liq, HOT MIX BASS MOVE). With
     // the bass pots, every seam (music/bass-pot-policy.ts): A's bass tamed over
@@ -2805,7 +2825,8 @@ class Queue {
             mixOut: item.mixOut ?? null,
             mixOutLateSec: item.mixOut ? landedLate : null,
             mixIn: mixInNow.mixIn,
-            safeOut: item.safeOut ?? null,
+            // A planned seam's fallback rides beside its mix stamps.
+            safeOut: item.safeOut ?? item.mixOut?.safeFallback ?? null,
           });
         };
         if (trim.cueInSec != null || trim.cueOutSec != null) {

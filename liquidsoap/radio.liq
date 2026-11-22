@@ -940,6 +940,23 @@ def dj_transition(a, b) =
   # crossfade; the pot's single cut then beat the old two-bar ride (set 8).
   # Not on a clip or Hot Mix seam, a jingle, a bed or break, or a show-change
   # cut; a buffer that does not fit is logged and stays the plain crossfade.
+  # A PLANNED PARTNER THAT DOES NOT ARRIVE (safe-out-policy.ts
+  # fallbackForPlannedCut): A carries its mix plan and, beside it, a safe
+  # fallback measured to its planned cut. When the track after it is not the
+  # partner (a late pick let the coast in, a request landed between them), the
+  # ids do not meet, so mix_lead is -1 and the safe transition takes the
+  # fallback stamps. cross_stamps sized the buffer from A alone, i.e. from its
+  # mix lead (16-64 s, far past two bars), so only here the bound is A's own
+  # mix bound: B waits d - lead, A plays alone to its bar line. A's own cue-in
+  # landing moves its end as on the mix seam (liq_mix_out_late, at its closing
+  # tempo), so B's wait moves with it. Without this the seam aired as a plain
+  # crossfade over the whole mix lead, two unsynced kicks. A matched seam reads
+  # none of it.
+  late_partner = hot_mix_stretch() and mix_out != "" and not mixing
+  partner_lead = if late_partner then float_of_string(default=-1., a.metadata["liq_mix_lead"]) else -1. end
+  partner_max_d = partner_lead + clip_seam_slack + mix_out_late_room(a.metadata) + frame.duration()
+  partner_a_late = if late_partner then float_of_string(default=0., a.metadata["liq_mix_out_late"]) else 0. end
+  partner_a_late = if partner_a_late > 0. - cue_early_max and partner_a_late < 0.15 then partner_a_late else 0. end
   safe_bar = float_of_string(default=-1., a.metadata["liq_safe_out"])
   safe_lead = float_of_string(default=-1., a.metadata["liq_safe_lead"])
   safing = safe_bar > 0. and safe_lead > 0. and clip_lead < 0. and mix_lead < 0.
@@ -948,14 +965,20 @@ def dj_transition(a, b) =
     and a.metadata["subwave_clip"] != "1" and b.metadata["subwave_clip"] != "1"
     and a.metadata["subwave_kind"] == "" and b.metadata["subwave_kind"] == ""
   safe_max_d = safe_lead + 2. * safe_bar + clip_seam_slack + frame.duration()
+  safe_max_d = if late_partner and partner_lead > 0. then max(safe_max_d, partner_max_d) else safe_max_d end
+  safe_seam_lead = if late_partner then safe_lead + partner_a_late / mix_a_q else safe_lead end
   b_delay =
     if clip_lead >= 0. and d > seam_lead and d <= clip_max_d then d - seam_lead
     elsif mix_lead >= 0. and d > mix_seam_lead and d <= mix_max_d then d - mix_seam_lead
-    elsif safing and d > safe_lead and d <= safe_max_d then d - safe_lead
+    elsif safing and d > safe_seam_lead and d <= safe_max_d then d - safe_seam_lead
     else 0. end
   safe_on = safing and b_delay > 0.
-  if safe_on then
+  if safe_on and late_partner then
+    log(label="hotmix", level=3, "safe out (planned partner missing): buffered #{d}s for the mix lead #{partner_lead}s, bar #{safe_bar}s, lead #{safe_seam_lead}s: outgoing bass pot to its minimum by #{b_delay - 0.01}s, incoming at full from #{b_delay}s, outgoing highs out by #{d}s")
+  elsif safe_on then
     log(label="hotmix", level=3, "safe out: buffered #{d}s, bar #{safe_bar}s, lead #{safe_lead}s: outgoing bass pot to its minimum by #{b_delay - 0.01}s, incoming at full from #{b_delay}s, outgoing highs out by #{d}s")
+  elsif safing and late_partner then
+    log(label="hotmix", level=2, "safe out (planned partner missing): buffer #{d}s does not fit the mix lead #{partner_lead}s: plain crossfade")
   elsif safing then
     log(label="hotmix", level=2, "safe out: buffer #{d}s does not fit the lead #{safe_lead}s + two bars of #{safe_bar}s: plain crossfade")
   end

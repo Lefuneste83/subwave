@@ -114,6 +114,34 @@ export function planSafeOut(input: SafeInput): SafePlan | null {
   };
 }
 
+// A planned Hot Mix seam's fallback for a partner that does not arrive in
+// time (a late pick lets the coast in, a request lands between the two): the
+// mix stamps then do not apply, and without this the seam aired as a plain
+// crossfade over the whole mix lead, two unsynced kicks for 30 s. The outgoing
+// track keeps its planned cut (its cue_out stays the mix cut, whatever comes
+// next), so the safe transition is measured to that cut, not to the plan's own
+// outCueSec: planned with `b: null` and `endSec` = the cut, the entry is the
+// latest bar line at least one bar before it, and the lead is cut - entry (one
+// bar when the cut is on a bar line, as a mix plan's always is on its grid).
+// No incoming pre-roll: the track that comes is unknown. Output seconds at the
+// outgoing track's closing tempo `endTempo`: a split seam's ramp ends where its
+// overlap starts, so its last bars play at that tempo throughout. radio.liq
+// reads it as the ordinary liq_safe_out/liq_safe_lead stamps, inside the
+// buffer the mix lead sized (HOT MIX SAFE OUT, a planned partner missing).
+export interface SafeFallback { barSec: number; leadSec: number }
+export function fallbackForPlannedCut(
+  plan: Pick<SafePlan, 'barSec' | 'entrySec'> | null,
+  cutSec: number,
+  endTempo = 1,
+): SafeFallback | null {
+  if (!plan || !Number.isFinite(cutSec) || !Number.isFinite(plan.barSec) || plan.barSec <= 0) return null;
+  const q = Number.isFinite(endTempo) && endTempo >= 0.85 && endTempo <= 1.15 ? endTempo : 1;
+  const lead = cutSec - plan.entrySec;
+  if (!(lead > 0)) return null;
+  const r = (x: number) => Math.round(x * 1e4) / 1e4;
+  return { barSec: r(plan.barSec / q), leadSec: r(lead / q) };
+}
+
 // What the outgoing queue item carries, matched to its successor by id.
 export interface SafeOutStamps { id: string; barSec: number; leadSec: number; outCueSec: number }
 

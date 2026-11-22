@@ -12,7 +12,7 @@
 // Run: npm test -- seam-window-drain
 
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -52,7 +52,7 @@ type Item = {
   aiPicked?: boolean;
   introScript?: string;
   startedAt?: string;
-  mixOut?: { id: string; leadSec: number; end: null; outCueSec: number } | null;
+  mixOut?: { id: string; leadSec: number; end: null; outCueSec: number; safeFallback?: { barSec: number; leadSec: number } } | null;
   safeOut?: { id: string; barSec: number; leadSec: number; outCueSec: number } | null;
 };
 const q = queue as unknown as {
@@ -153,6 +153,19 @@ test('a plain crossfade keeps the end-of-track render window', async () => {
   assert.equal(renders, 1, 'the render is attempted with the end clock\'s window');
   assert.ok(!lines().some(l => /Intro render deferred/.test(l)), lines().join('\n'));
   assert.ok(30 - DRAIN_COMMIT_RESERVE_SEC > 5);
+});
+
+test('the handoff writes a planned seam\'s safe fallback beside its mix stamps, and keeps the cut', async () => {
+  q.current = onAir();
+  const item = next();
+  delete item.introScript;
+  item.mixOut = { id: 'pf', leadSec: 16, end: null, outCueSec: 200, safeFallback: { barSec: 2, leadSec: 2 } };
+  q.upcoming = [item];
+  await queue.drainToLiquidsoap(true);
+  const uri = readFileSync(config.liquidsoap.queueFile, 'utf8');
+  assert.match(uri, /liq_mix_out="pf",liq_mix_lead="16\.0000"/);
+  assert.match(uri, /liq_safe_out="2\.0000",liq_safe_lead="2\.0000"/);
+  assert.match(uri, /liq_cue_out="200"/, 'the fallback never moves the cut');
 });
 
 test('a held track goes out once the seam into it, not the end ahead, is under the hard deadline', async () => {

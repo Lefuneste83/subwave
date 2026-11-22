@@ -45,6 +45,15 @@
 #       still choke the outgoing's highs. Lifts both sweep blocks from radio.liq.
 #       A sweep seam never takes the equal-power curve, so the reference is the
 #       linear fade.
+#   scripts/fx-render-test.sh safelate
+#       Regression check — a Hot Mix track whose planned partner does not
+#       arrive (a coast track, or a pick naming another seam) takes the safe
+#       transition from its fallback stamps inside the mix-lead buffer: the
+#       incoming track at full on the outgoing bar line, the outgoing bass pot
+#       cut, the outgoing alone and dry until then, no stretch on the incoming;
+#       the planned partner still gets the mix seam. Lifts the cross stamps,
+#       dj_transition and hot_mix_tempo from radio.liq, and proves it sees the
+#       bug by rendering the lifted block with the partner-missing rule off.
 #   scripts/fx-render-test.sh orphans
 #       Regression check — jingle seams must not leave never-started clocks
 #       behind (a_source/b_source built but unused on a jingle seam leaked ~3
@@ -1198,6 +1207,102 @@ LIQ
   echo "AMPGAIN PASS — the incoming's liq_amplify applies once; the sweep's gains ignore it"
 }
 
+safelate() {
+  # A planned Hot Mix seam X -> Y whose partner Y does not arrive in time: the
+  # coast (or another pick) follows X instead. X carries its mix plan
+  # (liq_mix_out/liq_mix_lead, which cross_stamps sizes the buffer from) and
+  # the safe fallback measured to its cut (liq_safe_out/liq_safe_lead). The
+  # mixer must take the safe transition inside that buffer, never a plain
+  # crossfade over the whole lead. A = 40 s of 50 Hz (its bass) + 3 kHz,
+  # B = 20 s of 880 Hz, each -12 dB; A's bar 2 s, its lead to the cut 2 s, so B
+  # enters at full at 38.0 s (A's end less the lead) and A plays dry until its
+  # pot cut just before.
+  local rl="$HERE/../liquidsoap/radio.liq" fail=0
+  umask 022
+  [ -f "$WORK/sl-a.wav" ] || ffmpeg -v error -y -f lavfi -i "sine=frequency=50:duration=40" -f lavfi -i "sine=frequency=3000:duration=40" \
+    -filter_complex "[0][1]amix=inputs=2:normalize=0,volume=-12dB" -ar 44100 -ac 2 "$WORK/sl-a.wav"
+  [ -f "$WORK/sl-b.wav" ] || ffmpeg -v error -y -f lavfi -i "sine=frequency=880:duration=20" -af volume=-12dB -ar 44100 -ac 2 "$WORK/sl-b.wav"
+  awk '/^cross_prev_end = /{on=1} on{print} on&&/^  strip_cross_stamps\(seam\)$/{getline; print; exit}' "$rl" > "$WORK/sl-cross.liq"
+  awk '/^def hot_mix_tempo\(s\) =/{on=1} on{print} on&&/^end$/{exit}' "$rl" > "$WORK/sl-tempo.liq"
+  grep -q 'def dj_transition' "$WORK/sl-cross.liq" && grep -q 'def cross_stamps' "$WORK/sl-cross.liq" \
+    && grep -q 'soundtouch' "$WORK/sl-tempo.liq" \
+    || { echo "SAFELATE FAIL — could not lift cross_stamps / dj_transition / hot_mix_tempo from radio.liq"; return 1; }
+  # The control: the same block with the partner-missing rule switched off
+  # (only where radio.liq has it), which must fail the check below.
+  sed -E 's/^  late_partner = .*/  late_partner = false/' "$WORK/sl-cross.liq" > "$WORK/sl-cross-off.liq"
+  local variant
+  for variant in on off; do
+    local cross_file="sl-cross.liq"; [ "$variant" = off ] && cross_file="sl-cross-off.liq"
+    cat > "$WORK/sl-$variant.liq" <<LIQ
+settings.log.stdout := true
+settings.log.level := 3
+crossfade_duration = ref(10.)
+equal_power_crossfade = ref(false)
+hot_mix_stretch = ref(true)
+%include "/work/$cross_file"
+%include "/work/sl-tempo.liq"
+a = once(single(environment.get("A_URI")))
+b = once(single(environment.get("B_URI")))
+music = sequence([a, b])
+music = amplify(override="liq_amplify", 1., music)
+music = hot_mix_tempo(music)
+music = metadata.map(update=true, strip=true, cross_stamps, music)
+music = cross(duration=crossfade_duration(), persist_override=true, dj_transition, music)
+clock.assign_new(sync="none", [music])
+output.file(%wav, "/work/" ^ environment.get("OUT"), fallible=true, on_stop=shutdown, music)
+LIQ
+  done
+  local A_URI='annotate:liq_mix_out="pz",liq_mix_lead="16.0000",liq_safe_out="2.0000",liq_safe_lead="2.0000",liq_cross_duration="16":/work/sl-a.wav'
+  local coast='annotate:liq_cross_duration="10":/work/sl-b.wav'
+  local other='annotate:liq_mix_in="other",liq_mix_tempo="1.040000",liq_mix_hold="8.0000",liq_mix_glide="4.0000",liq_cross_duration="10":/work/sl-b.wav'
+  local partner='annotate:liq_mix_in="pz",liq_mix_tempo="1.000000",liq_mix_hold="16.0000",liq_mix_glide="0.0000",liq_cross_duration="10":/work/sl-b.wav'
+  band() { # band <wav> <start> <dur> <filter> → RMS dB of that band
+    ffmpeg -hide_banner -nostats -ss "$2" -t "$3" -i "$1" -af "$4,astats=metadata=0:reset=0" -f null - 2>&1 \
+      | awk '/Overall/{o=1} o && /RMS level dB/{print $NF; exit}'
+  }
+  # check <variant> <case> <B uri>: prints one line, returns 1 on a miss.
+  check() {
+    local v="$1" c="$2" b_uri="$3" out="sl-$1-$2.wav" log
+    log=$(liq "sl-$v.liq" -e A_URI="$A_URI" -e B_URI="$b_uri" -e OUT="$out") || { echo "$log" | tail -20; return 2; }
+    echo "$log" > "$WORK/sl-$v-$c.log"
+    local w="$WORK/$out" bp="bandpass=f=880:width_type=q:width=8" lp="lowpass=f=100,lowpass=f=100"
+    local b_pre b_before b_after b_steady a_dry a_line a_cut len
+    b_pre=$(band "$w" 30 7.5 "$bp"); b_before=$(band "$w" 37.85 0.12 "$bp"); b_after=$(band "$w" 38.03 0.12 "$bp")
+    b_steady=$(band "$w" 45 2 "$bp")
+    a_dry=$(band "$w" 5 5 "$lp"); a_line=$(band "$w" 35 2.5 "$lp"); a_cut=$(band "$w" 38.2 0.6 "$lp")
+    len=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$w")
+    local missing=0 safeline=0 mixline=0
+    grep -q 'safe out (planned partner missing): buffered' <<<"$log" && safeline=1
+    grep -qE '\[hotmix:3\] buffered ' <<<"$log" && mixline=1
+    echo "  $v/$c: safe-missing line $safeline, mix line $mixline; B band before 37.5 s $b_pre dB, at 37.85 $b_before dB, at 38.03 $b_after dB, steady $b_steady dB; A bass dry $a_dry dB, 35-37.5 s $a_line dB, after the cut $a_cut dB; length $len s"
+    awk -v pre="$b_pre" -v bef="$b_before" -v aft="$b_after" -v st="$b_steady" -v dry="$a_dry" -v line="$a_line" -v cut="$a_cut" -v len="$len" -v sl="$safeline" -v ml="$mixline" -v c="$c" 'BEGIN{
+      if (c == "partner") exit !(ml == 1 && sl == 0)
+      ok = (sl == 1 && ml == 0)
+      ok = ok && pre < -40 && bef < -40            # B silent before the bar line
+      ok = ok && aft > st - 1.5 && aft < st + 1.5  # B at full on the bar line
+      ok = ok && line > dry - 1.5                  # A alone and dry up to it
+      ok = ok && cut < line - 15                   # A bass pot cut
+      ok = ok && len > 57.85 && len < 58.05        # B unstretched from 38.0 s (x1.04 would end ~0.4 s early; the stretch drops ~70 ms at stream end)
+      exit !ok }' || missing=1
+    return $missing
+  }
+  local r
+  for c in coast other partner; do
+    local uri; case "$c" in coast) uri="$coast" ;; other) uri="$other" ;; partner) uri="$partner" ;; esac
+    r=0; check on "$c" "$uri" || r=$?
+    [ "$r" = 2 ] && { echo "SAFELATE FAIL — the lifted mixer did not run ($c)"; return 1; }
+    [ "$r" = 0 ] || { echo "    ^ miss"; fail=1; }
+  done
+  if grep -qE '^  late_partner = ' "$WORK/sl-cross.liq"; then
+    r=0; check off coast "$coast" || r=$?
+    [ "$r" = 2 ] && { echo "SAFELATE FAIL — the control mixer did not run"; return 1; }
+    [ "$r" = 1 ] || { echo "SAFELATE FAIL — the check cannot see the bug: the partner-missing rule off still passes"; return 1; }
+    echo "    ^ control (rule off): fails as it must"
+  fi
+  [ "$fail" = 0 ] || { echo "SAFELATE FAIL — a planned Hot Mix seam whose partner did not arrive is not the safe transition on the outgoing bar line"; return 1; }
+  echo "SAFELATE PASS — a missing partner takes the safe transition inside the mix lead (incoming at full on the bar line, outgoing bass cut, no stretch); the partner keeps the mix seam"
+}
+
 orphans() {
   # Liquidsoap 2.4.6 never frees an operator that was built and never wired in:
   # it stays as its own never-started clock (`ticks: 0` in `clock.dump`) and the
@@ -1299,6 +1404,7 @@ PROBE
 case "${1:-}" in
   probe)  probe ;;
   orphans) orphans ;;
+  safelate) safelate ;;
   render) shift; render "$@" ;;
   loopcheck) loopcheck ;;
   loopgaps) loopgaps ;;
