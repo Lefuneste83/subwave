@@ -6,8 +6,10 @@
 import assert from 'node:assert/strict';
 import {
   remainingSec, drainAction, shouldDeadlinePick, introRenderBudgetSec, cueProbeBudgetMs, mountCheckBudgetMs,
+  seamOverlapSec, seamWindowSec,
   DRAIN_DEADLINE_SEC, HARD_DEADLINE_SEC, DEADLINE_PICK_COOLDOWN_SEC,
   DRAIN_COMMIT_RESERVE_SEC, MIN_PRERENDER_BUDGET_SEC, CUE_PROBE_TIMEOUT_MS, MOUNT_CHECK_TIMEOUT_MS,
+  MIXER_SEAM_SLACK_SEC, SEAM_HANDOFF_MARGIN_SEC,
 } from '../src/broadcast/drain-policy.js';
 
 // ── remainingSec ─────────────────────────────────────────────────────────────
@@ -206,5 +208,45 @@ for (const r of [-100, -1, 0, 1, 11, 12, 12.001, 12.5, 13, 14, 17, 45, 600]) {
   assert.ok(b >= 0 && b <= MOUNT_CHECK_TIMEOUT_MS, `mount check budget for remaining=${r} is within [0, ceiling]`);
   assert.ok(b <= Math.max(0, (r - DRAIN_COMMIT_RESERVE_SEC) * 1000), `mount check budget for remaining=${r} leaves the reserve`);
 }
+
+// ── seamOverlapSec / seamWindowSec ───────────────────────────────────────────
+// The mixer asks for the next track when the seam OUT of the track ahead
+// begins, which radio.liq's cross_stamps sizes from that track alone. Out of a
+// Hot Mix seam that is a whole lead (16-64 s) before its end, so every
+// pre-commit wait for the next track is measured to the seam's start.
+
+// What cross_stamps buffers: the Hot Mix lead plus the slack...
+assert.equal(seamOverlapSec({ mixOut: { leadSec: 32 } }), 32 + MIXER_SEAM_SLACK_SEC, 'a Hot Mix seam: its lead plus the slack');
+// ...or the safe transition's two bars plus its lead plus the slack.
+assert.equal(seamOverlapSec({ safeOut: { barSec: 2, leadSec: 2.1 } }), 6.1 + MIXER_SEAM_SLACK_SEC, 'a safe transition: two bars + lead + slack');
+// The mix stamps win: the mixer sizes the buffer from them when both ride.
+assert.equal(seamOverlapSec({ mixOut: { leadSec: 16 }, safeOut: { barSec: 2, leadSec: 2 } }), 16 + MIXER_SEAM_SLACK_SEC, 'mix lead first');
+// A plain crossfade, an unknown track ahead or a degenerate stamp: no overlap.
+assert.equal(seamOverlapSec(null), 0, 'nothing known ahead');
+assert.equal(seamOverlapSec({}), 0, 'a plain crossfade keeps the end clock');
+assert.equal(seamOverlapSec({ mixOut: null, safeOut: null }), 0, 'cleared stamps');
+assert.equal(seamOverlapSec({ mixOut: { leadSec: 0 } }), 0, 'a zero lead is no seam');
+assert.equal(seamOverlapSec({ mixOut: { leadSec: Number.NaN } }), 0, 'a NaN lead is no seam');
+assert.equal(seamOverlapSec({ safeOut: { barSec: 2, leadSec: 0 } }), 0, 'a zero safe lead is no seam');
+
+// The window: the end clock less the overlap and the handoff margin.
+assert.equal(seamWindowSec(null, 32), null, 'unknown clock stays unknown');
+assert.equal(seamWindowSec(100, 0), 100, 'no overlap → the end clock, unchanged');
+assert.equal(seamWindowSec(100, null), 100, 'no overlap known → the end clock');
+assert.equal(seamWindowSec(100, 32.1), 100 - 32.1 - SEAM_HANDOFF_MARGIN_SEC, 'a Hot Mix seam ends the window a lead early');
+assert.equal(seamWindowSec(20, 32.1), 20 - 32.1 - SEAM_HANDOFF_MARGIN_SEC, 'past the seam start: negative');
+// The margin covers the mixer's 1 s next.txt poll and the request's resolution.
+assert.ok(SEAM_HANDOFF_MARGIN_SEC > 1, 'the margin is past one next.txt poll');
+
+// Every budget on the window: the on-air case that aired the coast. 104 s to
+// the end of the track ahead, a 32 s lead: the render may wait 104 - 12 = 92 s
+// on the end clock, past the 72 s at which the mixer reaches for the track.
+const incident = seamWindowSec(104, seamOverlapSec({ mixOut: { leadSec: 32 } }))!;
+assert.equal(introRenderBudgetSec(104), 92, 'the end clock: a 92 s window');
+assert.ok(introRenderBudgetSec(incident)! + DRAIN_COMMIT_RESERVE_SEC <= 104 - 32, 'the seam clock commits before the mixer asks');
+// The hold ends on the same clock: past it, the track goes out intrinsic.
+assert.equal(drainAction({ pairDrain: true, hasSuccessor: false, remainingSec: seamWindowSec(75, 32.1) }), 'send-intrinsic',
+  'a held track goes out once the seam into it is under the hard deadline');
+assert.equal(drainAction({ pairDrain: true, hasSuccessor: false, remainingSec: seamWindowSec(85, 32.1) }), 'hold');
 
 console.log('drain-policy: all assertions passed');

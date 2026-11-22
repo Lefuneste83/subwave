@@ -44,6 +44,7 @@ const A = track('out-120', 120, 500);
 const B = track('in-123', 123, 200);
 const C = track('far-131', 131, 200);
 const Z = track('top-121', 121, 0);
+const S = track('split-125', 125, 200);
 
 async function onAir(hotMix: Record<string, unknown> | undefined) {
   await settings.load();
@@ -447,8 +448,11 @@ test('a gap past twice the step: the safe transition, stamped on both sides, tie
   const out = getAnnotatedUri(item.track, { safeOut: item.safeOut, cueOutSec: item.safeOut.outCueSec });
   assert.match(out, /liq_safe_out="2\.0000"/);
   assert.match(out, /liq_safe_lead="2\.1000"/);
-  assert.doesNotMatch(getAnnotatedUri(item.track, { safeOut: item.safeOut, mixOut: { id: 'x', leadSec: 16, end: null } }), /liq_safe_out/,
-    'never beside a Hot Mix seam\'s own stamps');
+  // Beside a Hot Mix seam's own stamps it is that seam's fallback for a
+  // partner that does not arrive: both are written, the mixer picks by id.
+  const both = getAnnotatedUri(item.track, { safeOut: item.safeOut, mixOut: { id: 'x', leadSec: 16, end: null } });
+  assert.match(both, /liq_mix_out="x",liq_mix_lead="16\.0000"/);
+  assert.match(both, /liq_safe_out="2\.0000",liq_safe_lead="2\.1000"/);
   for (const key of ['liq_safe_out', 'liq_safe_lead']) assert.ok(RADIO_LIQ.includes(`"${key}"`), `radio.liq reads ${key}`);
   assert.ok(RADIO_LIQ.includes('"hotmix_safe"'), 'the capability the controller asks');
 });
@@ -496,4 +500,63 @@ test('a re-plan clears the safe stamps, and the seam into a track stands only wh
   await plan(p2.item, p2.successor);
   assert.equal(p2.item.safeOut, undefined, 'a pair it can mix is the beat-matched seam');
   assert.ok(p2.item.mixOut);
+});
+
+// A planned partner that does not arrive in time (a late pick lets the coast
+// in, a request lands between them): radio.liq has only the outgoing track's
+// mix lead to fill, and without a fallback that was a plain crossfade over the
+// whole lead, two unsynced kicks. Every planned seam carries the safe
+// transition measured to its planned cut (safe-out-policy.ts
+// fallbackForPlannedCut), and the cut stays the mix cut.
+test('a planned seam carries a safe fallback measured to its cut, on a mixer that has the safe transition', async () => {
+  queue._hotMixSafeBuilt = async () => true;
+  await onAir({ enabled: true });
+  const { item, successor } = pairOf(A, B);
+  await plan(item, successor);
+  assert.ok(item.mixOut && successor.mixIn, queue.djLog.map((l) => l.message).join('\n'));
+  // The cut is on one of A's bar lines (0.5 + 2k s): the incoming track would
+  // enter one bar before it, at full, A's bass pot cut just ahead of it.
+  assert.equal((item.mixOut.outCueSec - 0.5) % 2, 0);
+  assert.deepEqual(item.mixOut.safeFallback, { barSec: 2, leadSec: 2 });
+  // The refused-seam path stays untouched: no id-matched safe stamps.
+  assert.equal(item.safeOut, undefined);
+  assert.equal(successor.safeIn, undefined);
+  assert.equal(item.track.crossSec, item.mixOut.leadSec, 'the buffer is still the mix lead');
+  assert.ok(queue.djLog.some((l) => /^Hot Mix: safe fallback armed for a late partner of "out-120": bar 2s, incoming 2s before the cut$/.test(l.message)),
+    queue.djLog.map((l) => l.message).join('\n'));
+  // What the drain hands the mixer: the mix stamps and the fallback together,
+  // the cut unchanged.
+  const out = getAnnotatedUri(item.track, { mixOut: item.mixOut, safeOut: item.mixOut.safeFallback, cueOutSec: item.mixOut.outCueSec });
+  assert.match(out, new RegExp(`liq_mix_out="${item.mixOut.id}",liq_mix_lead="16\\.0000"`));
+  assert.match(out, /liq_safe_out="2\.0000",liq_safe_lead="2\.0000"/);
+  assert.match(out, new RegExp(`liq_cue_out="${item.mixOut.outCueSec}`));
+  // The mixer takes the fallback only when the next track does not name the
+  // pair, inside the buffer the mix lead sized (scripts/fx-render-test.sh
+  // safelate renders it).
+  assert.match(RADIO_LIQ, /^ {2}late_partner = hot_mix_stretch\(\) and mix_out != "" and not mixing$/m);
+  assert.match(RADIO_LIQ, /^ {2}safe_max_d = if late_partner and partner_lead > 0\. then max\(safe_max_d, partner_max_d\) else safe_max_d end$/m);
+  assert.ok(RADIO_LIQ.includes('safe out (planned partner missing)'));
+});
+
+test('a split seam\'s fallback is in output seconds at the outgoing closing tempo', async () => {
+  queue._hotMixSafeBuilt = async () => true;
+  await onAir({ enabled: true });
+  const { item, successor } = pairOf(A, S);
+  await plan(item, successor);
+  assert.ok(item.mixOut?.end, queue.djLog.map((l) => l.message).join('\n'));
+  const q = item.mixOut.end.tempo;
+  assert.ok(q > 1.01, `split at x${q}`);
+  const fb = item.mixOut.safeFallback!;
+  assert.ok(Math.abs(fb.barSec - 2 / q) < 1e-3, `bar ${fb.barSec}`);
+  assert.ok(Math.abs(fb.leadSec - 2 / q) < 1e-3, `lead ${fb.leadSec}`);
+});
+
+test('no fallback on a mixer without the safe transition', async () => {
+  await onAir({ enabled: true });
+  const { item, successor } = pairOf(A, B);
+  await plan(item, successor);
+  assert.ok(item.mixOut);
+  assert.equal(item.mixOut.safeFallback, undefined);
+  assert.ok(!queue.djLog.some((l) => /safe fallback armed/.test(l.message)));
+  assert.doesNotMatch(getAnnotatedUri(item.track, { mixOut: item.mixOut, safeOut: item.mixOut.safeFallback }), /liq_safe_out/);
 });

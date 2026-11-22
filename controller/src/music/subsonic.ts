@@ -1257,9 +1257,11 @@ export function getAnnotatedUri(song, opts: { maxDurationSec?: number | null; cu
     }
   }
   // A Hot Mix safe transition (radio.liq HOT MIX SAFE OUT): the outgoing bar
-  // and the lead from the incoming start to its end. Never beside a Hot Mix
-  // seam's own stamps, which the mixer would take first anyway.
-  if (opts.safeOut && !opts.mixOut && opts.safeOut.barSec > 0 && opts.safeOut.leadSec > 0) {
+  // and the lead from the incoming start to its end. Beside a Hot Mix seam's
+  // own stamps it is that seam's fallback for a partner that does not arrive
+  // (safe-out-policy.ts fallbackForPlannedCut): the mixer takes the mix when
+  // the partner's id meets it, and the safe transition only when it does not.
+  if (opts.safeOut && opts.safeOut.barSec > 0 && opts.safeOut.leadSec > 0) {
     fields.push(`liq_safe_out="${opts.safeOut.barSec.toFixed(4)}"`);
     fields.push(`liq_safe_lead="${opts.safeOut.leadSec.toFixed(4)}"`);
   }

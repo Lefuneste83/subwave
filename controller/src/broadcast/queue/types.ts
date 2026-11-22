@@ -9,7 +9,7 @@ import type { ClipSeamCues } from '../stem-seam.js';
 import type { TransitionEffect } from '../../settings/vocab.js';
 import type { MixDropReason } from '../../schemas/transitions.js';
 import type { MixInStamps, MixOutStamps } from '../../music/hot-mix-seam.js';
-import type { SafeOutStamps } from '../../music/safe-out-policy.js';
+import type { SafeFallback, SafeOutStamps } from '../../music/safe-out-policy.js';
 
 // A persona as it flows through the queue's voice path — only `id`/`name`/
 // `djMode` are read here; the rest rides through to tts.speak()/voiceGainDb().
@@ -225,7 +225,11 @@ export interface QueueItem {
   // on an older mixer a phrase-mix seam stamps `bassRide` (ridden down over the
   // overlap, "ride"). `punchSec` on B: output seconds after B starts at which
   // its bass swaps in (liq_mix_punch).
-  mixOut?: (MixOutStamps & { outCueSec: number }) | null;
+  // `safeFallback`: the safe transition measured to the planned cut, for a
+  // partner that does not arrive (safe-out-policy.ts fallbackForPlannedCut),
+  // annotated beside the mix stamps as liq_safe_out/liq_safe_lead; it never
+  // moves the cut.
+  mixOut?: (MixOutStamps & { outCueSec: number; safeFallback?: SafeFallback }) | null;
   // `waitSec`: the beat-phase shift its cue-in could not take (hotMixSeam.shiftInCue).
   mixIn?: (MixInStamps & { inCueSec: number; waitSec?: number }) | null;
   // DJ Hot Mix safe transition (music/safe-out-policy.ts), for a Hot Mix seam

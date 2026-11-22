@@ -5,7 +5,7 @@
 // blind set 5 (bass-out acceptable 3/3).
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { planSafeOut, safeCrossSec, PRE_ROLL_SEC, FALLBACK_BAR_SEC } from '../src/music/safe-out-policy.js';
+import { fallbackForPlannedCut, planSafeOut, safeCrossSec, PRE_ROLL_SEC, FALLBACK_BAR_SEC } from '../src/music/safe-out-policy.js';
 
 // One trusted segment at `bpm`, beats from `anchor`, a downbeat on the first beat.
 const grid = (bpm: number, anchor = 0.5, beats = 600) => ({
@@ -60,4 +60,36 @@ test('the ride stays inside the track; a track too short for it gets no plan', (
   // a grid whose bar lines all sit too close to the cue-in falls back to the tag
   const p = planSafeOut({ a: { ...grid(120, 0.5, 8), endSec: 120, cueInSec: 0 } });
   assert.equal(p!.source, 'tempo tag');
+});
+
+// A planned Hot Mix seam's fallback for a partner that does not arrive: the
+// cut stays the mix cut, so the lead is measured to it.
+test('a fallback for a planned cut: the bar line one bar before the cut, the lead to the cut', () => {
+  // A mix cut on a bar line (0.5 + 2k): the entry is one bar before it.
+  const cut = 196.5;
+  const p = planSafeOut({ a: { ...grid(120, 0.5), endSec: cut }, b: null });
+  near(p!.entrySec, 194.5);
+  assert.deepEqual(fallbackForPlannedCut(p, cut), { barSec: 2, leadSec: 2 });
+  // Off a bar line (a grid the cut was not planned on): the latest line a bar
+  // before it, the lead between one and two bars, never the plan's own cut.
+  const off = 197.3;
+  const q = planSafeOut({ a: { ...grid(120, 0.5), endSec: off }, b: null });
+  near(q!.outCueSec, 196.5);
+  const fb = fallbackForPlannedCut(q, off)!;
+  near(fb.leadSec, 2.8);
+  near(fb.barSec, 2);
+});
+
+test('a fallback is in output seconds at the closing tempo, and refuses what cannot be one', () => {
+  const p = planSafeOut({ a: { ...grid(120, 0.5), endSec: 196.5 }, b: null });
+  const fb = fallbackForPlannedCut(p, 196.5, 1.025)!;
+  near(fb.barSec, 2 / 1.025);
+  near(fb.leadSec, 2 / 1.025);
+  // A tempo outside the mixer's range reads as untouched, as radio.liq does.
+  assert.deepEqual(fallbackForPlannedCut(p, 196.5, 1.3), { barSec: 2, leadSec: 2 });
+  assert.deepEqual(fallbackForPlannedCut(p, 196.5, Number.NaN), { barSec: 2, leadSec: 2 });
+  assert.equal(fallbackForPlannedCut(null, 196.5), null, 'no plan');
+  assert.equal(fallbackForPlannedCut(p, p!.entrySec), null, 'a cut at the entry leaves no lead');
+  assert.equal(fallbackForPlannedCut(p, Number.NaN), null);
+  assert.equal(fallbackForPlannedCut({ barSec: 0, entrySec: 10 }, 12), null, 'no bar');
 });

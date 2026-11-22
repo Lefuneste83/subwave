@@ -1,6 +1,8 @@
 // Hold the unsent tail until its successor is known or the hard deadline requires intrinsic
 // stamps. Pick the successor early enough for selection and a cached stem render. #749,
 // scripts/drain-policy.test.ts..
+import { safeCrossSec } from '../music/safe-out-policy.js';
+
 export const DRAIN_DEADLINE_SEC = 120;
 
 // Past this the held item is sent with track-intrinsic stamps only: Liquidsoap
@@ -43,6 +45,56 @@ export function remainingSec(
   const playable = playableDurationSec(durationSec, cueOutSec, cueInSec);
   if (playable == null) return null;
   return (startedAtMs + playable * 1000 - nowMs) / 1000;
+}
+
+// WHERE THE WINDOW ENDS. `cross` reaches for the next track when the
+// transition OUT of the track ahead begins, not at its end: it buffers that
+// track's own end, which radio.liq's cross_stamps sizes from the outgoing
+// track's stamps alone (a Hot Mix seam's lead plus the clip slack, a safe
+// transition's two bars plus its lead plus the slack). A track committed after
+// that instant misses the seam and the coast (auto.m3u) airs in its place, so
+// every pre-commit wait for a track coming out of such a seam is measured to the
+// seam's start. On air, a Hot Mix lead of about 32 s let a slow intro render
+// commit the planned partner 17-22 s after the mixer had switched to the coast.
+//
+// Only the controller-planned Hot Mix overlaps (the beat-matched seam and the
+// safe transition) are subtracted. A plain crossfade runs on the same `cross`
+// mechanism, but its window keeps the end-of-track clock it always had: a
+// shorter window there would change every non-Hot-Mix station.
+//
+// radio.liq clip_seam_slack: what cross_stamps buffers past either Hot Mix lead.
+export const MIXER_SEAM_SLACK_SEC = 0.1;
+// Once the track is committed, the mixer still needs it ready before the seam:
+// next.txt is polled once a second, then request.queue resolves the request (a
+// local file opens at once, a stream is downloaded whole by proto_subhttp
+// first). Not measured: a margin, so the planned partner is ready a little
+// ahead of the instant the mixer asks for it rather than exactly at it.
+export const SEAM_HANDOFF_MARGIN_SEC = 3;
+
+// The seam OUT of the track ahead, as the mixer will size it: the overlap
+// before that track's end at which `cross` asks for the next one. Zero when the
+// track ahead carries no Hot Mix overlap (a plain crossfade, see above), or is
+// unknown.
+export function seamOverlapSec(ahead: {
+  mixOut?: { leadSec: number } | null;
+  safeOut?: { barSec: number; leadSec: number } | null;
+} | null | undefined): number {
+  const lead = ahead?.mixOut?.leadSec;
+  if (typeof lead === 'number' && Number.isFinite(lead) && lead > 0) return lead + MIXER_SEAM_SLACK_SEC;
+  const safe = ahead?.safeOut;
+  if (safe && Number.isFinite(safe.barSec) && Number.isFinite(safe.leadSec) && safe.barSec > 0 && safe.leadSec > 0) {
+    return safeCrossSec(safe) + MIXER_SEAM_SLACK_SEC;
+  }
+  return 0;
+}
+
+// Seconds left before the mixer needs the track: the end-of-track clock less
+// the seam's overlap and the handoff margin. Null stays null (unknowable), and
+// no overlap leaves the clock untouched. Negative means the seam has begun.
+export function seamWindowSec(remainingToEnd: number | null, overlapSec: number | null | undefined): number | null {
+  if (remainingToEnd == null) return null;
+  if (typeof overlapSec !== 'number' || !Number.isFinite(overlapSec) || overlapSec <= 0) return remainingToEnd;
+  return remainingToEnd - overlapSec - SEAM_HANDOFF_MARGIN_SEC;
 }
 
 // Runway kept for the commit tail after the intro render in one drain pass:
