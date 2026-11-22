@@ -180,30 +180,34 @@ test('bars not trusted settle as no-bars; trusted bars make the track due', () =
   assert.equal(facetRow('b1'), undefined);
 });
 
-test('a half-bar grid whose edges agree has trusted bars: due, not no-bars', () => {
-  // Body split between beat 1 and beat 3 (agreement 0.53), the first and last
-  // 32 bars on one phase: grid-policy.ts trusts the bars.
-  const rescued = { downbeat_agreement: 0.53, downbeat_halfbar: 0.98, downbeat_edge_agreement: 0.9 };
+test('a half-bar grid has trusted bars: due, not no-bars', () => {
+  // Body split between beat 1 and beat 3 (agreement 0.53), nearly every
+  // downbeat on that pair: grid-policy.ts trusts the bars, whichever rule
+  // placed the bar line (the drop, or the majority without a clear one).
+  const rescued = { downbeat_agreement: 0.53, downbeat_halfbar: 0.98, downbeat_drop_db: 14.2, downbeat_phase: 'drop' };
   track('h1');
   grid('h1', rescued);
   const g = db.getGrid('h1')!;
-  assert.equal(g.downbeatHalfbar, 0.98);
-  assert.equal(g.downbeatEdgeAgreement, 0.9);
+  assert.deepEqual([g.downbeatHalfbar, g.downbeatDropDb, g.downbeatPhase], [0.98, 14.2, 'drop']);
   assert.equal(gridDecision(g).bars, true);
   assert.ok(db.structureGridOf(g));
   assert.equal(facetRow('h1'), undefined, 'no no-bars row');
   assert.ok(db.facetNeedsIds('structure').includes('h1'));
-  // Edges on two different phases: still no bars.
+  track('h3');
+  grid('h3', { ...rescued, downbeat_drop_db: null, downbeat_phase: 'majority' });
+  assert.equal(facetRow('h3'), undefined, 'no clear drop: the majority, still trusted');
+  // A half-bar share under 0.9: still no bars.
   track('h2');
-  grid('h2', { ...rescued, downbeat_edge_agreement: 0 });
+  grid('h2', { ...rescued, downbeat_halfbar: 0.8 });
   assert.equal(facetRow('h2')?.reason, 'no-bars');
   // The whole-table re-derive reads the grid through its own SQL JSON: the
   // same verdicts.
   sql().prepare(`DELETE FROM track_facet_status WHERE facet = 'structure'`).run();
   db.resyncAllFacets(sql());
   assert.equal(facetRow('h1'), undefined);
+  assert.equal(facetRow('h3'), undefined);
   assert.equal(facetRow('h2')?.reason, 'no-bars');
-  // A grid that loses the scores (re-measured by an older worker) loses its bars.
+  // A grid that loses the share (re-measured by an older worker) loses its bars.
   grid('h1', { downbeat_agreement: 0.53 });
   assert.equal(facetRow('h1')?.reason, 'no-bars');
 });

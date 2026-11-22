@@ -46,6 +46,11 @@ export interface GridSegment {
   downbeatMs: number | null;
 }
 
+// Which rule placed a half-bar grid's bar line (analyze_worker.py
+// place_half_bar): the drop, or the model's majority without a clear one.
+export type GridPhaseSource = 'drop' | 'majority';
+export const phaseSourceOrNull = (v: unknown): GridPhaseSource | null => (v === 'drop' || v === 'majority' ? v : null);
+
 export interface TrackGrid {
   status: GridStatus;
   version: number;
@@ -59,12 +64,14 @@ export interface TrackGrid {
   coverage: number | null;
   residualMs: number | null;
   downbeatAgreement: number | null;
-  // The half-bar rescue's scores (music/grid-policy.ts): the main segment's
-  // downbeats on the dominant phase or two beats away, and the first/last 32
-  // bars' shared-phase agreement. Null when the worker did not report them (a
-  // grid measured before it did, or not 4/4).
+  // The half-bar case (music/grid-policy.ts): the main segment's downbeats on
+  // the dominant phase or two beats away (null when the worker did not report
+  // it: a grid measured before it did, or not 4/4); in that case the drop's
+  // jump in dB (null when not computed) and which rule placed the bar line
+  // (null outside the case).
   downbeatHalfbar: number | null;
-  downbeatEdgeAgreement: number | null;
+  downbeatDropDb: number | null;
+  downbeatPhase: GridPhaseSource | null;
   mainShare: number | null;
   decodedMs: number | null;
   measuredAt: string;
@@ -94,7 +101,8 @@ export interface GridAnswer {
   residualMs: number | null;
   downbeatAgreement: number | null;
   downbeatHalfbar: number | null;
-  downbeatEdgeAgreement: number | null;
+  downbeatDropDb: number | null;
+  downbeatPhase: GridPhaseSource | null;
   mainShare: number | null;
   decodedMs: number | null;
 }
@@ -126,13 +134,14 @@ export function ensureGridTable(d: Database.Database): void {
     head_outro_json    TEXT,
     grid_outro_json    TEXT,
     downbeat_halfbar   REAL,
-    downbeat_edge_agreement REAL
+    downbeat_drop_db   REAL,
+    downbeat_phase     TEXT
   ) WITHOUT ROWID`);
-  // The ending's columns, then the half-bar rescue's scores, came after the
+  // The ending's columns, then the half-bar case's, came after the
   // table shipped: added in place (null on every row measured before).
   const cols = new Set((d.prepare('PRAGMA table_info(track_grid)').all() as Array<{ name: string }>).map((c) => c.name));
   for (const [c, type] of [['head_outro_json', 'TEXT'], ['grid_outro_json', 'TEXT'],
-    ['downbeat_halfbar', 'REAL'], ['downbeat_edge_agreement', 'REAL']] as const) {
+    ['downbeat_halfbar', 'REAL'], ['downbeat_drop_db', 'REAL'], ['downbeat_phase', 'TEXT']] as const) {
     if (!cols.has(c)) d.exec(`ALTER TABLE track_grid ADD COLUMN ${c} ${type}`);
   }
 }
@@ -151,19 +160,21 @@ const finiteOrNull = (v: unknown): number | null => (typeof v === 'number' && Nu
 export function writeGrid(id: string, a: GridAnswer, at = new Date().toISOString()): void {
   requireDb().prepare(
     `INSERT INTO track_grid (track_id, status, version, reason, attempts, engine, model, bpm, beats_per_bar,
-       segments_json, coverage, residual_ms, downbeat_agreement, downbeat_halfbar, downbeat_edge_agreement,
-       main_share, decoded_ms, measured_at)
-     VALUES (?, 'ok', ?, NULL, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       segments_json, coverage, residual_ms, downbeat_agreement, downbeat_halfbar, downbeat_drop_db,
+       downbeat_phase, main_share, decoded_ms, measured_at)
+     VALUES (?, 'ok', ?, NULL, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(track_id) DO UPDATE SET status = 'ok', version = excluded.version, reason = NULL, attempts = 0,
        engine = excluded.engine, model = excluded.model, bpm = excluded.bpm, beats_per_bar = excluded.beats_per_bar,
        segments_json = excluded.segments_json, coverage = excluded.coverage, residual_ms = excluded.residual_ms,
        downbeat_agreement = excluded.downbeat_agreement, downbeat_halfbar = excluded.downbeat_halfbar,
-       downbeat_edge_agreement = excluded.downbeat_edge_agreement, main_share = excluded.main_share,
+       downbeat_drop_db = excluded.downbeat_drop_db, downbeat_phase = excluded.downbeat_phase,
+       main_share = excluded.main_share,
        decoded_ms = excluded.decoded_ms, measured_at = excluded.measured_at`,
   ).run(
     id, Math.round(a.version), a.engine, a.model, a.bpm, a.beatsPerBar, JSON.stringify(a.segments),
     finiteOrNull(a.coverage), finiteOrNull(a.residualMs), finiteOrNull(a.downbeatAgreement),
-    finiteOrNull(a.downbeatHalfbar), finiteOrNull(a.downbeatEdgeAgreement), finiteOrNull(a.mainShare), a.decodedMs == null ? null : Math.round(a.decodedMs), at,
+    finiteOrNull(a.downbeatHalfbar), finiteOrNull(a.downbeatDropDb), phaseSourceOrNull(a.downbeatPhase),
+    finiteOrNull(a.mainShare), a.decodedMs == null ? null : Math.round(a.decodedMs), at,
   );
 }
 
@@ -178,7 +189,7 @@ export function recordGridUnmeasurable(id: string, version: number, reason: stri
      ON CONFLICT(track_id) DO UPDATE SET status = 'unmeasurable', version = excluded.version, reason = excluded.reason,
        attempts = 0, engine = NULL, model = NULL, bpm = NULL, beats_per_bar = NULL, segments_json = NULL,
        coverage = NULL, residual_ms = NULL, downbeat_agreement = NULL, downbeat_halfbar = NULL,
-       downbeat_edge_agreement = NULL, main_share = NULL, decoded_ms = NULL, measured_at = excluded.measured_at`,
+       downbeat_drop_db = NULL, downbeat_phase = NULL, main_share = NULL, decoded_ms = NULL, measured_at = excluded.measured_at`,
   ).run(id, Math.round(version), reason.slice(0, 500), at);
 }
 
@@ -198,7 +209,7 @@ interface GridRow {
   status: GridStatus; version: number; reason: string | null; attempts: number; engine: string | null;
   model: string | null; bpm: number | null; beats_per_bar: number | null; segments_json: string | null;
   coverage: number | null; residual_ms: number | null; downbeat_agreement: number | null;
-  downbeat_halfbar?: number | null; downbeat_edge_agreement?: number | null;
+  downbeat_halfbar?: number | null; downbeat_drop_db?: number | null; downbeat_phase?: string | null;
   main_share: number | null; decoded_ms: number | null; measured_at: string;
   applied: number; head_bpm: number | null; head_beats_json: string | null; head_bars_json: string | null;
   head_outro_json: string | null; grid_outro_json: string | null;
@@ -221,7 +232,8 @@ function toGrid(r: GridRow): TrackGrid {
     status: r.status, version: r.version, reason: r.reason, attempts: r.attempts, engine: r.engine,
     model: r.model, bpm: r.bpm, beatsPerBar: r.beats_per_bar, segments: parseSegments(r.segments_json),
     coverage: r.coverage, residualMs: r.residual_ms, downbeatAgreement: r.downbeat_agreement,
-    downbeatHalfbar: r.downbeat_halfbar ?? null, downbeatEdgeAgreement: r.downbeat_edge_agreement ?? null,
+    downbeatHalfbar: r.downbeat_halfbar ?? null, downbeatDropDb: r.downbeat_drop_db ?? null,
+    downbeatPhase: phaseSourceOrNull(r.downbeat_phase),
     mainShare: r.main_share, decodedMs: r.decoded_ms, measuredAt: r.measured_at,
     applied: (r.applied === 1 ? 1 : r.applied === -1 ? -1 : 0), headBpm: r.head_bpm,
     headBeatsJson: r.head_beats_json, headBarsJson: r.head_bars_json,
@@ -286,8 +298,8 @@ export function setGridOutro(d: Database.Database, id: string, headJson: string 
 // mismatch shifts every later value into the wrong column without an error.
 const GRID_COPY_COLUMNS = [
   'status', 'version', 'reason', 'attempts', 'engine', 'model', 'bpm', 'beats_per_bar', 'segments_json',
-  'coverage', 'residual_ms', 'downbeat_agreement', 'downbeat_halfbar', 'downbeat_edge_agreement', 'main_share',
-  'decoded_ms', 'measured_at', 'applied', 'head_bpm', 'head_beats_json', 'head_bars_json', 'head_outro_json',
+  'coverage', 'residual_ms', 'downbeat_agreement', 'downbeat_halfbar', 'downbeat_drop_db', 'downbeat_phase',
+  'main_share', 'decoded_ms', 'measured_at', 'applied', 'head_bpm', 'head_beats_json', 'head_bars_json', 'head_outro_json',
   'grid_outro_json',
 ].join(', ');
 export function moveGridRow(d: Database.Database, oldId: string, newId: string): void {

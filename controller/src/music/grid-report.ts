@@ -20,7 +20,7 @@
 // Pure except for the CLI at the bottom (grid-report-cli.ts).
 
 import { soundWords, trackAcoustics, type AcousticsFields } from './sound-line.js';
-import type { GridSegment, TrackGrid } from './library-db/grid.js';
+import type { GridPhaseSource, GridSegment, TrackGrid } from './library-db/grid.js';
 import { gridDecision } from './grid-policy.js';
 
 export type TempoRelation = 'same' | 'double' | 'half' | 'three-halves' | 'two-thirds' | 'other' | 'no-stored-bpm';
@@ -130,7 +130,8 @@ export interface GridReportRow {
   steadyShare: number | null;
   downbeatAgreement: number | null;
   downbeatHalfbar: number | null;
-  downbeatEdgeAgreement: number | null;
+  downbeatDropDb: number | null;
+  downbeatPhase: GridPhaseSource | null;
   beatsPerBar: number | null;
   // What step 4 would write under GRID_WRITE_GATE.
   wouldWriteBpm: boolean;
@@ -171,7 +172,8 @@ export function compareGrid(t: GridReportTrack, g: TrackGrid): GridReportRow | n
     steadyShare: round(steady),
     downbeatAgreement: g.downbeatAgreement,
     downbeatHalfbar: g.downbeatHalfbar,
-    downbeatEdgeAgreement: g.downbeatEdgeAgreement,
+    downbeatDropDb: g.downbeatDropDb,
+    downbeatPhase: g.downbeatPhase,
     beatsPerBar: g.beatsPerBar,
     wouldWriteBpm: confident,
     wouldWriteBars: decision.bars,
@@ -211,7 +213,7 @@ export function summariseGridReport(rows: readonly GridReportRow[]): GridReportS
 const CSV_COLUMNS: Array<keyof GridReportRow> = [
   'id', 'artist', 'title', 'genre', 'storedBpm', 'gridBpm', 'deltaBpm', 'relation', 'wordsBefore', 'wordsAfter',
   'reEmbed', 'barOffsetBeats', 'barShift', 'storedBeatsOnGrid', 'segments', 'coverage', 'mainShare', 'steadyShare',
-  'downbeatAgreement', 'downbeatHalfbar', 'downbeatEdgeAgreement', 'beatsPerBar', 'wouldWriteBpm', 'wouldWriteBars', 'heldBecause',
+  'downbeatAgreement', 'downbeatHalfbar', 'downbeatDropDb', 'downbeatPhase', 'beatsPerBar', 'wouldWriteBpm', 'wouldWriteBars', 'heldBecause',
 ];
 
 export function gridReportCsv(rows: readonly GridReportRow[]): string {

@@ -15,7 +15,7 @@ import { describeFetchError, fetchWithTimeout } from '../util/fetch-timeout.js';
 import { envInt } from '../util/env.js';
 import { parseLoudnessCurve, type LoudnessCurve } from './loudness-curve.js';
 import { parseWholeLoudnessCurve, type WholeLoudnessCurve } from './whole-loudness-curve.js';
-import type { GridAnswer, GridSegment } from './library-db/grid.js';
+import { phaseSourceOrNull, type GridAnswer, type GridSegment } from './library-db/grid.js';
 import { parseStructureBars, type StructureAnswer, type StructureGrid } from './library-db/structure.js';
 import { getDb, trackFileSize } from './library-db.js';
 
@@ -1476,10 +1476,11 @@ export function parseGridAnswer(data: unknown): GridAnswer | null {
     coverage: num(d.coverage),
     residualMs: num(d.residual_ms),
     downbeatAgreement: num(d.downbeat_agreement),
-    // The half-bar rescue's scores (grid-policy.ts): absent from an older
-    // worker, so null, never a failed answer.
+    // The half-bar case (grid-policy.ts): absent from an older worker, so
+    // null, never a failed answer; an unknown source string is null.
     downbeatHalfbar: num(d.downbeat_halfbar),
-    downbeatEdgeAgreement: num(d.downbeat_edge_agreement),
+    downbeatDropDb: num(d.downbeat_drop_db),
+    downbeatPhase: phaseSourceOrNull(d.downbeat_phase),
     mainShare: num(d.main_share),
     decodedMs: num(d.decoded_ms),
   };

@@ -35,7 +35,7 @@ const grid = (over: Partial<import('../src/music/library-db/grid.js').TrackGrid>
   bpm: 124, beatsPerBar: 4,
   segments: [{ anchorMs: 480, periodUs: 483871, beats: 700, downbeatMs: 480 }],
   coverage: 0.97, residualMs: 5, downbeatAgreement: 0.84, downbeatHalfbar: null as number | null,
-  downbeatEdgeAgreement: null as number | null, mainShare: 0.99, decodedMs: 340_000,
+  downbeatDropDb: null as number | null, downbeatPhase: null as 'drop' | 'majority' | null, mainShare: 0.99, decodedMs: 340_000,
   measuredAt: '2026-11-12T00:00:00Z', applied: 0 as const, headBpm: null, headBeatsJson: null, headBarsJson: null, headOutroJson: null, gridOutroJson: null, ...over,
 });
 const P = 483.871;
@@ -144,19 +144,24 @@ test('the summary counts and the CSV', () => {
     R.compareGrid(track(), grid())!,
     R.compareGrid(track({ id: 'b', bpm: 62, title: 'Hello, "World"' }), grid())!,
     R.compareGrid(track({ id: 'c', bpm: 62 }), grid({ coverage: 0.5 }))!,
+    R.compareGrid(track({ id: 'd' }), grid({ downbeatAgreement: 0.53, downbeatHalfbar: 0.98, downbeatDropDb: 14.2, downbeatPhase: 'drop' }))!,
   ];
   const s = R.summariseGridReport(rows);
-  assert.equal(s.tracks, 3);
-  assert.equal(s.byRelation.same, 1);
+  assert.equal(s.tracks, 4);
+  assert.equal(s.byRelation.same, 2);
   assert.equal(s.byRelation.double, 2);
-  assert.equal(s.wouldWriteBpm, 2);
+  assert.equal(s.wouldWriteBpm, 3);
   assert.equal(s.held, 1);
   assert.equal(s.reEmbeds, 1);
   assert.equal(s.bpmChangesOver1, 1);
   const csv = R.gridReportCsv(rows);
   assert.match(csv.split('\r\n')[0], /^id,artist,title,genre,storedBpm,gridBpm/);
   assert.ok(csv.includes('"Hello, ""World"""'));
-  assert.equal(csv.split('\r\n').length, 5);
+  assert.equal(csv.split('\r\n').length, 6);
+  // The half-bar case's columns: the share, the drop's jump, which rule placed the bar line.
+  const head = csv.split('\r\n')[0];
+  assert.ok(head.includes(',downbeatAgreement,downbeatHalfbar,downbeatDropDb,downbeatPhase,beatsPerBar,'), head);
+  assert.ok(csv.split('\r\n')[4].endsWith(',0.53,0.98,14.2,drop,4,true,true,'), csv.split('\r\n')[4]);
   assert.ok(C.formatSummary(rows).some((l) => /tempo corrections the gate would write/.test(l)));
 });
 
@@ -165,7 +170,7 @@ test('the report reads only: the library file is unchanged', () => {
   db.upsertTrackAnalysis('lib1', { bpm: 62, musicalKey: '8A', loudnessLufs: -9, source: 'full' } as never);
   db.writeGridResult('lib1', { grid: { version: 1, engine: 'beat_this', model: 'final0', bpm: 124, beatsPerBar: 4,
     segments: grid().segments, coverage: 0.97, residualMs: 5, downbeatAgreement: 0.84, downbeatHalfbar: null,
-    downbeatEdgeAgreement: null, mainShare: 0.99, decodedMs: 300_000 } });
+    downbeatDropDb: null, downbeatPhase: null, mainShare: 0.99, decodedMs: 300_000 } });
   db.requireDb().pragma('wal_checkpoint(TRUNCATE)');
   const file = join(stateDir, 'library.db');
   const before = readFileSync(file);

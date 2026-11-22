@@ -45,6 +45,8 @@ const GOOD_GRID = {
   coverage: 0.98, residual_ms: 5.2, downbeat_agreement: 0.84, main_share: 0.99,
   beats_detected: 712, decoded_ms: 340_000,
 };
+// A half-bar answer: the share, the drop's jump and which rule placed the bar line.
+const HALF = { downbeat_agreement: 0.53, downbeat_halfbar: 0.98, downbeat_drop_db: 14.2, downbeat_phase: 'drop' };
 
 function handler(req: IncomingMessage, res: ServerResponse) {
   if (req.url?.startsWith('/health')) {
@@ -140,39 +142,42 @@ test('parseGridAnswer is strict', () => {
   assert.equal(analyzer.parseGridAnswer({ ...GOOD_GRID, segments: [{ anchorMs: 0, periodUs: 500000, beats: 9, downbeatMs: 'x' }] }), null);
   assert.equal(analyzer.parseGridAnswer({ ...GOOD_GRID, beats_per_bar: 11 })?.beatsPerBar, null, 'an odd metre past 7 is unknown');
   assert.equal(analyzer.parseGridAnswer(null), null);
-  // The half-bar and edge scores: absent (an older worker) is null, never 0.
+  // The half-bar share and the drop's figures: absent (an older worker) is
+  // null, never 0; an unknown source string is null.
   assert.equal(ok.downbeatHalfbar, null);
-  assert.equal(ok.downbeatEdgeAgreement, null);
-  const edges = analyzer.parseGridAnswer({ ...GOOD_GRID, downbeat_halfbar: 0.98, downbeat_edge_agreement: 0.91 })!;
-  assert.equal(edges.downbeatHalfbar, 0.98);
-  assert.equal(edges.downbeatEdgeAgreement, 0.91);
-  assert.equal(analyzer.parseGridAnswer({ ...GOOD_GRID, downbeat_halfbar: 'x', downbeat_edge_agreement: null })?.downbeatHalfbar, null);
+  assert.equal(ok.downbeatDropDb, null);
+  assert.equal(ok.downbeatPhase, null);
+  const half = analyzer.parseGridAnswer({ ...GOOD_GRID, ...HALF })!;
+  assert.equal(half.downbeatHalfbar, 0.98);
+  assert.equal(half.downbeatDropDb, 14.2);
+  assert.equal(half.downbeatPhase, 'drop');
+  assert.equal(analyzer.parseGridAnswer({ ...GOOD_GRID, ...HALF, downbeat_phase: 'majority', downbeat_drop_db: null })?.downbeatPhase, 'majority');
+  const odd = analyzer.parseGridAnswer({ ...GOOD_GRID, downbeat_halfbar: 'x', downbeat_drop_db: 'y', downbeat_phase: 'edges' })!;
+  assert.deepEqual([odd.downbeatHalfbar, odd.downbeatDropDb, odd.downbeatPhase], [null, null, null]);
 });
 
-test('the half-bar and edge scores are stored, reset and carried by an ID rotation', () => {
+test('the half-bar share and the drop\'s figures are stored, reset and carried by an ID rotation', () => {
   db.upsertTrackMeta('e1', { title: 'e1', artist: 'A', album: 'B', duration: 300 } as never);
-  db.writeGridResult('e1', { grid: analyzer.parseGridAnswer({ ...GOOD_GRID, downbeat_halfbar: 0.98, downbeat_edge_agreement: 0.91 })! });
+  db.writeGridResult('e1', { grid: analyzer.parseGridAnswer({ ...GOOD_GRID, ...HALF })! });
   let g = db.getGrid('e1')!;
   const at = g.measuredAt;
-  assert.equal(g.downbeatHalfbar, 0.98);
-  assert.equal(g.downbeatEdgeAgreement, 0.91);
+  assert.deepEqual([g.downbeatHalfbar, g.downbeatDropDb, g.downbeatPhase], [0.98, 14.2, 'drop']);
   db.moveGridRow(sql(), 'e1', 'e1-new');
   g = db.getGrid('e1-new')!;
-  assert.equal(g.downbeatHalfbar, 0.98, 'the id-adoption copy keeps them');
-  assert.equal(g.downbeatEdgeAgreement, 0.91);
+  assert.deepEqual([g.downbeatHalfbar, g.downbeatDropDb, g.downbeatPhase], [0.98, 14.2, 'drop'], 'the id-adoption copy keeps them');
   assert.equal(g.bpm, 124);
   assert.equal(g.measuredAt, at);
   // A re-measure without them (an older worker) clears them; unmeasurable resets them.
   db.writeGridResult('e1-new', { grid: analyzer.parseGridAnswer(GOOD_GRID)! });
-  assert.equal(db.getGrid('e1-new')!.downbeatHalfbar, null);
-  db.writeGridResult('e1-new', { grid: analyzer.parseGridAnswer({ ...GOOD_GRID, downbeat_halfbar: 0.98, downbeat_edge_agreement: 0.91 })! });
+  g = db.getGrid('e1-new')!;
+  assert.deepEqual([g.downbeatHalfbar, g.downbeatDropDb, g.downbeatPhase], [null, null, null]);
+  db.writeGridResult('e1-new', { grid: analyzer.parseGridAnswer({ ...GOOD_GRID, ...HALF })! });
   db.writeGridResult('e1-new', { unmeasurable: 'no-beat', version: 1 });
   g = db.getGrid('e1-new')!;
-  assert.equal(g.downbeatHalfbar, null);
-  assert.equal(g.downbeatEdgeAgreement, null);
+  assert.deepEqual([g.downbeatHalfbar, g.downbeatDropDb, g.downbeatPhase], [null, null, null]);
 });
 
-test('an upgraded table gains the scores in place, and an ID rotation copies by name', async () => {
+test('an upgraded table gains the columns in place, and an ID rotation copies by name', async () => {
   const G = await import('../src/music/library-db/grid.js');
   const old = new Database(':memory:');
   // The table as it shipped before the scores (the ending's columns last).
@@ -186,16 +191,19 @@ test('an upgraded table gains the scores in place, and an ID rotation copies by 
     VALUES ('o1', 'ok', 1, 124, 4, '[]', 0.97, 0.84, 0.99, 340000, '2026-11-01T00:00:00Z', 1, 62)`).run();
   G.ensureGridTable(old);
   G.ensureGridTable(old); // idempotent
-  const cols = (old.prepare('PRAGMA table_info(track_grid)').all() as Array<{ name: string }>).map((c) => c.name);
-  assert.ok(cols.includes('downbeat_halfbar') && cols.includes('downbeat_edge_agreement'));
+  const cols = (old.prepare('PRAGMA table_info(track_grid)').all() as Array<{ name: string; type: string }>);
+  const type = (n: string) => cols.find((c) => c.name === n)?.type;
+  assert.deepEqual([type('downbeat_halfbar'), type('downbeat_drop_db'), type('downbeat_phase')], ['REAL', 'REAL', 'TEXT']);
+  assert.ok(!cols.some((c) => c.name === 'downbeat_edge_agreement'));
   const before = G.getGrid('o1', old)!;
   assert.equal(before.downbeatHalfbar, null, 'a row measured before: null, the old rule');
-  old.prepare(`UPDATE track_grid SET downbeat_halfbar = 0.97, downbeat_edge_agreement = 0.8, head_outro_json = '{}' WHERE track_id = 'o1'`).run();
+  assert.equal(before.downbeatPhase, null);
+  old.prepare(`UPDATE track_grid SET downbeat_halfbar = 0.97, downbeat_drop_db = 12.5, downbeat_phase = 'majority',
+    head_outro_json = '{}' WHERE track_id = 'o1'`).run();
   G.moveGridRow(old, 'o1', 'o2');
   const moved = G.getGrid('o2', old)!;
   assert.equal(moved.measuredAt, before.measuredAt);
-  assert.equal(moved.downbeatHalfbar, 0.97);
-  assert.equal(moved.downbeatEdgeAgreement, 0.8);
+  assert.deepEqual([moved.downbeatHalfbar, moved.downbeatDropDb, moved.downbeatPhase], [0.97, 12.5, 'majority']);
   assert.equal(moved.mainShare, 0.99);
   assert.equal(moved.headBpm, 62);
   assert.equal(moved.headOutroJson, '{}');
