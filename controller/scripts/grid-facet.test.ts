@@ -32,6 +32,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
+import Database from 'better-sqlite3';
 import { createTempDir, removeTempDir } from './test-utils/temp-dir.js';
 
 const requests: Array<Record<string, unknown>> = [];
@@ -44,6 +45,8 @@ const GOOD_GRID = {
   coverage: 0.98, residual_ms: 5.2, downbeat_agreement: 0.84, main_share: 0.99,
   beats_detected: 712, decoded_ms: 340_000,
 };
+// A half-bar answer: the share, the drop's jump and which rule placed the bar line.
+const HALF = { downbeat_agreement: 0.53, downbeat_halfbar: 0.98, downbeat_drop_db: 14.2, downbeat_phase: 'drop' };
 
 function handler(req: IncomingMessage, res: ServerResponse) {
   if (req.url?.startsWith('/health')) {
@@ -139,6 +142,74 @@ test('parseGridAnswer is strict', () => {
   assert.equal(analyzer.parseGridAnswer({ ...GOOD_GRID, segments: [{ anchorMs: 0, periodUs: 500000, beats: 9, downbeatMs: 'x' }] }), null);
   assert.equal(analyzer.parseGridAnswer({ ...GOOD_GRID, beats_per_bar: 11 })?.beatsPerBar, null, 'an odd metre past 7 is unknown');
   assert.equal(analyzer.parseGridAnswer(null), null);
+  // The half-bar share and the drop's figures: absent (an older worker) is
+  // null, never 0; an unknown source string is null.
+  assert.equal(ok.downbeatHalfbar, null);
+  assert.equal(ok.downbeatDropDb, null);
+  assert.equal(ok.downbeatPhase, null);
+  const half = analyzer.parseGridAnswer({ ...GOOD_GRID, ...HALF })!;
+  assert.equal(half.downbeatHalfbar, 0.98);
+  assert.equal(half.downbeatDropDb, 14.2);
+  assert.equal(half.downbeatPhase, 'drop');
+  assert.equal(analyzer.parseGridAnswer({ ...GOOD_GRID, ...HALF, downbeat_phase: 'majority', downbeat_drop_db: null })?.downbeatPhase, 'majority');
+  const odd = analyzer.parseGridAnswer({ ...GOOD_GRID, downbeat_halfbar: 'x', downbeat_drop_db: 'y', downbeat_phase: 'edges' })!;
+  assert.deepEqual([odd.downbeatHalfbar, odd.downbeatDropDb, odd.downbeatPhase], [null, null, null]);
+});
+
+test('the half-bar share and the drop\'s figures are stored, reset and carried by an ID rotation', () => {
+  db.upsertTrackMeta('e1', { title: 'e1', artist: 'A', album: 'B', duration: 300 } as never);
+  db.writeGridResult('e1', { grid: analyzer.parseGridAnswer({ ...GOOD_GRID, ...HALF })! });
+  let g = db.getGrid('e1')!;
+  const at = g.measuredAt;
+  assert.deepEqual([g.downbeatHalfbar, g.downbeatDropDb, g.downbeatPhase], [0.98, 14.2, 'drop']);
+  db.moveGridRow(sql(), 'e1', 'e1-new');
+  g = db.getGrid('e1-new')!;
+  assert.deepEqual([g.downbeatHalfbar, g.downbeatDropDb, g.downbeatPhase], [0.98, 14.2, 'drop'], 'the id-adoption copy keeps them');
+  assert.equal(g.bpm, 124);
+  assert.equal(g.measuredAt, at);
+  // A re-measure without them (an older worker) clears them; unmeasurable resets them.
+  db.writeGridResult('e1-new', { grid: analyzer.parseGridAnswer(GOOD_GRID)! });
+  g = db.getGrid('e1-new')!;
+  assert.deepEqual([g.downbeatHalfbar, g.downbeatDropDb, g.downbeatPhase], [null, null, null]);
+  db.writeGridResult('e1-new', { grid: analyzer.parseGridAnswer({ ...GOOD_GRID, ...HALF })! });
+  db.writeGridResult('e1-new', { unmeasurable: 'no-beat', version: 1 });
+  g = db.getGrid('e1-new')!;
+  assert.deepEqual([g.downbeatHalfbar, g.downbeatDropDb, g.downbeatPhase], [null, null, null]);
+});
+
+test('an upgraded table gains the columns in place, and an ID rotation copies by name', async () => {
+  const G = await import('../src/music/library-db/grid.js');
+  const old = new Database(':memory:');
+  // The table as it shipped before the scores (the ending's columns last).
+  old.exec(`CREATE TABLE track_grid (track_id TEXT PRIMARY KEY, status TEXT NOT NULL, version INTEGER NOT NULL,
+    reason TEXT, attempts INTEGER NOT NULL DEFAULT 0, engine TEXT, model TEXT, bpm REAL, beats_per_bar INTEGER,
+    segments_json TEXT, coverage REAL, residual_ms REAL, downbeat_agreement REAL, main_share REAL, decoded_ms INTEGER,
+    measured_at TEXT NOT NULL, applied INTEGER NOT NULL DEFAULT 0, head_bpm REAL, head_beats_json TEXT,
+    head_bars_json TEXT) WITHOUT ROWID`);
+  old.prepare(`INSERT INTO track_grid (track_id, status, version, bpm, beats_per_bar, segments_json, coverage,
+    downbeat_agreement, main_share, decoded_ms, measured_at, applied, head_bpm)
+    VALUES ('o1', 'ok', 1, 124, 4, '[]', 0.97, 0.84, 0.99, 340000, '2026-11-01T00:00:00Z', 1, 62)`).run();
+  G.ensureGridTable(old);
+  G.ensureGridTable(old); // idempotent
+  const cols = (old.prepare('PRAGMA table_info(track_grid)').all() as Array<{ name: string; type: string }>);
+  const type = (n: string) => cols.find((c) => c.name === n)?.type;
+  assert.deepEqual([type('downbeat_halfbar'), type('downbeat_drop_db'), type('downbeat_phase')], ['REAL', 'REAL', 'TEXT']);
+  assert.ok(!cols.some((c) => c.name === 'downbeat_edge_agreement'));
+  const before = G.getGrid('o1', old)!;
+  assert.equal(before.downbeatHalfbar, null, 'a row measured before: null, the old rule');
+  assert.equal(before.downbeatPhase, null);
+  old.prepare(`UPDATE track_grid SET downbeat_halfbar = 0.97, downbeat_drop_db = 12.5, downbeat_phase = 'majority',
+    head_outro_json = '{}' WHERE track_id = 'o1'`).run();
+  G.moveGridRow(old, 'o1', 'o2');
+  const moved = G.getGrid('o2', old)!;
+  assert.equal(moved.measuredAt, before.measuredAt);
+  assert.deepEqual([moved.downbeatHalfbar, moved.downbeatDropDb, moved.downbeatPhase], [0.97, 12.5, 'majority']);
+  assert.equal(moved.mainShare, 0.99);
+  assert.equal(moved.headBpm, 62);
+  assert.equal(moved.headOutroJson, '{}');
+  assert.equal(moved.applied, 1);
+  assert.equal(G.getGrid('o1', old), null);
+  old.close();
 });
 
 test('a grid write leaves the track\'s analysis failure history alone', () => {

@@ -17,6 +17,13 @@
 #     (octave-safe rule): a 70 BPM track stays 70, a 174 BPM one stays 174.
 #   * Downbeats become a phase on the grid; beats per bar is read from the
 #     downbeat spacing (4/4 and 3/4 both).
+#   * The half-bar case (grid-policy.ts decides whether to trust the bars): a
+#     4/4 body whose downbeats split between beat 1 and beat 3 reports a
+#     half-bar share near 1. Its bar line is the model's majority unless a
+#     clear drop lands one or two beats after it (choose_phase), and a grid
+#     that passes the agreement gate is never touched (place_half_bar). The
+#     drop detector itself (drop_beat) needs scipy: those checks skip without
+#     it (the host's python), and run in the analyzer image.
 
 import os
 import sys
@@ -194,6 +201,7 @@ f = aw.fit_grid(b, downbeats_of(b, 3, 1))
 check("3/4: three beats per bar", f["beats_per_bar"] == 3, f["beats_per_bar"])
 check("3/4: downbeat on beat 1", abs(f["segments"][0]["downbeat_s"] - b[1]) < 0.01, f["segments"][0]["downbeat_s"])
 check("3/4: agreement 1.0", f["downbeat_agreement"] == 1.0, f["downbeat_agreement"])
+check("3/4: no half-bar score (4/4 only)", f["downbeat_halfbar"] is None, f["downbeat_halfbar"])
 
 # A grid that holds only part of the track still counts while it holds most
 # beats: 300 steady beats then 100 of noise.
@@ -209,6 +217,141 @@ rng = np.random.default_rng(7)
 noise = np.sort(rng.uniform(0, 240, size=300))
 check("no pulse: None", aw.fit_grid(noise, None) is None, aw.fit_grid(noise, None))
 
+print("half-bar case")
+
+
+def bar_downbeats(beats, phases):
+    """One downbeat per bar j at beat 4j + phases[j]."""
+    return np.asarray([beats[4 * j + ph] for j, ph in enumerate(phases) if 4 * j + ph < len(beats)])
+
+
+# Clean 4/4: every downbeat on one phase.
+b = grid(124.0, 0.48, 400, jitter_ms=4, seed=11)
+f = aw.fit_grid(b, downbeats_of(b, 4, 1))
+check("clean 4/4: half-bar 1.0", f["downbeat_halfbar"] == 1.0, f["downbeat_halfbar"])
+check("clean 4/4: downbeat on beat 1", abs(f["segments"][0]["downbeat_s"] - b[1]) < 0.01, f["segments"][0]["downbeat_s"])
+
+# 200 bars, five in eight on phase 2, the rest on phase 0: the fit keeps the
+# majority (phase 2) and reports the half-bar share.
+bars = 200
+b = grid(124.0, 0.48, bars * 4, jitter_ms=4, seed=12)
+phases = [2 if j % 8 < 5 else 0 for j in range(bars)]
+f = aw.fit_grid(b, bar_downbeats(b, phases))
+check("half-bar body: agreement under the bars gate", f["downbeat_agreement"] < 0.75, f["downbeat_agreement"])
+check("half-bar body: half-bar 1.0", f["downbeat_halfbar"] == 1.0, f["downbeat_halfbar"])
+check("half-bar body: the fit keeps the majority phase", abs(f["segments"][0]["downbeat_s"] - b[2]) < 0.01,
+      f["segments"][0]["downbeat_s"])
+check("half-bar body: main segment 0", f["main_segment"] == 0, f["main_segment"])
+
+# A half-bar share under the threshold: a quarter of the 4-bar runs a beat off.
+b = grid(124.0, 0.48, bars * 4, jitter_ms=4, seed=15)
+phases = [[0, 2, 1, 2][(j // 4) % 4] for j in range(bars)]
+f = aw.fit_grid(b, bar_downbeats(b, phases))
+check("a beat off: half-bar under 0.9", f["downbeat_halfbar"] < aw.GRID_MIN_HALFBAR, f["downbeat_halfbar"])
+
+print("choose_phase")
+M = aw.GRID_DROP_MIN_DB
+check("d 0: the majority, by the drop", aw.choose_phase(1, 9, M + 5, 4) == (1, "drop"), aw.choose_phase(1, 9, M + 5, 4))
+check("d 1: the other half", aw.choose_phase(1, 10, M + 5, 4) == (3, "drop"), aw.choose_phase(1, 10, M + 5, 4))
+check("d 2: the other half", aw.choose_phase(1, 11, M + 5, 4) == (3, "drop"), aw.choose_phase(1, 11, M + 5, 4))
+check("d 3 (a beat early): the majority", aw.choose_phase(1, 12, M + 5, 4) == (1, "drop"), aw.choose_phase(1, 12, M + 5, 4))
+check("d 1 from phase 3 wraps to 1", aw.choose_phase(3, 4, M, 4) == (1, "drop"), aw.choose_phase(3, 4, M, 4))
+check("no drop: the majority", aw.choose_phase(2, None, None, 4) == (2, "majority"), aw.choose_phase(2, None, None, 4))
+check("a weak drop: the majority", aw.choose_phase(2, 13, M - 0.1, 4) == (2, "majority"),
+      aw.choose_phase(2, 13, M - 0.1, 4))
+check("outside 4/4: the majority, no source", aw.choose_phase(1, 5, M + 5, 3) == (1, None), aw.choose_phase(1, 5, M + 5, 3))
+
+print("place_half_bar gate")
+SR = 22050
+PERIOD = 0.5  # 120 BPM
+NBEATS = 256  # 128 s
+exact = PERIOD * np.arange(NBEATS)
+silent = np.zeros(int(NBEATS * PERIOD * SR), dtype=np.float32)
+
+# A grid that passes the agreement gate is never touched (no drop computed).
+f = aw.fit_grid(exact, downbeats_of(exact, 4, 1))
+before = dict(f["segments"][0])
+aw.place_half_bar(f, silent, SR)
+check("passing grid: untouched", f["segments"][0] == before, (f["segments"][0], before))
+check("passing grid: no drop, no source", (f["downbeat_drop_db"], f["downbeat_phase"]) == (None, None),
+      (f["downbeat_drop_db"], f["downbeat_phase"]))
+# A half-bar share under 0.9 is not the case either.
+phases = [[0, 2, 1, 2][(j // 4) % 4] for j in range(NBEATS // 4)]
+f = aw.fit_grid(exact, bar_downbeats(exact, phases))
+before = dict(f["segments"][0])
+aw.place_half_bar(f, silent, SR)
+check("half-bar under 0.9: untouched, no source", f["segments"][0] == before and f["downbeat_phase"] is None,
+      (f["segments"][0], f["downbeat_phase"]))
+# 3/4 is never the case.
+f = aw.fit_grid(exact, downbeats_of(exact, 3, 0))
+aw.place_half_bar(f, silent, SR)
+check("not 4/4: no source", f["downbeat_phase"] is None, (f["beats_per_bar"], f["downbeat_phase"]))
+# The answer carries both fields, null when not computed.
+ans = aw.grid_answer(f, NBEATS, NBEATS * PERIOD, "final0")
+check("answer: drop fields null outside the case", (ans["downbeat_drop_db"], ans["downbeat_phase"]) == (None, None),
+      (ans["downbeat_drop_db"], ans["downbeat_phase"]))
+
+try:
+    import scipy.signal  # noqa: F401
+    HAVE_SCIPY = True
+except ImportError:
+    HAVE_SCIPY = False
+
+if not HAVE_SCIPY:
+    print("  - skip: drop_beat and the drop placement need scipy (the analyzer image has it)")
+else:
+    print("drop_beat")
+
+    def low_end(drop_k, low=0.05, high=0.5):
+        """A 60 Hz decaying burst on every beat, `low` before beat drop_k and
+        `high` from it (None: `low` throughout)."""
+        n = len(silent)
+        y = np.zeros(n, dtype=np.float64)
+        L = int(0.1 * SR)
+        burst = np.sin(2 * np.pi * 60 * np.arange(L) / SR) * np.exp(-np.arange(L) / (0.03 * SR))
+        for i, t in enumerate(exact):
+            a = int(round(t * SR))
+            amp = high if drop_k is not None and i >= drop_k else low
+            y[a:a + L] += amp * burst[:max(0, min(L, n - a))]
+        return y.astype(np.float32)
+
+    for k in (128, 127):
+        k_hat, jump = aw.drop_beat(low_end(k), SR, exact)
+        check(f"drop at beat {k}: found on it", k_hat == k, k_hat)
+        check(f"drop at beat {k}: a 20 dB jump", jump is not None and abs(jump - 20.0) < 1.5, jump)
+    k_hat, jump = aw.drop_beat(low_end(None), SR, exact)
+    check("no drop: a jump near 0 dB", jump is not None and abs(jump) < 1.0, (k_hat, jump))
+    short = exact[:120]  # 60 s: no beat 45 s from both ends
+    check("too short: (None, None)", aw.drop_beat(low_end(None)[: int(60 * SR)], SR, short) == (None, None),
+          aw.drop_beat(low_end(None)[: int(60 * SR)], SR, short))
+    y = low_end(128)
+    whole = aw.beat_low_db(y, SR, exact, block_s=1e9)
+    blocks = aw.beat_low_db(y, SR, exact, block_s=10.0)
+    check("block filtering reads as the whole signal (0.01 dB)", float(np.max(np.abs(whole - blocks))) < 0.01,
+          float(np.max(np.abs(whole - blocks))))
+
+    print("place_half_bar")
+    # Majority on phase 0 (five bars in eight), the rest on phase 2.
+    phases = [0 if j % 8 < 5 else 2 for j in range(NBEATS // 4)]
+    for k, want, label in ((128, 0, "d 0: majority kept"), (129, 2, "d 1: moved two beats"),
+                           (130, 2, "d 2: moved two beats"), (127, 0, "d 3: majority kept")):
+        f = aw.fit_grid(exact, bar_downbeats(exact, phases))
+        aw.place_half_bar(f, low_end(k), SR)
+        m = f["segments"][0]
+        got = int(round((m["downbeat_s"] - m["anchor_s"]) / m["period_s"]))
+        check(f"{label} (phase {want})", got == want and f["downbeat_phase"] == "drop", (got, f["downbeat_phase"]))
+        check(f"{label}: the jump reported", abs(f["downbeat_drop_db"] - 20.0) < 1.5, f["downbeat_drop_db"])
+    f = aw.fit_grid(exact, bar_downbeats(exact, phases))
+    aw.place_half_bar(f, low_end(None), SR)
+    m = f["segments"][0]
+    check("no clear drop: majority, source 'majority'",
+          abs(m["downbeat_s"] - m["anchor_s"]) < 1e-9 and f["downbeat_phase"] == "majority",
+          (m["downbeat_s"], f["downbeat_phase"]))
+    ans = aw.grid_answer(f, NBEATS, NBEATS * PERIOD, "final0")
+    check("answer: the weak jump to 1 place, source 'majority'",
+          ans["downbeat_phase"] == "majority" and ans["downbeat_drop_db"] == round(f["downbeat_drop_db"], 1),
+          (ans["downbeat_drop_db"], ans["downbeat_phase"]))
+
 print("grid_answer")
 b = grid(124.0, 0.48, 400, jitter_ms=6)
 f = aw.fit_grid(b, downbeats_of(b, 4, 2))
@@ -221,12 +364,17 @@ check("answer: downbeat on beat 2", abs(ans["segments"][0]["downbeatMs"] - round
       ans["segments"][0]["downbeatMs"])
 check("answer: the main segment covers nearly the whole track", ans["main_share"] > 0.95, ans["main_share"])
 check("answer: compact (a few hundred bytes)", len(str(ans)) < 600, len(str(ans)))
+check("answer: half-bar to 3 places, no drop fields outside the case",
+      (ans["downbeat_halfbar"], ans["downbeat_drop_db"], ans["downbeat_phase"]) == (1.0, None, None),
+      (ans.get("downbeat_halfbar"), ans.get("downbeat_drop_db"), ans.get("downbeat_phase")))
 # The main tempo is the segment spanning the most TIME, not the most beats.
 a = grid(90.0, 0.0, 120)          # 80 s
 c = grid(180.0, a[-1] + 1 / 3, 200)  # 66 s, more beats
 f = aw.fit_grid(np.concatenate([a, c]), None)
 ans = aw.grid_answer(f, 320, 150.0, "small0")
 check("answer: main tempo by time span", abs(ans["bpm"] - 90.0) < 0.1, ans["bpm"])
+check("answer: no downbeats, no scores", ans["downbeat_halfbar"] is None and ans["downbeat_phase"] is None,
+      (ans["downbeat_halfbar"], ans["downbeat_phase"]))
 
 if FAILED:
     print(f"\n{len(FAILED)} check(s) failed")

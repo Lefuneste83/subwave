@@ -46,7 +46,7 @@
 
 import type Database from 'better-sqlite3';
 import { requireDb } from './handle.js';
-import { parseSegments, type GridSegment } from './grid.js';
+import { parseSegments, phaseSourceOrNull, type GridSegment } from './grid.js';
 import { gridDecision } from '../grid-policy.js';
 
 // The analyzer's structure answer version (analyze_worker.STRUCTURE_VERSION).
@@ -147,6 +147,7 @@ export const STRUCTURE_SOURCE_SELECT =
    (SELECT s.grid_at  FROM track_structure s WHERE s.track_id = tracks.id) AS structure_grid_at,
    (SELECT json_object('status', g.status, 'bpm', g.bpm, 'beatsPerBar', g.beats_per_bar,
       'segments', g.segments_json, 'coverage', g.coverage, 'downbeatAgreement', g.downbeat_agreement,
+      'downbeatHalfbar', g.downbeat_halfbar, 'downbeatDropDb', g.downbeat_drop_db, 'downbeatPhase', g.downbeat_phase,
       'decodedMs', g.decoded_ms, 'measuredAt', g.measured_at)
       FROM track_grid g WHERE g.track_id = tracks.id) AS structure_grid`;
 
@@ -185,7 +186,8 @@ function gridOfRow(json: string | null | undefined): { present: boolean; grid: S
       grid: structureGridOf({
         status: v.status as GridShape['status'], bpm: num(v.bpm), beatsPerBar: num(v.beatsPerBar),
         segments: parseSegments(typeof v.segments === 'string' ? v.segments : null), coverage: num(v.coverage),
-        downbeatAgreement: num(v.downbeatAgreement), decodedMs: num(v.decodedMs),
+        downbeatAgreement: num(v.downbeatAgreement), downbeatHalfbar: num(v.downbeatHalfbar),
+        downbeatDropDb: num(v.downbeatDropDb), downbeatPhase: phaseSourceOrNull(v.downbeatPhase), decodedMs: num(v.decodedMs),
         measuredAt: typeof v.measuredAt === 'string' ? v.measuredAt : undefined,
       }),
     };
