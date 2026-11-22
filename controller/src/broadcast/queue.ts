@@ -105,6 +105,8 @@ import {
   mountCheckBudgetMs,
   playableDurationSec,
   remainingSec,
+  seamOverlapSec,
+  seamWindowSec,
   shouldDeadlinePick,
   DEADLINE_PICK_COOLDOWN_SEC,
 } from './drain-policy.js';
@@ -1901,6 +1903,18 @@ class Queue {
     return remaining;
   }
 
+  // Seconds until the mixer NEEDS item: remainingUntilItemAirs less the seam
+  // out of the track ahead of it, when that seam is a Hot Mix overlap (the
+  // mixer asks for the next track as the overlap begins, drain-policy.ts
+  // seamWindowSec). The clock every wait before item's next.txt write is
+  // measured against: the intro render, the beat-phase check, the mount check,
+  // the cue probe, the blend render and the hold itself. Live, like the walk.
+  remainingUntilItemNeeded(item: QueueItem): number | null {
+    const idx = this.upcoming.indexOf(item);
+    const ahead = idx > 0 ? this.upcoming[idx - 1] : idx === 0 ? this.current : null;
+    return seamWindowSec(this.remainingUntilItemAirs(item), seamOverlapSec(ahead));
+  }
+
   // The seconds ITEM will air, or null when its length is unknown: the track's
   // own duration, else its library row's (agent picks carry no length), after
   // any cue already stamped. An unsent item has no cap or trim-tail cue yet,
@@ -2152,7 +2166,7 @@ class Queue {
     let phaseNote = 'beat phase unchecked: grid on grid';
     let waitSec = 0;
     const plannedInCueSec = plan.inCueSec;
-    const budgetMs = beatPhaseBudgetMs(this.remainingUntilItemAirs(item));
+    const budgetMs = beatPhaseBudgetMs(this.remainingUntilItemNeeded(item));
     if (budgetMs > 0) {
       const sourceOf = (t: Track) => {
         try {
@@ -2458,7 +2472,9 @@ class Queue {
           : drainAction({
               pairDrain: this.pairDrainActive(),
               hasSuccessor,
-              remainingSec: this.remainingUntilItemAirs(item),
+              // Measured to the seam into it: a hold past the instant the mixer
+              // asks for it lets the coast into that seam.
+              remainingSec: this.remainingUntilItemNeeded(item),
             });
         if (action === 'hold') break;
 
@@ -2485,7 +2501,9 @@ class Queue {
         // is the accepted price of the trade: a naked link is a garnish lost,
         // a missed seam is the wrong track on air.
         if (item.introScript && !item.introWav && trackLineVoiceAllowed(item)) {
-          const budgetSec = introRenderBudgetSec(this.remainingUntilItemAirs(item));
+          // To the instant the mixer needs this track, not the end of the one
+          // ahead: out of a Hot Mix seam that is a whole lead earlier.
+          const budgetSec = introRenderBudgetSec(this.remainingUntilItemNeeded(item));
           if (budgetSec === 0) {
             this.log('mix', `Intro render deferred to air time — "${item.track.title}" airs too soon to render ahead`);
           } else {
@@ -2599,7 +2617,7 @@ class Queue {
               const inTrim = silenceTrim.resolveSilenceTrim(successor.track);
               // A Hot Mix seam owns this seam: no clip is rendered for it.
               const blend = item.mixOut ? null : await this._renderBlend(
-                item.track, successor.track, this.remainingUntilItemAirs(item), {
+                item.track, successor.track, this.remainingUntilItemNeeded(item), {
                   // A boundary cut is a capped exit as far as the blend is
                   // concerned — same veto, same reason: the clip describes a
                   // tail that will not air.
@@ -2678,7 +2696,7 @@ class Queue {
         // unseen and hold the slot until the reconcile sweep clears it, several
         // coast tracks later.
         const onMount = subsonic.getLocalPath(item.track);
-        let localPath = await libraryMount.mixerReadablePath(onMount, mountCheckBudgetMs(this.remainingUntilItemAirs(item)));
+        let localPath = await libraryMount.mixerReadablePath(onMount, mountCheckBudgetMs(this.remainingUntilItemNeeded(item)));
         if (onMount && !localPath) {
           this.log('mix', `"${item.track.title}" streams: the mixer did not confirm it can read ${onMount}`);
         }
@@ -2727,7 +2745,7 @@ class Queue {
             // mount is no gate on it.
             source = subsonic.findLibraryFile(item.track) || (item.track.id ? subsonic.getRawStreamUrl(item.track.id) : null);
           } catch { /* no Subsonic config: no probe */ }
-          const probeBudgetMs = cueProbeBudgetMs(this.remainingUntilItemAirs(item));
+          const probeBudgetMs = cueProbeBudgetMs(this.remainingUntilItemNeeded(item));
           const landing: cueLanding.CueLanding = !source
             ? { ok: false, codec: null, reason: 'no source' }
             : probeBudgetMs === 0
@@ -2868,7 +2886,7 @@ class Queue {
             && drainAction({
               pairDrain: this.pairDrainActive(),
               hasSuccessor: false,
-              remainingSec: this.remainingUntilItemAirs(successor),
+              remainingSec: this.remainingUntilItemNeeded(successor),
             }) === 'hold';
           void this._pickStems(successor.track, {
             pairDrainActive: this.pairDrainActive(),
@@ -4844,7 +4862,10 @@ class Queue {
   maybeDeadlinePick() {
     if (this.pickerBusy || this.pickGateClosed()) return;
     if (!this.pairDrainActive()) return;
-    const rem = this.remainingSecOnAir();
+    // On the clock the drain holds the head by (the seam into it), so the pick
+    // gets the same window before that hold ends out of a Hot Mix seam as out
+    // of a plain one.
+    const rem = seamWindowSec(this.remainingSecOnAir(), seamOverlapSec(this.current));
     if (!shouldDeadlinePick(rem)) return;
     // Attempt cooldown: the watcher tick re-enters every 1.5s for the whole
     // window, so a FAST-failing pick (LLM host down) would otherwise re-fire
