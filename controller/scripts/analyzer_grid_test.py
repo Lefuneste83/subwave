@@ -17,6 +17,10 @@
 #     (octave-safe rule): a 70 BPM track stays 70, a 174 BPM one stays 174.
 #   * Downbeats become a phase on the grid; beats per bar is read from the
 #     downbeat spacing (4/4 and 3/4 both).
+#   * The half-bar rescue's scores (grid-policy.ts decides): a 4/4 body whose
+#     downbeats split between beat 1 and beat 3 reports a half-bar share near
+#     1, and the first/last 32 bars' shared-phase agreement; when both pass,
+#     the main segment's bar line is the edges' phase, never the body's.
 
 import os
 import sys
@@ -194,6 +198,9 @@ f = aw.fit_grid(b, downbeats_of(b, 3, 1))
 check("3/4: three beats per bar", f["beats_per_bar"] == 3, f["beats_per_bar"])
 check("3/4: downbeat on beat 1", abs(f["segments"][0]["downbeat_s"] - b[1]) < 0.01, f["segments"][0]["downbeat_s"])
 check("3/4: agreement 1.0", f["downbeat_agreement"] == 1.0, f["downbeat_agreement"])
+check("3/4: no half-bar or edge score (4/4 only)",
+      f["downbeat_halfbar"] is None and f["downbeat_edge_agreement"] is None,
+      (f["downbeat_halfbar"], f["downbeat_edge_agreement"]))
 
 # A grid that holds only part of the track still counts while it holds most
 # beats: 300 steady beats then 100 of noise.
@@ -209,6 +216,74 @@ rng = np.random.default_rng(7)
 noise = np.sort(rng.uniform(0, 240, size=300))
 check("no pulse: None", aw.fit_grid(noise, None) is None, aw.fit_grid(noise, None))
 
+print("half-bar rescue")
+
+
+def bar_downbeats(beats, phases):
+    """One downbeat per bar j at beat 4j + phases[j]."""
+    return np.asarray([beats[4 * j + ph] for j, ph in enumerate(phases) if 4 * j + ph < len(beats)])
+
+
+# (a) Clean 4/4: every downbeat on one phase.
+b = grid(124.0, 0.48, 400, jitter_ms=4, seed=11)
+f = aw.fit_grid(b, downbeats_of(b, 4, 1))
+check("clean 4/4: half-bar 1.0, edges agree at 1.0",
+      (f["downbeat_halfbar"], f["downbeat_edge_agreement"]) == (1.0, 1.0),
+      (f["downbeat_halfbar"], f["downbeat_edge_agreement"]))
+check("clean 4/4: downbeat on beat 1", abs(f["segments"][0]["downbeat_s"] - b[1]) < 0.01, f["segments"][0]["downbeat_s"])
+
+# (b) 200 bars: the first and last 32 on phase 0, the body alternating between
+# 0 and 2 in 8-bar runs (bar spacing stays 4 between the switches).
+bars = 200
+b = grid(124.0, 0.48, bars * 4, jitter_ms=4, seed=12)
+phases = [0] * 32 + [0 if (j // 8) % 2 == 0 else 2 for j in range(bars - 64)] + [0] * 32
+f = aw.fit_grid(b, bar_downbeats(b, phases))
+check("half-bar body: agreement under the bars gate", f["downbeat_agreement"] < 0.75, f["downbeat_agreement"])
+check("half-bar body: half-bar 1.0", f["downbeat_halfbar"] == 1.0, f["downbeat_halfbar"])
+check("half-bar body: edges agree", f["downbeat_edge_agreement"] >= aw.GRID_MIN_EDGE_AGREEMENT, f["downbeat_edge_agreement"])
+check("half-bar body: main segment downbeat on phase 0", abs(f["segments"][0]["downbeat_s"] - b[0]) < 0.01,
+      f["segments"][0]["downbeat_s"])
+
+# (b2) The body mostly on phase 2 (the global dominant), the edges on 0: the
+# rescue places the bar line on the edges' phase.
+bars = 224
+b = grid(124.0, 0.48, bars * 4, jitter_ms=4, seed=13)
+phases = [0] * 32 + [2] * (bars - 64) + [0] * 32
+f = aw.fit_grid(b, bar_downbeats(b, phases))
+check("body on beat 3: agreement is the body's, under the gate", 0.7 < f["downbeat_agreement"] < 0.75,
+      f["downbeat_agreement"])
+# The tail window reaches 32 bars back from the LAST downbeat (k 892): the
+# body's last bar, on beat 3 (k 766), falls inside it, so 32 of 33.
+check("body on beat 3: edges agree (32 of 33)", abs(f["downbeat_edge_agreement"] - 32 / 33) < 1e-9,
+      f["downbeat_edge_agreement"])
+check("body on beat 3: the bar line is the edges' phase, not the body's",
+      abs(f["segments"][0]["downbeat_s"] - b[0]) < 0.01, f["segments"][0]["downbeat_s"])
+
+# (c) The edges on two different phases: edge agreement 0, the global phase kept.
+bars = 200
+b = grid(124.0, 0.48, bars * 4, jitter_ms=4, seed=14)
+phases = [0] * 32 + [0 if (j // 8) % 2 == 0 else 2 for j in range(bars - 64)] + [2] * 32
+f = aw.fit_grid(b, bar_downbeats(b, phases))
+check("edges disagree: edge agreement 0", f["downbeat_edge_agreement"] == 0.0, f["downbeat_edge_agreement"])
+check("edges disagree: half-bar 1.0", f["downbeat_halfbar"] == 1.0, f["downbeat_halfbar"])
+check("edges disagree: the dominant phase kept", abs(f["segments"][0]["downbeat_s"] - b[0]) < 0.01,
+      f["segments"][0]["downbeat_s"])
+
+# A half-bar share under the threshold is reported as such: a quarter of the
+# body's 4-bar runs a beat off.
+bars = 200
+b = grid(124.0, 0.48, bars * 4, jitter_ms=4, seed=15)
+phases = [0] * 32 + [[0, 2, 1, 2][(j // 4) % 4] for j in range(bars - 64)] + [0] * 32
+f = aw.fit_grid(b, bar_downbeats(b, phases))
+check("a beat off: half-bar under 0.9", f["downbeat_halfbar"] < aw.GRID_MIN_HALFBAR, f["downbeat_halfbar"])
+
+# Too short for two 8-downbeat windows: the edge score is unknown.
+b = grid(124.0, 0.48, 28, jitter_ms=4, seed=16)
+f = aw.fit_grid(b, downbeats_of(b, 4, 0))
+check("seven bars: half-bar known, edges unknown",
+      f["downbeat_halfbar"] == 1.0 and f["downbeat_edge_agreement"] is None,
+      (f["downbeat_halfbar"], f["downbeat_edge_agreement"]))
+
 print("grid_answer")
 b = grid(124.0, 0.48, 400, jitter_ms=6)
 f = aw.fit_grid(b, downbeats_of(b, 4, 2))
@@ -221,12 +296,17 @@ check("answer: downbeat on beat 2", abs(ans["segments"][0]["downbeatMs"] - round
       ans["segments"][0]["downbeatMs"])
 check("answer: the main segment covers nearly the whole track", ans["main_share"] > 0.95, ans["main_share"])
 check("answer: compact (a few hundred bytes)", len(str(ans)) < 600, len(str(ans)))
+check("answer: half-bar and edge scores to 3 places",
+      (ans["downbeat_halfbar"], ans["downbeat_edge_agreement"]) == (1.0, 1.0),
+      (ans.get("downbeat_halfbar"), ans.get("downbeat_edge_agreement")))
 # The main tempo is the segment spanning the most TIME, not the most beats.
 a = grid(90.0, 0.0, 120)          # 80 s
 c = grid(180.0, a[-1] + 1 / 3, 200)  # 66 s, more beats
 f = aw.fit_grid(np.concatenate([a, c]), None)
 ans = aw.grid_answer(f, 320, 150.0, "small0")
 check("answer: main tempo by time span", abs(ans["bpm"] - 90.0) < 0.1, ans["bpm"])
+check("answer: no downbeats, no scores", ans["downbeat_halfbar"] is None and ans["downbeat_edge_agreement"] is None,
+      (ans["downbeat_halfbar"], ans["downbeat_edge_agreement"]))
 
 if FAILED:
     print(f"\n{len(FAILED)} check(s) failed")

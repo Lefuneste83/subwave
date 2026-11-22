@@ -1810,6 +1810,23 @@ GRID_MIN_BEATS = 16
 # no tempo, rather than a made-up one.
 GRID_MIN_COVERAGE = 0.5
 GRID_MIN_SECONDS = 10.0
+# The half-bar rescue (controller/src/music/grid-policy.ts decides; these two
+# thresholds mirror its GRID_WRITE_GATE.minHalfbar / minEdgeAgreement). Beat
+# This! often cannot tell beat 1 from beat 3 in the body of a 4/4 track: its
+# downbeats land on phase p and p+2 alternately, so the single-phase agreement
+# fails although the tempo grid is excellent. On the main segment the answer
+# reports the share of downbeats on that half-bar pair (`downbeat_halfbar`) and
+# how well the first and the last GRID_EDGE_BARS bars agree on one shared phase
+# (`downbeat_edge_agreement`, 0 when they pick different phases). When both
+# pass, the main segment's bar line is placed on the edges' phase: the edges
+# are what a transition uses. Validated offline on 122 library tracks: where
+# the bars already passed and the edges agreed, the edges' phase was the
+# trusted one in 56 of 56. Not a GRID_VERSION bump: the affected band is
+# re-measured explicitly.
+GRID_MIN_HALFBAR = 0.9
+GRID_MIN_EDGE_AGREEMENT = 0.75
+GRID_EDGE_BARS = 32
+GRID_EDGE_MIN_DOWNBEATS = 8
 GRID_MAX_SECONDS = float(os.environ.get("ANALYZE_GRID_MAX_SECONDS", "").strip() or "7200")
 
 _gridder = None
@@ -2038,6 +2055,44 @@ def _merge_resumed_grids(segs, tol_s):
     return out
 
 
+def _downbeat_edges(ks, bpb):
+    """The half-bar rescue's scores for one segment's placed downbeat indices
+    (GRID_MIN_HALFBAR above): (halfbar, edge_agreement, edge_phase).
+
+    halfbar: share of the downbeats on the dominant phase or two beats away.
+    The head window holds the downbeats within GRID_EDGE_BARS bars of the
+    first one, the tail window those within GRID_EDGE_BARS bars of the last;
+    each window's phase is its most common index modulo bpb (the lower phase
+    on a tie, as fit_grid's own), its agreement that phase's share.
+    edge_agreement: the weaker window's agreement when both pick the same
+    phase, else 0; edge_phase: that phase (None when they differ).
+    All None unless bpb is 4; the edge pair None when a window holds fewer
+    than GRID_EDGE_MIN_DOWNBEATS downbeats."""
+    if bpb != 4 or not ks:
+        return None, None, None
+    ks = sorted(ks)
+
+    def mode(window):
+        c = [0] * bpb
+        for k in window:
+            c[k % bpb] += 1
+        ph = max(range(bpb), key=lambda q: (c[q], -q))
+        return ph, c
+
+    phi, c = mode(ks)
+    halfbar = (c[phi] + c[(phi + 2) % bpb]) / len(ks)
+    span = GRID_EDGE_BARS * bpb
+    head = [k for k in ks if k < ks[0] + span]
+    tail = [k for k in ks if k > ks[-1] - span]
+    if len(head) < GRID_EDGE_MIN_DOWNBEATS or len(tail) < GRID_EDGE_MIN_DOWNBEATS:
+        return halfbar, None, None
+    hp, hc = mode(head)
+    tp, tc = mode(tail)
+    if hp != tp:
+        return halfbar, 0.0, None
+    return halfbar, min(hc[hp] / len(head), tc[tp] / len(tail)), hp
+
+
 def fit_grid(beats, downbeats, tol_s=GRID_TOLERANCE_S, break_after=GRID_BREAK_AFTER,
              min_segment_beats=GRID_MIN_SEGMENT_BEATS):
     """Fit beat times (s) to piecewise-constant grids. Pure: numpy only.
@@ -2052,13 +2107,16 @@ def fit_grid(beats, downbeats, tol_s=GRID_TOLERANCE_S, break_after=GRID_BREAK_AF
 
     Downbeats are placed on the segment's grid by index: `beats_per_bar` is
     the most common spacing between consecutive downbeats (2..7), and the
-    phase the most common index modulo it.
+    phase the most common index modulo it. On the main segment (the most
+    beats) in 4/4, `downbeat_halfbar` and `downbeat_edge_agreement` are
+    _downbeat_edges' scores, and when both pass the half-bar rescue
+    (GRID_MIN_HALFBAR) that segment's phase is the edges' one.
 
     Returns None with too few beats, or when the segments hold under
     GRID_MIN_COVERAGE of them (no pulse), else {segments: [{anchor_s, period_s,
     first_k, last_k, hits, downbeat_s}], beats_per_bar, coverage, residual_s,
-    downbeat_agreement}; `anchor_s` is the time of index 0, the segment's
-    first beat."""
+    downbeat_agreement, downbeat_halfbar, downbeat_edge_agreement}; `anchor_s`
+    is the time of index 0, the segment's first beat."""
     import numpy as np
 
     b = np.sort(np.asarray(beats, dtype=float))
@@ -2143,6 +2201,14 @@ def fit_grid(beats, downbeats, tol_s=GRID_TOLERANCE_S, break_after=GRID_BREAK_AF
     else:
         for s in segs:
             s["downbeat_s"] = None
+    halfbar = edge_agreement = None
+    if bpb:
+        main_si = max(range(len(segs)), key=lambda i: (segs[i]["last_k"], -i))
+        halfbar, edge_agreement, edge_phase = _downbeat_edges([k for (sj, k) in placed if sj == main_si], bpb)
+        if (edge_phase is not None and halfbar is not None and edge_agreement is not None
+                and halfbar >= GRID_MIN_HALFBAR and edge_agreement >= GRID_MIN_EDGE_AGREEMENT):
+            m = segs[main_si]
+            m["downbeat_s"] = m["anchor_s"] + edge_phase * m["period_s"]
     hits = sum(s["hits"] for s in segs)
     return {
         "segments": [{k: v for k, v in s.items() if k != "ts"} for s in segs],
@@ -2150,6 +2216,8 @@ def fit_grid(beats, downbeats, tol_s=GRID_TOLERANCE_S, break_after=GRID_BREAK_AF
         "coverage": hits / n,
         "residual_s": float(np.median(residuals)) if residuals else None,
         "downbeat_agreement": agreement,
+        "downbeat_halfbar": halfbar,
+        "downbeat_edge_agreement": edge_agreement,
     }
 
 
@@ -2178,6 +2246,9 @@ def grid_answer(fit, beats_detected, decoded_s, model):
         "coverage": round(fit["coverage"], 3),
         "residual_ms": None if fit["residual_s"] is None else round(fit["residual_s"] * 1000, 1),
         "downbeat_agreement": None if fit["downbeat_agreement"] is None else round(fit["downbeat_agreement"], 3),
+        "downbeat_halfbar": None if fit.get("downbeat_halfbar") is None else round(fit["downbeat_halfbar"], 3),
+        "downbeat_edge_agreement": (None if fit.get("downbeat_edge_agreement") is None
+                                    else round(fit["downbeat_edge_agreement"], 3)),
         "main_share": round(main_span_us / 1_000_000 / decoded_s, 3) if decoded_s > 0 else None,
         "beats_detected": int(beats_detected),
         "decoded_ms": int(round(decoded_s * 1000)),
