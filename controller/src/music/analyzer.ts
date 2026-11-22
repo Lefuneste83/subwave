@@ -1476,6 +1476,10 @@ export function parseGridAnswer(data: unknown): GridAnswer | null {
     coverage: num(d.coverage),
     residualMs: num(d.residual_ms),
     downbeatAgreement: num(d.downbeat_agreement),
+    // The half-bar rescue's scores (grid-policy.ts): absent from an older
+    // worker, so null, never a failed answer.
+    downbeatHalfbar: num(d.downbeat_halfbar),
+    downbeatEdgeAgreement: num(d.downbeat_edge_agreement),
     mainShare: num(d.main_share),
     decodedMs: num(d.decoded_ms),
   };

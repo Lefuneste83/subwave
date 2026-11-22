@@ -147,6 +147,7 @@ export const STRUCTURE_SOURCE_SELECT =
    (SELECT s.grid_at  FROM track_structure s WHERE s.track_id = tracks.id) AS structure_grid_at,
    (SELECT json_object('status', g.status, 'bpm', g.bpm, 'beatsPerBar', g.beats_per_bar,
       'segments', g.segments_json, 'coverage', g.coverage, 'downbeatAgreement', g.downbeat_agreement,
+      'downbeatHalfbar', g.downbeat_halfbar, 'downbeatEdgeAgreement', g.downbeat_edge_agreement,
       'decodedMs', g.decoded_ms, 'measuredAt', g.measured_at)
       FROM track_grid g WHERE g.track_id = tracks.id) AS structure_grid`;
 
@@ -185,7 +186,8 @@ function gridOfRow(json: string | null | undefined): { present: boolean; grid: S
       grid: structureGridOf({
         status: v.status as GridShape['status'], bpm: num(v.bpm), beatsPerBar: num(v.beatsPerBar),
         segments: parseSegments(typeof v.segments === 'string' ? v.segments : null), coverage: num(v.coverage),
-        downbeatAgreement: num(v.downbeatAgreement), decodedMs: num(v.decodedMs),
+        downbeatAgreement: num(v.downbeatAgreement), downbeatHalfbar: num(v.downbeatHalfbar),
+        downbeatEdgeAgreement: num(v.downbeatEdgeAgreement), decodedMs: num(v.decodedMs),
         measuredAt: typeof v.measuredAt === 'string' ? v.measuredAt : undefined,
       }),
     };

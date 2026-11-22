@@ -16,6 +16,26 @@
 // read 0.56: its bar line split across two phases). With the BPM written and
 // the bars held, beats and bars both stay the head's own, so they never
 // disagree with each other.
+//
+// Or, the half-bar rescue (the "edges" rule). Beat This! often cannot tell
+// beat 1 from beat 3 in the body of a 4/4 track: its downbeats land on phase p
+// and p+2 alternately, the single-phase agreement falls under the gate, and the
+// track lost its bars (no structure facet, no phrase mix) although its tempo
+// grid is excellent. The bars are also trusted when, on the main segment,
+//   - nearly every downbeat sits on that half-bar pair (`downbeatHalfbar`, the
+//     share on the dominant phase and the one two beats away, 4/4 only), and
+//   - the first 32 bars and the last 32 bars each agree on ONE phase, the same
+//     one (`downbeatEdgeAgreement`: the weaker window's share, 0 when the two
+//     windows pick different phases).
+// The edges are what a transition uses (the outgoing track's last bars, the
+// incoming one's first), and the worker places the main segment's bar line on
+// the edges' phase when this rule holds. Validated offline on 122 library
+// tracks: on the tracks whose bars pass the single-phase rule, wherever the
+// first and last 32 bars agree on a phase it is the trusted phase (56 of 56,
+// no contradiction); the rule rescues about 8 % of the failing band. Both
+// thresholds mirror analyze_worker.py (GRID_MIN_HALFBAR,
+// GRID_MIN_EDGE_AGREEMENT); the decision is made here. A grid measured before
+// the worker reported them (both null) decides exactly as before.
 
 import type { GridSegment, TrackGrid } from './library-db/grid.js';
 
@@ -24,6 +44,9 @@ export const GRID_WRITE_GATE = {
   minCoverage: 0.8,       // detected beats on the grid
   minSteadyShare: 0.6,    // the track's share on the main tempo (any segment)
   minDownbeatAgreement: 0.75,
+  // The half-bar rescue (header): both must hold.
+  minHalfbar: 0.9,        // downbeats on the dominant phase or two beats away
+  minEdgeAgreement: 0.75, // first and last 32 bars on one shared phase
   maxBpm: 200,
 } as const;
 
@@ -31,7 +54,10 @@ export const GRID_WRITE_GATE = {
 // stored beat to bound it, the grid's beats and bars are written over that.
 export const DEFAULT_HEAD_WINDOW_MS = 40_000;
 
-type GridShape = Pick<TrackGrid, 'status' | 'bpm' | 'segments' | 'decodedMs' | 'coverage' | 'downbeatAgreement' | 'beatsPerBar'>;
+// The half-bar and edge scores are optional: absent is null, the
+// single-phase rule alone.
+type GridShape = Pick<TrackGrid, 'status' | 'bpm' | 'segments' | 'decodedMs' | 'coverage' | 'downbeatAgreement' | 'beatsPerBar'> &
+  Partial<Pick<TrackGrid, 'downbeatHalfbar' | 'downbeatEdgeAgreement'>>;
 
 export function steadyShare(g: Pick<TrackGrid, 'bpm' | 'segments' | 'decodedMs'>): number | null {
   if (!g.bpm || !g.decodedMs || g.decodedMs <= 0) return null;
@@ -51,6 +77,15 @@ export interface GridDecision {
 }
 
 const r2 = (v: number | null | undefined) => (v == null || !Number.isFinite(v) ? null : Math.round(v * 100) / 100);
+const f2 = (v: number | null | undefined) => (v == null || !Number.isFinite(v) ? 'n/a' : v.toFixed(2));
+
+// The half-bar rescue (header): both scores known and at their thresholds.
+export function edgesTrusted(g: Pick<GridShape, 'downbeatHalfbar' | 'downbeatEdgeAgreement'>): boolean {
+  const half = g.downbeatHalfbar;
+  const edges = g.downbeatEdgeAgreement;
+  return half != null && edges != null && Number.isFinite(half) && Number.isFinite(edges) &&
+    half >= GRID_WRITE_GATE.minHalfbar && edges >= GRID_WRITE_GATE.minEdgeAgreement;
+}
 
 export function gridDecision(g: GridShape | null | undefined): GridDecision {
   if (!g || g.status !== 'ok' || g.bpm == null || !g.segments.length) {
@@ -62,9 +97,16 @@ export function gridDecision(g: GridShape | null | undefined): GridDecision {
   if ((steady ?? 0) < GRID_WRITE_GATE.minSteadyShare) held.push(`steady tempo on ${r2(steady)} of the track`);
   if (g.bpm > GRID_WRITE_GATE.maxBpm) held.push(`${g.bpm} BPM, above ${GRID_WRITE_GATE.maxBpm}: possibly double time`);
   const bpm = held.length === 0;
-  const bars = bpm && (g.downbeatAgreement ?? 0) >= GRID_WRITE_GATE.minDownbeatAgreement && !!g.beatsPerBar &&
-    g.segments.some((s) => s.downbeatMs != null);
-  if (bpm && !bars) held.push(`bars: downbeat agreement ${r2(g.downbeatAgreement)}`);
+  const phased = !!g.beatsPerBar && g.segments.some((s) => s.downbeatMs != null);
+  const bars = bpm && phased &&
+    ((g.downbeatAgreement ?? 0) >= GRID_WRITE_GATE.minDownbeatAgreement || edgesTrusted(g));
+  if (bpm && !bars) {
+    // The scores appear only once the worker reported one: a grid measured
+    // before keeps its old message.
+    const scored = g.downbeatHalfbar != null || g.downbeatEdgeAgreement != null;
+    held.push(`bars: downbeat agreement ${r2(g.downbeatAgreement)}` +
+      (scored ? `, half-bar ${f2(g.downbeatHalfbar)}, edges ${f2(g.downbeatEdgeAgreement)}` : ''));
+  }
   return { bpm, bars, steadyShare: steady, held };
 }
 

@@ -112,6 +112,7 @@ const analyzer = await import('../src/music/analyzer.js');
 const { runAnalysisPass } = await import('../src/music/analyze.js');
 const overview = await import('../src/music/library-overview.js');
 const report = await import('../src/music/structure-report.js');
+const { gridDecision } = await import('../src/music/grid-policy.js');
 await db.open({ embeddingDim: 8, adoptStoredDim: true });
 const sql = () => db.requireDb();
 
@@ -177,6 +178,34 @@ test('bars not trusted settle as no-bars; trusted bars make the track due', () =
   db.resyncAllFacets(sql());
   assert.equal(facetRow('b2')?.reason, 'no-bars');
   assert.equal(facetRow('b1'), undefined);
+});
+
+test('a half-bar grid whose edges agree has trusted bars: due, not no-bars', () => {
+  // Body split between beat 1 and beat 3 (agreement 0.53), the first and last
+  // 32 bars on one phase: grid-policy.ts trusts the bars.
+  const rescued = { downbeat_agreement: 0.53, downbeat_halfbar: 0.98, downbeat_edge_agreement: 0.9 };
+  track('h1');
+  grid('h1', rescued);
+  const g = db.getGrid('h1')!;
+  assert.equal(g.downbeatHalfbar, 0.98);
+  assert.equal(g.downbeatEdgeAgreement, 0.9);
+  assert.equal(gridDecision(g).bars, true);
+  assert.ok(db.structureGridOf(g));
+  assert.equal(facetRow('h1'), undefined, 'no no-bars row');
+  assert.ok(db.facetNeedsIds('structure').includes('h1'));
+  // Edges on two different phases: still no bars.
+  track('h2');
+  grid('h2', { ...rescued, downbeat_edge_agreement: 0 });
+  assert.equal(facetRow('h2')?.reason, 'no-bars');
+  // The whole-table re-derive reads the grid through its own SQL JSON: the
+  // same verdicts.
+  sql().prepare(`DELETE FROM track_facet_status WHERE facet = 'structure'`).run();
+  db.resyncAllFacets(sql());
+  assert.equal(facetRow('h1'), undefined);
+  assert.equal(facetRow('h2')?.reason, 'no-bars');
+  // A grid that loses the scores (re-measured by an older worker) loses its bars.
+  grid('h1', { downbeat_agreement: 0.53 });
+  assert.equal(facetRow('h1')?.reason, 'no-bars');
 });
 
 test('parseStructureAnswer is strict', () => {

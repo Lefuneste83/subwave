@@ -34,7 +34,8 @@ const grid = (over: Partial<import('../src/music/library-db/grid.js').TrackGrid>
   status: 'ok' as const, version: 1, reason: null, attempts: 0, engine: 'beat_this', model: 'final0',
   bpm: 124, beatsPerBar: 4,
   segments: [{ anchorMs: 480, periodUs: 483871, beats: 700, downbeatMs: 480 }],
-  coverage: 0.97, residualMs: 5, downbeatAgreement: 0.84, mainShare: 0.99, decodedMs: 340_000,
+  coverage: 0.97, residualMs: 5, downbeatAgreement: 0.84, downbeatHalfbar: null as number | null,
+  downbeatEdgeAgreement: null as number | null, mainShare: 0.99, decodedMs: 340_000,
   measuredAt: '2026-11-12T00:00:00Z', applied: 0 as const, headBpm: null, headBeatsJson: null, headBarsJson: null, headOutroJson: null, gridOutroJson: null, ...over,
 });
 const P = 483.871;
@@ -163,7 +164,8 @@ test('the report reads only: the library file is unchanged', () => {
   db.upsertTrackMeta('lib1', { title: 'L', artist: 'A', album: 'B', duration: 300 } as never);
   db.upsertTrackAnalysis('lib1', { bpm: 62, musicalKey: '8A', loudnessLufs: -9, source: 'full' } as never);
   db.writeGridResult('lib1', { grid: { version: 1, engine: 'beat_this', model: 'final0', bpm: 124, beatsPerBar: 4,
-    segments: grid().segments, coverage: 0.97, residualMs: 5, downbeatAgreement: 0.84, mainShare: 0.99, decodedMs: 300_000 } });
+    segments: grid().segments, coverage: 0.97, residualMs: 5, downbeatAgreement: 0.84, downbeatHalfbar: null,
+    downbeatEdgeAgreement: null, mainShare: 0.99, decodedMs: 300_000 } });
   db.requireDb().pragma('wal_checkpoint(TRUNCATE)');
   const file = join(stateDir, 'library.db');
   const before = readFileSync(file);

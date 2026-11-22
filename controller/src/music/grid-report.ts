@@ -129,6 +129,8 @@ export interface GridReportRow {
   mainShare: number | null;
   steadyShare: number | null;
   downbeatAgreement: number | null;
+  downbeatHalfbar: number | null;
+  downbeatEdgeAgreement: number | null;
   beatsPerBar: number | null;
   // What step 4 would write under GRID_WRITE_GATE.
   wouldWriteBpm: boolean;
@@ -168,6 +170,8 @@ export function compareGrid(t: GridReportTrack, g: TrackGrid): GridReportRow | n
     mainShare: g.mainShare,
     steadyShare: round(steady),
     downbeatAgreement: g.downbeatAgreement,
+    downbeatHalfbar: g.downbeatHalfbar,
+    downbeatEdgeAgreement: g.downbeatEdgeAgreement,
     beatsPerBar: g.beatsPerBar,
     wouldWriteBpm: confident,
     wouldWriteBars: decision.bars,
@@ -207,7 +211,7 @@ export function summariseGridReport(rows: readonly GridReportRow[]): GridReportS
 const CSV_COLUMNS: Array<keyof GridReportRow> = [
   'id', 'artist', 'title', 'genre', 'storedBpm', 'gridBpm', 'deltaBpm', 'relation', 'wordsBefore', 'wordsAfter',
   'reEmbed', 'barOffsetBeats', 'barShift', 'storedBeatsOnGrid', 'segments', 'coverage', 'mainShare', 'steadyShare',
-  'downbeatAgreement', 'beatsPerBar', 'wouldWriteBpm', 'wouldWriteBars', 'heldBecause',
+  'downbeatAgreement', 'downbeatHalfbar', 'downbeatEdgeAgreement', 'beatsPerBar', 'wouldWriteBpm', 'wouldWriteBars', 'heldBecause',
 ];
 
 export function gridReportCsv(rows: readonly GridReportRow[]): string {
