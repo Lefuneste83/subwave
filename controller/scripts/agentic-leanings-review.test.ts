@@ -426,8 +426,8 @@ test('Shortlist shares its resolution, context and Leanings-blind corrections', 
     'episode-source tracks skip artist repeat rescue while other paths retain the guard');
   assert.match(pickSource, /telemetry: \{ shortlistResolution: shortlistPickResolution \}/,
     'initial, review and corrective calls share the controller resolution object');
-  assert.match(pickSource, /library\.bpmKeyFor\(pickAnchor\)/,
-    'Shortlist resolves the predecessor audio facts used to judge transition effects');
+  assert.match(pickSource, /library\.pickAnalysisFor\(pickAnchor, !!scope\.tempoWindow\)/,
+    'Shortlist resolves the predecessor audio facts used to judge transition effects (the Hot Mix tempo in a Hot Mix pick)');
   assert.match(pickSource, /selectionContextForPick\(queue, ctx/, 'the shared selection context reaches both routes');
   const start = agentSource.indexOf('export function selectionContextForPick');
   const end = agentSource.indexOf('\nexport function shouldExplore', start);

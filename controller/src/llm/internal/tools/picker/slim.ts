@@ -12,7 +12,10 @@ import { unairedFlag } from '../../../../music/airing.js';
 import { resolveEraYear } from '../../../../music/show-filter.js';
 import { shiftOnsetMs } from '../../../../music/silence-trim.js';
 
-export function slim(s: any) {
+// `hotMix`: a DJ Hot Mix pick, whose `bpm` is the Hot Mix resolver's tempo
+// (library.mixTempoFor) and absent when it calls the tempo unknown, so the
+// model never reads a tempo the window refused to judge on.
+export function slim(s: any, { hotMix = false }: { hotMix?: boolean } = {}) {
   // Surface the editorial tags + measured acoustic facts when known — merged
   // per field from the song itself (library sources, via slimTrack) and a
   // library lookup (Subsonic sources). The lookup always runs: Subsonic songs
@@ -61,7 +64,7 @@ export function slim(s: any) {
   const instrumental = isInstrumental(vocalSource);
   // realBpm: a non-positive bpm means unknown — never emitted, never allowed
   // to mask the analyzed value.
-  const bpm = library.realBpm(rec?.bpm) ?? library.realBpm(s.bpm);
+  const bpm = hotMix ? library.mixTempoFor(s) : (library.realBpm(rec?.bpm) ?? library.realBpm(s.bpm));
   const key = rec?.musicalKey ?? s.musicalKey ?? null;
   const rawIntroMs = rec?.introMs ?? s.introMs;
   const introMs = typeof rawIntroMs === 'number' && rawIntroMs >= 0

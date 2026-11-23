@@ -11,11 +11,13 @@ type PickAnchor = {
 };
 
 // Use the discovery candidates' field names and omit unknown facts. The
-// predecessor is context only, so its id never enters this projection.
-export function predecessorContext(pickAnchor: PickAnchor | null) {
+// predecessor is context only, so its id never enters this projection. In a
+// DJ Hot Mix pick (`hotMix`) its tempo is the Hot Mix resolver's
+// (library.mixTempoFor), so the model never reads one the window calls unknown.
+export function predecessorContext(pickAnchor: PickAnchor | null, { hotMix = false }: { hotMix?: boolean } = {}) {
   if (!pickAnchor) return undefined;
   const rec = pickAnchor.id ? library.get(pickAnchor.id) : null;
-  const bpm = library.realBpm(rec?.bpm) ?? library.realBpm(pickAnchor.bpm);
+  const bpm = hotMix ? library.mixTempoFor(pickAnchor) : (library.realBpm(rec?.bpm) ?? library.realBpm(pickAnchor.bpm));
   const key = rec?.musicalKey ?? pickAnchor.musicalKey ?? null;
   const energy = rec?.energy ?? pickAnchor.energy ?? null;
   if (bpm == null && key == null && energy == null) return undefined;
