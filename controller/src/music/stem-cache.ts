@@ -1,7 +1,7 @@
 // The analyzer writes cached head/tail stems on the shared volume. The controller manages
 // paths and evicts by the same priority the backfill uses.
 
-import { access, constants, readdir, stat, rm, readFile, mkdir, chmod, writeFile } from 'node:fs/promises';
+import { access, constants, lstat, readdir, stat, rm, readFile, mkdir, chmod, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
@@ -1103,6 +1103,33 @@ export async function cachedTrackIdSet(): Promise<Set<string>> {
   } catch {
     return new Set(); // no cache dir yet
   }
+}
+
+// How many planned ids a per-id check answers before one readdir of the
+// root is cheaper (cachedTrackIdsAmong).
+export const STEM_DIR_CHECK_MAX = 2000;
+
+// cachedTrackIdSet()'s answer for `ids` alone. A pass asks it only about the
+// tracks it plans, so a small plan (a new-track import: ~100) checks each
+// name instead of listing the root, which holds a dir per cached track (45k
+// on a network share, read for a hundred names). A name the listing could
+// never hold (empty, dotted, or with a separator) is not there either way.
+export async function cachedTrackIdsAmong(ids: Iterable<string>): Promise<Set<string>> {
+  const wanted = [...new Set(ids)];
+  if (wanted.length > STEM_DIR_CHECK_MAX) {
+    const all = await cachedTrackIdSet();
+    return new Set(wanted.filter((id) => all.has(id)));
+  }
+  const root = stemsRoot();
+  const found = new Set<string>();
+  const listable = wanted.filter((id) => id !== '' && !id.startsWith('.') && !id.includes('/') && !id.includes('\0'));
+  // A few names at a time: each is a round trip on a network share.
+  for (let i = 0; i < listable.length; i += 16) {
+    await Promise.all(listable.slice(i, i + 16).map(async (id) => {
+      if (await lstat(path.join(root, id)).then(() => true, () => false)) found.add(id);
+    }));
+  }
+  return found;
 }
 
 // Approximately how many more tracks the budget holds. The stem backfill caps

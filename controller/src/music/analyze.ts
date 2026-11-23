@@ -445,10 +445,10 @@ async function plannedRegularSteps(
   };
   // Stems-only work is ordered and budgeted (stem-priority.ts); sizing the
   // budget walks the cache, so the planner loads it only when there is such work.
-  const plan = await planRegularRun({ ids, state, wants, capabilities, limit: opts.limit }, async () => ({
+  const plan = await planRegularRun({ ids, state, wants, capabilities, limit: opts.limit }, async (planned) => ({
     priority: db.needsStemsIds(undefined, stemCacheStore.likeSignals()),
     headroom: await stemCacheStore.headroomTracks(),
-    existing: await stemCacheStore.cachedTrackIdSet(),
+    existing: await stemCacheStore.cachedTrackIdsAmong(planned),
   }));
   logRegularPlan(plan);
   const stats = await runAnalysisPassOnce({ ...opts, plan });
@@ -785,8 +785,10 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
         if (root.message) logEvent('warning', root.message);
         // The only place a plan sizes the budget (the widening above skips plans),
         // whether or not the settings toggle is on: an explicit stems plan needs it.
+        // Only the plan's own tracks are ever looked up in the dir set
+        // (allocateStems), so only they are checked.
         stemSlotsLeft = await stemCacheStore.headroomTracks();
-        existingStemDirs = await stemCacheStore.cachedTrackIdSet();
+        existingStemDirs = await stemCacheStore.cachedTrackIdsAmong(plan.items.filter(i => i.request.stems).map(i => i.id));
       }
     }
   }

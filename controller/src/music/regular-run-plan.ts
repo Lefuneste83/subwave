@@ -76,7 +76,8 @@ export interface RegularRunInput {
   limit?: number;
   // Stems only, read when the plan has stems-only work: the priority order
   // (db.needsStemsIds with the like signals), the budget's free track slots,
-  // and the tracks whose stem dir already exists (a rewrite costs no slot).
+  // and the tracks whose stem dir already exists (a rewrite costs no slot;
+  // only the planned tracks are ever looked up in it).
   stems?: { priority: readonly string[]; headroom: number; existing: ReadonlySet<string> };
 }
 
@@ -104,10 +105,11 @@ function basePlan(input: Omit<RegularRunInput, 'stems' | 'limit'>): AcousticsPla
  */
 export async function planRegularRun(
   input: Omit<RegularRunInput, 'stems'>,
-  loadStems: () => Promise<StemsInput>,
+  loadStems: (planned: readonly string[]) => Promise<StemsInput>,
 ): Promise<AcousticsPlan> {
   const base = basePlan(input);
-  const stems = base.items.some(stemsOnly) ? await loadStems() : undefined;
+  // `planned`: the only ids the stem input is asked about (`existing`).
+  const stems = base.items.some(stemsOnly) ? await loadStems(base.items.map(i => i.id)) : undefined;
   return finishPlan(base, { ...input, stems });
 }
 
