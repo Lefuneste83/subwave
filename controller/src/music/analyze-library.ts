@@ -276,7 +276,7 @@ async function main() {
         liveIds.add(song.id);
         walked += 1;
         if (walked % 500 === 0) {
-          st.progressCount(walked, 'tracks read');
+          st.progressCount(walked, 'tracks read', count || null);
           reportProgress({ phase: 'walk', label: 'Scanning Navidrome library', done: walked });
         }
       }

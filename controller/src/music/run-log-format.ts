@@ -97,6 +97,20 @@ export function progressLine(done: number, total: number): string {
   return `  ${MARK.progress} ${fmtCount(done)}/${fmtCount(total)} done`;
 }
 
+// One rule for every step's progress lines: a line once the step has moved on
+// by a tenth of its total AND 15 s have passed since the last one (whichever
+// is rarer), so a step prints about ten at most whatever its size. Never the
+// last one: the result line says it. No total known: time alone.
+export const PROGRESS_EVERY_FRACTION = 0.1;
+export const PROGRESS_MIN_GAP_MS = 15_000;
+
+export function progressDue(p: { done: number; total: number | null; lastDone: number; sinceLastMs: number }): boolean {
+  if (p.total != null && p.done >= p.total) return false;
+  if (p.sinceLastMs < PROGRESS_MIN_GAP_MS) return false;
+  if (p.total == null || p.total <= 0) return true;
+  return p.done - p.lastDone >= Math.max(1, Math.ceil(p.total * PROGRESS_EVERY_FRACTION));
+}
+
 // Progress with no total known up front (the library walk).
 export function progressCountLine(done: number, what: string): string {
   return `  ${MARK.progress} ${fmtCount(done)} ${what}`;
@@ -109,9 +123,15 @@ export function detailLine(text: string): string {
 
 const OUTCOME_MARK: Record<Outcome, string> = { ok: MARK.ok, partial: MARK.warn, failed: MARK.fail };
 
-export function resultLine(r: StepRef & { outcome: Outcome; summary: string; ms: number }): string {
+// A step that ran alongside another (the self-check, beside the analysis)
+// gives its own work time, and says so.
+function stepTime(ms: number, alongside?: string | null): string {
+  return `${fmtDuration(ms)}${alongside ? ` (ran alongside ${alongside})` : ''}`;
+}
+
+export function resultLine(r: StepRef & { outcome: Outcome; summary: string; ms: number; alongside?: string | null }): string {
   const summary = oneLine(r.summary);
-  return `${OUTCOME_MARK[r.outcome]} ${stepTag(r.n, r.total)} ${r.title}${summary ? ` — ${summary}` : ''} · ${fmtDuration(r.ms)}`;
+  return `${OUTCOME_MARK[r.outcome]} ${stepTag(r.n, r.total)} ${r.title}${summary ? ` — ${summary}` : ''} · ${stepTime(r.ms, r.alongside)}`;
 }
 
 export interface Counts {
@@ -281,9 +301,24 @@ export function enrichSummary(s: EnrichSwitches & {
 }
 
 // An analysis step's result: the counts, then what it wrote.
-export function analysisSummary(s: Counts & { products: Array<[string, number]> }): string {
+// Stem sets: how many the step asked for, how many came back saved, and how
+// many the analyzer could not write for want of the stems share.
+export interface StemsOutcome { asked: number; saved: number; shareMissing: number }
+
+export function analysisSummary(s: Counts & { products: Array<[string, number]>; stems?: StemsOutcome }): string {
   const products = s.products.filter(([, n]) => n > 0).map(([what, n]) => `${fmtCount(n)} ${what}`);
-  return countsSummary(s) + (products.length ? ` · ${products.join(', ')}` : '');
+  const st = s.stems;
+  let shareNote = '';
+  if (st && st.asked > 0) {
+    const other = Math.max(0, st.asked - st.saved - st.shareMissing);
+    if (st.saved > 0 || other > 0) {
+      products.push(st.saved === st.asked ? `${fmtCount(st.saved)} stem set${st.saved === 1 ? '' : 's'} saved`
+        : `${fmtCount(st.saved)} of ${fmtCount(st.asked)} stem sets saved` +
+          (other ? ` (${fmtCount(other)} got no stems back from the analyzer)` : ''));
+    }
+    if (st.shareMissing > 0) shareNote = `; stems not saved for ${fmtCount(st.shareMissing)} (they wait for the stems share)`;
+  }
+  return countsSummary(s) + (products.length ? ` · ${products.join(', ')}` : '') + shareNote;
 }
 
 export function problemLine(kind: ProblemKind, text: string): string {
@@ -297,9 +332,21 @@ export function scopeMissing(s: { missing: number; pool: number; what?: string }
 
 // "29 of 74,725 tracks in the library — 29 need intro, tempo and key, 29 outro".
 // Products nobody needs are left out.
-export function scopeProducts(s: { tracks: number; pool: number; needs: Array<[string, number]> }): string {
+// Where a step's tracks come from: new this run, replaced files the walk
+// found, the rest already due from before.
+export interface TrackOrigins { new: number; replaced: number; other: number }
+
+export function scopeProducts(s: { tracks: number; pool: number; needs: Array<[string, number]>; from?: TrackOrigins }): string {
   const needs = s.needs.filter(([, n]) => n > 0).map(([what, n], i) => `${fmtCount(n)} ${i === 0 ? 'need ' : ''}${what}`);
-  return `${fmtCount(s.tracks)} of ${fmtCount(s.pool)} tracks in the library` + (needs.length ? ` — ${needs.join(', ')}` : '');
+  const from = s.from;
+  const parts = from && (from.new || from.replaced)
+    ? [from.new ? `${fmtCount(from.new)} new` : '', from.replaced ? `${fmtCount(from.replaced)} replaced file${from.replaced === 1 ? '' : 's'}` : '',
+      from.other ? `${fmtCount(from.other)} already due` : ''].filter(Boolean)
+    : [];
+  const head = parts.length
+    ? `${tracks(s.tracks)}: ${parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`}, out of ${fmtCount(s.pool)} in the library`
+    : `${fmtCount(s.tracks)} of ${fmtCount(s.pool)} tracks in the library`;
+  return head + (needs.length ? ` — ${needs.join(', ')}` : '');
 }
 
 // What each analysis product is called in the log, by what it gives the station.
@@ -429,6 +476,18 @@ export function energyResult(s: EnergyStats): { skip: string } | { summary: stri
   }
   return { summary: parts.join('; ') };
 }
+// A step's result says how many energies the audio set; the figures go on
+// their own detail line under it (energyDetail), so the result stays short.
+export function energyChanged(s: EnergyStats): string {
+  const n = s.corrected + (s.filled ? s.filled.high + s.filled.medium + s.filled.low : 0) + (s.overruled ?? 0);
+  return n === 0 ? 'no energy changed' : `${fmtCount(n)} energ${n === 1 ? 'y' : 'ies'} set from the audio`;
+}
+
+export function energyDetail(s: EnergyStats): string | null {
+  const r = energyResult(s);
+  return 'summary' in r ? `Energies: ${r.summary.replace(/^energies copied/, 'copied')}` : null;
+}
+
 
 // ── Problems: one sentence for the cause, one for the fix ──────────────────
 
@@ -591,6 +650,7 @@ export interface SummaryStep {
   title: string;
   ms: number | null;
   outcome: Outcome | 'skipped';
+  alongside?: string | null;
 }
 
 export function summaryLines(s: {
@@ -605,7 +665,7 @@ export function summaryLines(s: {
     lines.push(`${INDENT}Step times :`);
     for (const st of s.steps) {
       const mark = st.outcome === 'skipped' ? MARK.skip : OUTCOME_MARK[st.outcome];
-      lines.push(`${INDENT}  ${mark} [${st.n}] ${st.title} · ${st.outcome === 'skipped' || st.ms == null ? 'skipped' : fmtDuration(st.ms)}`);
+      lines.push(`${INDENT}  ${mark} [${st.n}] ${st.title} · ${st.outcome === 'skipped' || st.ms == null ? 'skipped' : stepTime(st.ms, st.alongside)}`);
     }
   }
   if (s.library) lines.push(`${INDENT}Library    : ${oneLine(s.library)}`);

@@ -285,7 +285,7 @@ async function main() {
     walkStep.done({ summary: 'the library could not be read', outcome: 'failed' });
     process.exit(1);
   }
-  const { walked, liveIds } = walk;
+  const { walked, liveIds, replaced } = walk;
   let pruned = 0;
   let adopted = 0;
 
@@ -329,6 +329,8 @@ async function main() {
   // The remembered untaggables are in scope but not "to tag": count them apart.
   const heldBack = targetUntagged.filter(id => noLlm.has(id)).length;
   for (const line of F.walkChangeLines({ adopted, pruned })) walkStep.note(line);
+  // So the analysis steps can say where their tracks come from.
+  runlog.runLog.setOrigins({ new: targetUntagged, replaced });
   walkStep.done({
     summary: F.walkSummary({ walked, newTracks: flags.rescan ? 0 : targetUntagged.length - heldBack }),
     outcome: walked > 0 ? 'ok' : 'partial',
@@ -563,7 +565,7 @@ async function main() {
     // moods it votes over.
     selfCheckAt = Date.now();
     selfCheck = propagationSelfCheck(voteForTrack, confidenceThreshold, { yieldBetweenVotes: overlap });
-    if (!overlap) reportSelfCheck(await selfCheck, selfCheckAt);
+    if (!overlap) reportSelfCheck(await selfCheck, selfCheckAt, false);
     lap('eval');
 
     // Audio-derived energy over the rows phases 3-4 propagated: decisive stored
@@ -574,11 +576,13 @@ async function main() {
     const energyStep = runlog.step('energy');
     try {
       const at = Date.now();
-      const r = F.energyResult(runAudioEnergyPass(audioEnergyOptions(settings.get())));
+      const stats = runAudioEnergyPass(audioEnergyOptions(settings.get()));
+      const r = F.energyResult(stats);
       if ('skip' in r) energyStep.skip(r.skip);
       else {
         energyStep.start({ runsOn: `${LOCAL_WHERE} (from the stored audio mood scores)`, at });
-        energyStep.done({ summary: r.summary });
+        energyStep.done({ summary: F.energyChanged(stats) });
+        energyStep.note(F.energyDetail(stats)!);
       }
     } catch (err: any) {
       runlog.problem('warning', `The energy check failed (the next run retries): ${err?.message || err}`);
@@ -644,7 +648,7 @@ async function main() {
   // energies, never moods; the re-vote below rewrites propagated tags, so it
   // waits for the self-check.
   const checked = await selfCheck;
-  if (overlap && plan.forwardTag) reportSelfCheck(checked, selfCheckAt);
+  if (overlap && plan.forwardTag) reportSelfCheck(checked, selfCheckAt, true);
   lap('analyze');
 
   // Phase 5 measures the tracks phase 1 just embedded, so their Sound: words
@@ -706,7 +710,7 @@ function autoSeedCount(librarySize: number): number {
 
 // The self-check's step, reported once its result is in (it may have run
 // alongside the analysis).
-function reportSelfCheck(r: SelfCheckResult | null, at: number): void {
+function reportSelfCheck(r: SelfCheckResult | null, at: number, alongside: boolean): void {
   const st = runlog.step('selfcheck');
   if (!r) return;
   if ('skipped' in r) {
@@ -714,8 +718,11 @@ function reportSelfCheck(r: SelfCheckResult | null, at: number): void {
     return;
   }
   st.start({ runsOn: `${LOCAL_WHERE} (reads only)`, scope: F.selfCheckScope(), at });
-  if ('failed' in r) st.done({ summary: r.failed, outcome: 'partial' });
-  else st.done({ summary: r.summary });
+  // Beside the analysis, the wall time since it began is the analysis's: the
+  // step gives its own work time.
+  const timing = alongside ? { ms: r.workMs, alongside: 'the analysis' } : {};
+  if ('failed' in r) st.done({ summary: r.failed, outcome: 'partial', ...timing });
+  else st.done({ summary: r.summary, ...timing });
 }
 
 function finish(
