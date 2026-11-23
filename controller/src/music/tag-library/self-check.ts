@@ -17,14 +17,20 @@ export const SELF_CHECK_SAMPLE = 150;
 // back between votes (each is two brute-force KNN scans, about a quarter
 // second at 75k tracks), so the analysis it runs beside keeps its requests
 // moving. Never throws: the result says what the run log prints for the step
-// (tag-library.ts), a summary, a skip, or a failure.
-export type SelfCheckResult = { summary: string } | { skipped: string } | { failed: string };
+// (tag-library.ts), a summary, a skip, or a failure, with the time spent on
+// its own work (`workMs`: the reads and the votes, not the turns it yielded).
+export type SelfCheckResult =
+  | { summary: string; workMs: number }
+  | { skipped: string }
+  | { failed: string; workMs: number };
 
 export async function propagationSelfCheck(
   voteForTrack: (id: string) => Vote,
   confidenceThreshold: number,
   { yieldBetweenVotes }: { yieldBetweenVotes: boolean },
 ): Promise<SelfCheckResult> {
+  let workMs = 0;
+  let from = Date.now();
   try {
     const truth = db.trustedTaggedIds();
     if (truth.length < 20) return { skipped: 'fewer than 20 tracks tagged by the LLM or by hand to check against' };
@@ -41,11 +47,16 @@ export async function propagationSelfCheck(
     });
     const cases: Parameters<typeof summariseEval>[0] = [];
     for (const c of sample) {
-      if (yieldBetweenVotes) await new Promise<void>((r) => setImmediate(r));
+      if (yieldBetweenVotes) {
+        workMs += Date.now() - from;
+        await new Promise<void>((r) => setImmediate(r));
+        from = Date.now();
+      }
       cases.push({ actual: c.actual, result: voteForTrack(c.id) });
     }
-    return { summary: formatEvalSummary(summariseEval(cases, confidenceThreshold)) };
+    const summary = formatEvalSummary(summariseEval(cases, confidenceThreshold));
+    return { summary, workMs: workMs + Date.now() - from };
   } catch (err: any) {
-    return { failed: `propagation self-check failed: ${err?.message || err}` };
+    return { failed: `propagation self-check failed: ${err?.message || err}`, workMs: workMs + Date.now() - from };
   }
 }

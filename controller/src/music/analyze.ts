@@ -322,10 +322,14 @@ async function scoreAudioMoods(): Promise<void> {
   }
   // Must run AFTER the mood pass, which writes the cosines it calibrates
   // against. Separately wrapped so a failure here doesn't cost the mood labels.
+  // The result says how many energies changed; the figures follow on their
+  // own line under it.
   let energy: string | null = null;
+  let energyDetail: string | null = null;
   try {
-    const r = F.energyResult(runAudioEnergyPass(audioEnergyOptions(settings.get())));
-    energy = 'summary' in r ? r.summary : null;
+    const stats = runAudioEnergyPass(audioEnergyOptions(settings.get()));
+    energyDetail = F.energyDetail(stats);
+    energy = energyDetail ? F.energyChanged(stats) : null;
   } catch (err: any) {
     failed('The energy check', err);
   }
@@ -339,6 +343,7 @@ async function scoreAudioMoods(): Promise<void> {
   // No fingerprint to score: the step is the energy check alone.
   if (!step().started) step().start({ runsOn: `${LOCAL_WHERE} (energies only: no sounds-like fingerprints to score)` });
   step().done({ summary: F.scoreSummary({ moods, descriptors, energy }) });
+  if (energyDetail) step().note(energyDetail);
 }
 
 async function lyricVocalFor(id: string, wanted: boolean): Promise<LyricVocalResult | null> {
@@ -948,6 +953,10 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
   // Tracks whose stems were due but not saved because the analyzer cannot see
   // the stems share: they stay due, and the step's result says how many.
   let stemsNotSaved = 0;
+  // Stem sets due on the tracks this pass ran, and saved (the analyzer wrote
+  // them).
+  let stemsAsked = 0;
+  let stemsSaved = 0;
 
   // Pass-wide flags the tail of the pass reports on (sweep, Demucs warning).
   const passStems = plan ? !planStemsOffline && plan.items.some(i => i.request.stems) : stemCache;
@@ -1118,6 +1127,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
       ranged ? undefined : (localPath ?? undefined),
     ) : null;
     if (res?.stemsWithoutSharedState) stemsWithoutSharedState += 1;
+    if (facets.includes('stems')) stemsAsked += 1;
     const stemsAnswer = res?.facets.stems;
     const shareMissingNow = stemsAnswer?.status === 'unavailable' && F.isStemsShareMissing(stemsAnswer.reason);
     if (shareMissingNow && !stemsShareMissing) {
@@ -1224,6 +1234,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
         w.vocal = { vocalRanges: r.vocalRanges ?? [], tailVocalRanges: a.tailVocalRanges,
           tailWindow: r.tailPlaced ? 'placed' : 'end' };
       } else if (f === 'stems') {
+        if (r.stemsCached) stemsSaved += 1;
         const stemStamp = stemStampDecision({
           stemsCached: r.stemsCached,
           tailStems: r.tailStemsLanded ?? null,
@@ -1366,6 +1377,8 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
         if (lyricVocal && outro) {
           outro = { ...outro, vocalRanges: lyricTailRanges(id, outro, lyricVocal) };
         }
+        if (stems_dir) stemsAsked += 1;
+        if (stems_dir && a.stemsCached) stemsSaved += 1;
         const stemStamp = stemStampDecision({
           stemsCached: a.stemsCached,
           tailStems: a.tailStemsLanded ?? null,
@@ -1464,9 +1477,9 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
     }
     const done = index + 1;
     orderedDone = done;
+    // The run log's own cadence (F.progressDue); the panel's bar every 25.
+    st.progress(done, ids.length);
     if (done % 25 === 0 || done === ids.length) {
-      // The result line follows straight after the last one.
-      if (done < ids.length) st.progress(done, ids.length);
       reportProgress({
         phase: 'analyze',
         label: 'Analysing audio',
@@ -1501,7 +1514,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
       lane: wholeFileLane ? 'cpu' : 'models',
       concurrency: effectiveConcurrency,
     }),
-    scope: F.scopeProducts({ tracks: ids.length, pool: db.trackCount(), needs }),
+    scope: F.scopeProducts({ tracks: ids.length, pool: db.trackCount(), needs, from: runlog.runLog.originsOf(ids) }),
   });
   sayPending();
 
@@ -1607,13 +1620,14 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
     ? { count: skippedTracks, why: stemsShareMissing ? 'their stems wait for the stems share' : 'nothing could be asked of them this run' }
     : undefined;
   // Stems refused on a track whose other work was done: the step is partial.
-  const stemsLeft = !left && stemsNotSaved > 0 ? `; stems not saved for ${F.fmtCount(stemsNotSaved)} (they wait for the stems share)` : '';
+  const shareMissing = !left ? stemsNotSaved : 0;
   st.done({
     summary: F.analysisSummary({
       done: analyzed, failed, left,
       products: [[F.PRODUCT.clap, audioEmbedded], [F.PRODUCT.vocal, vocalAnalyzed]],
-    }) + stemsLeft,
-    outcome: stemsLeft ? 'partial' : F.outcomeOf({ done: analyzed, failed, left }),
+      stems: { asked: stemsAsked, saved: stemsSaved, shareMissing },
+    }),
+    outcome: shareMissing ? 'partial' : F.outcomeOf({ done: analyzed, failed, left }),
   });
 
   // Zero-shot audio moods and sound descriptors over the vectors this and past

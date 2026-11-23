@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import test, { afterEach } from 'node:test';
 import { EVENT_PREFIX, MANAGED_ENV } from '../src/music/tagger-progress.js';
-import { resetRunLog, setRunLogSink } from '../src/music/run-log.js';
+import { progress as runlogProgress, resetRunLog, setRunLogSink } from '../src/music/run-log.js';
 
 function capture(managed: boolean, fn: () => void): string[] {
   const lines: string[] = [];
@@ -98,4 +98,51 @@ test('debug lines appear only when verbose', () => {
   r.verbose = true;
   r.debug('batch=10 knnK=10');
   assert.deepEqual(out, ['    batch=10 knnK=10']);
+});
+
+// A fake clock: the reporter reads time through `now`.
+function clocked(): { r: ReturnType<typeof resetRunLog>; out: string[]; tick: (ms: number) => void } {
+  const out: string[] = [];
+  setRunLogSink((_k, text) => out.push(text));
+  const r = resetRunLog();
+  let t = 1_000_000;
+  r.now = () => t;
+  return { r, out, tick: (ms) => { t += ms; } };
+}
+
+test('a 74,725-track walk prints at most ten progress lines, 15 s apart or more', () => {
+  const { r, out, tick } = clocked();
+  const s = r.step('walk', 'Read the music library').start();
+  for (let n = 500; n <= 74_725; n += 500) { tick(470); s.progressCount(n, 'tracks read', 74_725); }
+  s.done({ summary: '74,725 tracks read' });
+  const progress = out.filter(t => t.startsWith('  …'));
+  assert.ok(progress.length >= 2 && progress.length <= 10, progress.join('\n'));
+});
+
+test('every step follows the same cap, whoever calls progress', () => {
+  const { r, out, tick } = clocked();
+  r.step('lane', 'Find the intro').start();
+  for (let n = 1; n <= 240; n++) { tick(2_300); runlogProgress(n, 240); }
+  r.step('lane').done({ done: 240, failed: 0 });
+  const progress = out.filter(t => t.startsWith('  …'));
+  assert.ok(progress.length >= 8 && progress.length <= 10, progress.join('\n'));
+  assert.ok(!progress.includes('  … 240/240 done'), 'the result line says the last one');
+});
+
+test('a step reported after the fact gives its own work time and says it ran alongside', () => {
+  const { r, out, tick } = clocked();
+  r.plan('Tagging run', [{ id: 'selfcheck', title: 'Quality self-check' }], []);
+  const at = r.now();
+  tick(16 * 60_000);
+  r.step('selfcheck').start({ at }).done({ summary: '150 tracks compared', ms: 3_000, alongside: 'the analysis' });
+  r.finish({ headline: '', library: '' });
+  assert.ok(out.includes('✔ [1/1] Quality self-check — 150 tracks compared · 3 s (ran alongside the analysis)'), out.join('\n'));
+  assert.ok(out.includes('      ✔ [1] Quality self-check · 3 s (ran alongside the analysis)'), out.join('\n'));
+});
+
+test('the run tells the analysis steps where their tracks come from', () => {
+  const r = resetRunLog();
+  r.setOrigins({ new: ['a', 'b'], replaced: ['c'] });
+  assert.deepEqual(r.originsOf(['a', 'b', 'c', 'd']), { new: 2, replaced: 1, other: 1 });
+  assert.equal(resetRunLog().originsOf(['a']), undefined, 'a run that set none: no breakdown');
 });

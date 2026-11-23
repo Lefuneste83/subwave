@@ -54,7 +54,15 @@ interface StepState {
   startedAt: number | null;
   ms: number | null;
   outcome: F.Outcome | 'skipped' | null;
+  alongside?: string | null;
+  // The last progress line said (F.progressDue).
+  lastDone: number;
+  lastAt: number;
 }
+
+// How a step closes: its own work time and what it ran alongside, for a step
+// reported after the fact (the self-check, beside the analysis).
+interface DoneTiming { ms?: number; alongside?: string }
 
 export class Step {
   constructor(private readonly r: RunLog, private readonly st: StepState) {}
@@ -84,7 +92,10 @@ export class Step {
 
   start(s: StepStart = {}): this {
     if (this.started) return this;
-    this.st.startedAt = s.at ?? Date.now();
+    this.st.startedAt = s.at ?? this.r.now();
+    this.st.lastAt = this.st.startedAt;
+    this.st.lastDone = 0;
+    this.r.current = this.st;
     for (const line of F.headerLines({ ...this.ref(), runsOn: s.runsOn, scope: s.scope })) this.r.emit('info', line);
     return this;
   }
@@ -93,12 +104,16 @@ export class Step {
     this.r.emit('info', F.detailLine(text));
   }
 
+  // Call as often as convenient: the line is said only when F.progressDue
+  // says so, the one rule for every step.
   progress(done: number, total: number): void {
-    this.r.emit('info', F.progressLine(done, total));
+    if (this.r.progressDue(this.st, done, total)) this.r.emit('info', F.progressLine(done, total));
   }
 
-  progressCount(done: number, what: string): void {
-    this.r.emit('info', F.progressCountLine(done, what));
+  // No total to show (the library walk); `known` paces the lines when the
+  // size is roughly known (the library before this run).
+  progressCount(done: number, what: string, known: number | null = null): void {
+    if (this.r.progressDue(this.st, done, known)) this.r.emit('info', F.progressCountLine(done, what));
   }
 
   problem(kind: F.ProblemKind, text: string, opts: { hold?: boolean } = {}): void {
@@ -106,15 +121,19 @@ export class Step {
   }
 
   // Close the step with its counts (outcome from them), or a summary of its own.
-  done(result: F.Counts | { summary: string; outcome?: F.Outcome }): void {
+  done(result: (F.Counts | { summary: string; outcome?: F.Outcome }) & DoneTiming): void {
     if (this.finished) return;
     if (!this.started) this.start();
     const counts = 'done' in result && 'failed' in result ? result : null;
     const outcome = counts ? F.outcomeOf(counts) : (result as { outcome?: F.Outcome }).outcome ?? 'ok';
     const summary = counts ? F.countsSummary(counts) : (result as { summary: string }).summary;
-    this.st.ms = Date.now() - (this.st.startedAt ?? Date.now());
+    const now = this.r.now();
+    this.st.ms = result.ms ?? now - (this.st.startedAt ?? now);
+    this.st.alongside = result.alongside ?? null;
     this.st.outcome = outcome;
-    this.r.emit(outcome === 'ok' ? 'success' : outcome === 'partial' ? 'warning' : 'error', F.resultLine({ ...this.ref(), outcome, summary, ms: this.st.ms }));
+    if (this.r.current === this.st) this.r.current = null;
+    this.r.emit(outcome === 'ok' ? 'success' : outcome === 'partial' ? 'warning' : 'error',
+      F.resultLine({ ...this.ref(), outcome, summary, ms: this.st.ms, alongside: this.st.alongside }));
   }
 
   skip(reason: string): void {
@@ -132,7 +151,40 @@ export class RunLog {
   private steps: StepState[] = [];
   private warnings: string[] = [];
   private startedAt = Date.now();
+  private origins: { new: Set<string>; replaced: Set<string> } | null = null;
   verbose = false;
+  // The clock (tests set their own).
+  now: () => number = () => Date.now();
+  // The step that started last and is still open: a helper's progress() goes
+  // under it.
+  current: StepState | null = null;
+  private loose: StepState = { id: '', title: '', startedAt: null, ms: null, outcome: null, lastDone: 0, lastAt: Date.now() };
+
+  progressDue(st: StepState | null, done: number, total: number | null): boolean {
+    const s = st ?? this.loose;
+    const now = this.now();
+    if (!F.progressDue({ done, total, lastDone: s.lastDone, sinceLastMs: now - s.lastAt })) return false;
+    s.lastDone = done;
+    s.lastAt = now;
+    return true;
+  }
+
+  // Where this run's tracks come from (new this run, replaced files the walk
+  // found), so an analysis step's scope can say so.
+  setOrigins(o: { new: Iterable<string>; replaced: Iterable<string> }): void {
+    this.origins = { new: new Set(o.new), replaced: new Set(o.replaced) };
+  }
+
+  originsOf(ids: readonly string[]): F.TrackOrigins | undefined {
+    if (!this.origins) return undefined;
+    const r = { new: 0, replaced: 0, other: 0 };
+    for (const id of ids) {
+      if (this.origins.new.has(id)) r.new += 1;
+      else if (this.origins.replaced.has(id)) r.replaced += 1;
+      else r.other += 1;
+    }
+    return r;
+  }
 
   emit(kind: TaggerEventKind, text: string, opts: { hold?: boolean } = {}): void {
     sink(kind, text, opts);
@@ -148,7 +200,7 @@ export class RunLog {
 
   // The banner: the steps this run plans, in order, and the machines it uses.
   plan(title: string, steps: StepDef[], machines: string[]): void {
-    for (const s of steps) this.steps.push({ id: s.id, title: s.title, startedAt: null, ms: null, outcome: null });
+    for (const s of steps) this.steps.push({ id: s.id, title: s.title, startedAt: null, ms: null, outcome: null, lastDone: 0, lastAt: 0 });
     for (const line of F.bannerLines({ title, steps: steps.map(s => s.title), machines })) this.emit('info', line);
   }
 
@@ -157,7 +209,7 @@ export class RunLog {
   step(id: string, title?: string): Step {
     const open = this.steps.find(s => s.id === id && s.outcome == null);
     if (open) return new Step(this, open);
-    const st: StepState = { id, title: title ?? id, startedAt: null, ms: null, outcome: null };
+    const st: StepState = { id, title: title ?? id, startedAt: null, ms: null, outcome: null, lastDone: 0, lastAt: 0 };
     this.steps.push(st);
     return new Step(this, st);
   }
@@ -196,6 +248,7 @@ export class RunLog {
         n: this.numberOf(st),
         title: st.title,
         ms: st.ms,
+        alongside: st.alongside,
         outcome: st.outcome == null || st.outcome === 'skipped' ? 'skipped' : st.outcome,
       })),
       library: s.library,
@@ -233,7 +286,7 @@ export function debug(text: string): void {
 // A progress line for the step that is running, from a helper that does not
 // hold the step.
 export function progress(done: number, total: number): void {
-  runLog.emit('info', F.progressLine(done, total));
+  if (runLog.progressDue(runLog.current, done, total)) runLog.emit('info', F.progressLine(done, total));
 }
 
 // A detail line under the step that is running (a pause, a resume).

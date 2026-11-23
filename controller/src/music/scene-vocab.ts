@@ -18,6 +18,7 @@
 import { readFileSync } from 'node:fs';
 import { config } from '../config.js';
 import { writeFileAtomic } from '../util/atomic-file.js';
+import { debug as runlogDebug } from './run-log.js';
 
 const FILE_PATH = `${config.stateDir}/scene-aliases.json`;
 
@@ -171,7 +172,9 @@ function ensureLoaded(): void {
       console.error(`[scenes] dropped ${list.length - kept.length} unusable alias(es) from scene-aliases.json`);
     }
     aliases = kept;
-    if (kept.length) console.log(`[scenes] loaded ${kept.length} scene alias(es)`);
+    // Detail, not news: said only in a verbose run log (and never in the
+    // controller's own log, which is never verbose).
+    if (kept.length) runlogDebug(`scene aliases loaded: ${kept.length}`);
   } catch (err) {
     // Missing file is normal; a corrupt one starts empty rather than blocking.
     const e = err as NodeJS.ErrnoException;

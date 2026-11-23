@@ -123,8 +123,9 @@ export async function walkNavidrome(
     acceptReplaced = process.argv.includes('--accept-replaced'),
     step = runlog.step('walk', F.STEP_TITLE.walk),
   }: { confirmReplaced?: boolean; acceptReplaced?: boolean; step?: runlog.Step } = {},
-): Promise<{ walked: number; liveIds: Set<string>; replacedHeld: number }> {
-  step.start({ runsOn: navidromeWhere(), scope: F.walkScope(db.trackCount()) });
+): Promise<{ walked: number; liveIds: Set<string>; replacedHeld: number; replaced: string[] }> {
+  const known = db.trackCount();
+  step.start({ runsOn: navidromeWhere(), scope: F.walkScope(known) });
   reportProgress({ phase: 'walk', label: 'Scanning Navidrome library', done: 0 });
   let walked = 0;
   const liveIds = new Set<string>();
@@ -203,7 +204,7 @@ export async function walkNavidrome(
     for (const _ of album.songs) {
       walked += 1;
       if (walked % 500 === 0) {
-        step.progressCount(walked, 'tracks read');
+        step.progressCount(walked, 'tracks read', known || null);
         reportProgress({ phase: 'walk', label: 'Scanning Navidrome library', done: walked });
       }
     }
@@ -267,7 +268,7 @@ export async function walkNavidrome(
       .map(([reason, n]) => `${reason} ${n.toLocaleString('en-GB')}`)
       .join(', ')}`);
   }
-  return { walked, liveIds, replacedHeld: held ? candidates.size : 0 };
+  return { walked, liveIds, replacedHeld: held ? candidates.size : 0, replaced };
 }
 
 // Standalone reconcile: diff library-db against the live Navidrome catalogue and

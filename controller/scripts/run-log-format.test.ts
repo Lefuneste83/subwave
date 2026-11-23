@@ -244,6 +244,77 @@ test('results carry no internal concept: relabels, spread energies, re-votes, se
   }
 });
 
+// One progress rule for every step: at most ~10 lines, never closer than 15 s.
+test('progress is due every 10% of the total and at least 15 s apart, whichever is rarer', () => {
+  const due = (done: number, total: number | null, lastDone: number, gapMs: number) =>
+    f.progressDue({ done, total, lastDone, sinceLastMs: gapMs });
+  assert.equal(due(7_000, 74_725, 0, 60_000), false, 'under 10% of the total');
+  assert.equal(due(7_500, 74_725, 0, 14_999), false, 'under 15 s');
+  assert.equal(due(7_500, 74_725, 0, 15_000), true);
+  assert.equal(due(240, 240, 216, 60_000), false, 'the result line says the last one');
+  assert.equal(due(25, 240, 0, 60_000), true);
+  assert.equal(due(3, 29, 0, 20_000), true);
+  assert.equal(due(50_000, null, 0, 14_000), false, 'no total known: time alone');
+  assert.equal(due(50_000, null, 0, 15_000), true);
+});
+
+test('an analysis scope says where its tracks come from', () => {
+  const needs: Array<[string, number]> = [['intro, tempo and key', 240], ['outro', 240]];
+  assert.equal(
+    f.scopeProducts({ tracks: 240, pool: 74_725, needs, from: { new: 192, replaced: 48, other: 0 } }),
+    '240 tracks: 192 new and 48 replaced files, out of 74,725 in the library — 240 need intro, tempo and key, 240 outro',
+  );
+  assert.equal(
+    f.scopeProducts({ tracks: 260, pool: 74_725, needs: [], from: { new: 192, replaced: 48, other: 20 } }),
+    '260 tracks: 192 new, 48 replaced files and 20 already due, out of 74,725 in the library',
+  );
+  assert.equal(f.scopeProducts({ tracks: 29, pool: 149, needs: [], from: { new: 0, replaced: 0, other: 29 } }),
+    '29 of 149 tracks in the library', 'nothing new or replaced: the plain form');
+  assert.equal(f.scopeProducts({ tracks: 29, pool: 149, needs: [] }), '29 of 149 tracks in the library');
+});
+
+test('the model lane result counts the stem sets saved', () => {
+  assert.equal(
+    f.analysisSummary({ done: 240, failed: 0, products: [['sounds-like', 240], ['vocals', 240]], stems: { asked: 240, saved: 240, shareMissing: 0 } }),
+    '240 done, 0 failed · 240 sounds-like, 240 vocals, 240 stem sets saved',
+  );
+  assert.equal(
+    f.analysisSummary({ done: 240, failed: 0, products: [], stems: { asked: 240, saved: 230, shareMissing: 0 } }),
+    '240 done, 0 failed · 230 of 240 stem sets saved (10 got no stems back from the analyzer)',
+  );
+  assert.equal(
+    f.analysisSummary({ done: 149, failed: 0, products: [['vocals', 149]], stems: { asked: 149, saved: 0, shareMissing: 149 } }),
+    '149 done, 0 failed · 149 vocals; stems not saved for 149 (they wait for the stems share)',
+  );
+});
+
+test('a step that ran alongside another reports its own work time and says so', () => {
+  assert.equal(
+    f.resultLine({ n: 13, total: 14, title: 'Quality self-check', outcome: 'ok', summary: '150 tracks compared', ms: 3_000, alongside: 'the analysis' }),
+    '✔ [13/14] Quality self-check — 150 tracks compared · 3 s (ran alongside the analysis)',
+  );
+  const lines = f.summaryLines({
+    totalMs: 60_000, headline: '', library: '', warnings: [],
+    steps: [{ n: 13, title: 'Quality self-check', ms: 3_000, outcome: 'ok', alongside: 'the analysis' }],
+  });
+  assert.equal(lines[2], '      ✔ [13] Quality self-check · 3 s (ran alongside the analysis)');
+});
+
+test('the energy figures go on their own line under a short result', () => {
+  const s = { scope: 19_645, corrected: 6, agreed: 12_771, undecided: 6_868, fillScope: 72,
+    filled: { high: 26, medium: 35, low: 11 }, overruleScope: 55_008, overruled: 5, skipped: null };
+  assert.equal(f.energyChanged(s), '83 energies set from the audio');
+  assert.equal(f.energyChanged({ scope: 10, corrected: 0, agreed: 10, undecided: 0, skipped: null }), 'no energy changed');
+  assert.equal(
+    f.energyDetail(s),
+    'Energies: copied from similar tracks: 6 of 19,645 corrected from the audio, 12,771 confirmed, 6,868 kept (the audio is not clear-cut); ' +
+      '72 of 72 missing energies filled from the audio (26 high, 35 medium, 11 low); 5 of 55,008 LLM energies changed where the audio clearly says otherwise',
+  );
+  const short = f.scoreSummary({ moods: { scored: 240, skipped: null }, descriptors: { scored: 240, skipped: null }, energy: f.energyChanged(s) });
+  assert.equal(short, '240 scored for moods; 240 for sound descriptors; 83 energies set from the audio');
+  assert.ok(f.resultLine({ n: 9, total: 14, title: 'Score moods, sound descriptors and energies from the audio (CLAP)', outcome: 'ok', summary: short, ms: 4_000 }).length < 180);
+});
+
 test('the run banner lists every step in order with the count, and the machines once', () => {
   assert.deepEqual(
     f.bannerLines({
