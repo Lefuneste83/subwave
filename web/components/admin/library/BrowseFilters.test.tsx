@@ -40,9 +40,3 @@ test('a search answered while the keys are rebuilt says it may be missing tracks
   assert.doesNotMatch(render({ q: 'live', queryError: null, readsAs: 'anywhere "live"' }), note);
   assert.doesNotMatch(render({ q: '', queryError: null, reindexing: true }), note, 'not for an empty box');
 });
-
-test('the box carries its action at the end of its last row', () => {
-  const html = render({ actions: createElement('button', { type: 'button' }, 'Download 3 tracks') });
-  assert.match(html, /<div class="flex w-full sm:ml-auto sm:w-auto"><button type="button">Download 3 tracks<\/button><\/div><\/div><\/section>$/);
-  assert.doesNotMatch(render(), /sm:ml-auto/);
-});

@@ -46,7 +46,9 @@ const express = (await import('express')).default;
 const library = await import('../src/music/library.js');
 const db = await import('../src/music/library-db.js');
 const { router: browseRoutes } = await import('../src/routes/library/browse.js');
-const { router: downloadRoutes } = await import('../src/routes/library/download.js');
+const { router: downloadRoutes, _setListDownloadCap } = await import('../src/routes/library/download.js');
+const { LIBRARY_DOWNLOAD_LIST_MAX } = await import('../src/schemas/library-download.js');
+const { browseListNarrowed, listDownloadRefusal } = await import('../src/music/download-policy.js');
 const { signLink } = await import('../src/util/signed-link.js');
 const { StoreZipWriter, dosDateTime } = await import('../src/util/zip-stream.js');
 const names = await import('../src/music/download-names.js');
@@ -414,6 +416,72 @@ test('liked: one track no longer in the library is a 404 JSON, and no link is mi
   const one = await linkFor({ liked: { q: 'calm one' } });
   assert.equal(one.single, true);
   assert.equal(one.name, 'Ane - Calm One.flac');
+});
+
+// ── The whole-list guard: never the whole library by accident ────────────────
+async function refused(body: unknown) {
+  fake.requests = [];
+  const r = await fetch(`${base}/library/download`, { method: 'POST', headers: json, body: JSON.stringify(body) });
+  const j = await r.json() as { error: string; count?: number; cap?: number; path?: string };
+  assert.equal(j.path, undefined, 'no link is minted');
+  assert.equal(fake.requests.length, 0, 'the music server is never asked');
+  return { status: r.status, ...j };
+}
+
+test('list guard: an unfiltered Browse list is refused, whatever its sort', async () => {
+  for (const filter of [{}, { sort: 'title' }, { q: '   ' }, { moods: '' }, { genre: '' }]) {
+    const r = await refused({ filter });
+    assert.equal(r.status, 400, JSON.stringify(filter));
+    assert.match(r.error, /narrow the list/i, JSON.stringify(filter));
+    assert.equal(r.cap, LIBRARY_DOWNLOAD_LIST_MAX);
+  }
+  // Any one narrowing is enough.
+  for (const filter of [{ moods: 'calm' }, { energy: 'low' }, { genre: 'test' }, { q: 'artist:Ane' }]) {
+    assert.ok((await linkFor({ filter })).count > 0, JSON.stringify(filter));
+  }
+});
+
+test('list guard: a list above the cap is refused with its count and the cap; ticked ids are not capped', async () => {
+  assert.equal(LIBRARY_DOWNLOAD_LIST_MAX, 2_000);
+  _setListDownloadCap(3);
+  try {
+    // calm: a1, a2, a4, a5, mp3, refused (the archive hour is hidden).
+    const browse = await refused({ filter: { moods: 'calm' } });
+    assert.deepEqual([browse.status, browse.count, browse.cap], [400, 6, 3]);
+    assert.match(browse.error, /6 tracks.*3/);
+    const liked = await refused({ liked: { sort: 'count' } });
+    assert.deepEqual([liked.status, liked.count, liked.cap], [400, 5, 3]);
+    // At the cap exactly: allowed.
+    assert.equal((await linkFor({ filter: { moods: 'calm', q: 'artist:Ane' } })).count, 2);
+    _setListDownloadCap(5);
+    assert.equal((await linkFor({ liked: {} })).count, 5);
+    // Ticked rows keep their own limit (LIBRARY_DOWNLOAD_IDS_MAX), not the list cap.
+    _setListDownloadCap(1);
+    assert.equal((await linkFor({ ids: ['a1', 'a2', 'a3', 'a4', 'a5', 'mp3'] })).count, 6);
+  } finally {
+    _setListDownloadCap(LIBRARY_DOWNLOAD_LIST_MAX);
+  }
+});
+
+test('list guard policy: what narrows a Browse list, and the refusals', () => {
+  const opts = (o: Record<string, unknown> = {}) => ({
+    moods: [], energy: null, genre: null, vocal: null, yearFrom: null, yearTo: null, query: null, sort: 'artist', ...o,
+  });
+  assert.equal(browseListNarrowed(opts()), false);
+  assert.equal(browseListNarrowed(opts({ sort: 'year' })), false);
+  for (const o of [{ moods: ['calm'] }, { energy: 'low' }, { genre: 'Jazz' }, { vocal: 'vocal' },
+    { yearFrom: 1990 }, { yearTo: 1999 }, { query: { kind: 'text' } }]) {
+    assert.equal(browseListNarrowed(opts(o)), true, JSON.stringify(o));
+  }
+  assert.equal(listDownloadRefusal({ narrowed: true, count: 2_000, cap: 2_000 }), null);
+  assert.deepEqual(listDownloadRefusal({ narrowed: true, count: 2_001, cap: 2_000 }), {
+    error: 'this list holds 2,001 tracks; a whole list downloads at most 2,000: narrow it or tick the tracks to take',
+    count: 2_001, cap: 2_000,
+  });
+  assert.deepEqual(listDownloadRefusal({ narrowed: false, count: null, cap: 2_000 }), {
+    error: 'narrow the list first (a search or a filter), or tick the tracks to take: the whole library never downloads at once',
+    cap: 2_000,
+  });
 });
 
 // ── The zip writer itself ────────────────────────────────────────────────────

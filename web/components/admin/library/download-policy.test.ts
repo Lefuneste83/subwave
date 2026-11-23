@@ -1,21 +1,25 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
-  CONFIRM_BYTES, CONFIRM_TRACKS, browseFilterParams, confirmText, downloadBody, downloadCount,
-  downloadLabel, downloadTitle, fmtBytes, needsConfirm, sizeText, type BrowseFilterState,
+  CONFIRM_BYTES, CONFIRM_TRACKS, LIBRARY_DOWNLOAD_LIST_MAX, browseFilterParams, browseNarrowed, confirmText,
+  downloadLabel, fmtBytes, listBody, listOffer, listTitle, needsConfirm, selectionBody, selectionTitle, sizeText,
+  type BrowseFilterState,
 } from './download-policy';
-import { DownloadControl } from './DownloadButton';
+import { DownloadControl, ListDownloadView } from './DownloadButton';
+import { AddToPlaylistBar } from './AddToPlaylistBar';
 
+const HERE = dirname(fileURLToPath(import.meta.url));
 const NONE: BrowseFilterState = {
   moods: [], energy: 'any', vocal: 'any', genre: '', yearFrom: '', yearTo: '', q: '', sort: 'artist',
 };
+const browse = (f: Partial<BrowseFilterState> = {}) => ({ kind: 'browse' as const, filter: { ...NONE, ...f } });
 
-test('the label counts the ticked rows, else the whole list', () => {
-  assert.equal(downloadCount(1, 248), 1);
-  assert.equal(downloadCount(0, 248), 248);
-  assert.equal(downloadCount(0, null), null);
+test('the label counts the tracks a press takes; pending relabels it', () => {
   assert.equal(downloadLabel(1, false), 'Download 1 track');
   assert.equal(downloadLabel(248, false), 'Download 248 tracks');
   assert.equal(downloadLabel(12345, false), 'Download 12,345 tracks');
@@ -24,13 +28,13 @@ test('the label counts the ticked rows, else the whole list', () => {
   assert.equal(downloadLabel(248, true), 'Preparing…');
 });
 
-test('ticked rows go as ids; none sends the list filter, paging aside', () => {
-  assert.deepEqual(downloadBody(['b', 'a'], { kind: 'browse', filter: NONE }), { ids: ['b', 'a'] });
+test('ticked rows go as ids; a list sends its own filter or the Liked sort, paging aside', () => {
+  assert.deepEqual(selectionBody(['b', 'a']), { ids: ['b', 'a'] });
   const f: BrowseFilterState = {
     moods: ['calm', 'dreamy'], energy: 'low', vocal: 'instrumental', genre: 'Jazz',
     yearFrom: '1990', yearTo: '1999', q: ' artist:Ane ', sort: 'title',
   };
-  assert.deepEqual(downloadBody([], { kind: 'browse', filter: f }), {
+  assert.deepEqual(listBody({ kind: 'browse', filter: f }), {
     filter: {
       moods: 'calm,dreamy', energy: 'low', vocal: 'instrumental', genre: 'Jazz',
       yearFrom: '1990', yearTo: '1999', q: 'artist:Ane', sort: 'title',
@@ -40,6 +44,41 @@ test('ticked rows go as ids; none sends the list filter, paging aside', () => {
   assert.equal(new URLSearchParams(browseFilterParams(f)).toString(),
     'moods=calm%2Cdreamy&energy=low&vocal=instrumental&genre=Jazz&yearFrom=1990&yearTo=1999&q=artist%3AAne&sort=title');
   assert.deepEqual(browseFilterParams(NONE), { sort: 'artist' });
+  assert.deepEqual(listBody({ kind: 'liked', sort: 'count' }), { liked: { sort: 'count' } });
+});
+
+test('a Browse list is narrowed by any search or filter, never by its sort alone', () => {
+  assert.equal(browseNarrowed(NONE), false);
+  assert.equal(browseNarrowed({ ...NONE, sort: 'year' }), false);
+  assert.equal(browseNarrowed({ ...NONE, q: '   ' }), false);
+  for (const f of [{ moods: ['calm'] }, { energy: 'low' }, { vocal: 'vocal' }, { genre: 'Jazz' },
+    { yearFrom: '1990' }, { yearTo: '1999' }, { q: 'artist:Ane' }] as Partial<BrowseFilterState>[]) {
+    assert.equal(browseNarrowed({ ...NONE, ...f }), true, JSON.stringify(f));
+  }
+});
+
+test('the list button: only for a narrowed Browse list or Liked, and only up to the server\'s cap', () => {
+  // The controller's own number, through the schema mirror.
+  assert.equal(LIBRARY_DOWNLOAD_LIST_MAX, 2_000);
+  // Unfiltered Browse is the whole library: a hint, whatever its size.
+  assert.deepEqual(listOffer(browse(), 75_000), { kind: 'hint', text: 'Filter the list or tick tracks to download' });
+  assert.deepEqual(listOffer(browse({ sort: 'year' }), 12), { kind: 'hint', text: 'Filter the list or tick tracks to download' });
+  assert.deepEqual(listOffer(browse({ moods: ['calm'] }), 120), { kind: 'button', count: 120 });
+  assert.deepEqual(listOffer(browse({ q: 'x' }), 2_000), { kind: 'button', count: 2_000 });
+  assert.deepEqual(listOffer(browse({ q: 'x' }), 2_001),
+    { kind: 'hint', text: 'Narrow the list to 2,000 tracks or fewer to download it' });
+  // Not answered yet, or empty: nothing to offer.
+  assert.deepEqual(listOffer(browse({ q: 'x' }), null), { kind: 'none' });
+  assert.deepEqual(listOffer(browse({ q: 'x' }), 0), { kind: 'none' });
+  // Liked: always a list of its own, capped the same.
+  assert.deepEqual(listOffer({ kind: 'liked', sort: 'recent' }, 57), { kind: 'button', count: 57 });
+  assert.deepEqual(listOffer({ kind: 'liked', sort: 'recent' }, 2_001),
+    { kind: 'hint', text: 'Over 2,000 liked tracks: tick tracks to download' });
+  assert.deepEqual(listOffer({ kind: 'liked', sort: 'recent' }, 0), { kind: 'none' });
+  assert.deepEqual(listOffer({ kind: 'liked', sort: 'recent' }, 10, 5), { kind: 'hint', text: 'Over 5 liked tracks: tick tracks to download' });
+  assert.equal(listTitle('liked'), 'Download every liked track, all pages (several come as one zip)');
+  assert.equal(listTitle('browse'), 'Download every track in this list, all pages (several come as one zip)');
+  assert.equal(selectionTitle(1), 'Download the 1 ticked track (several come as one zip)');
 });
 
 test('a big download asks first: over 50 tracks or over 2 GB', () => {
@@ -62,56 +101,66 @@ test('the confirm states the count, the estimated size and the form', () => {
   );
 });
 
-const render = (props: Parameters<typeof DownloadControl>[0]) =>
-  renderToStaticMarkup(createElement(DownloadControl, props));
+const control = (props: Parameters<typeof DownloadControl>[0]) => renderToStaticMarkup(createElement(DownloadControl, props));
+const view = (props: Parameters<typeof ListDownloadView>[0]) => renderToStaticMarkup(createElement(ListDownloadView, props));
+const btnClass = (html: string, label: string) => {
+  const m = new RegExp(`<button[^>]*class="([^"]*)"[^>]*>(?:(?!</button>).)*${label}`).exec(html);
+  assert.ok(m, `no button reading ${label} in ${html}`);
+  return m[1];
+};
 
-test('the button: count, accent while rows are ticked, disabled and relabelled while pending', () => {
-  const idle = render({ count: 248, selectedCount: 0, pending: false, onClick: () => {} });
+test('one look everywhere: a small bordered button, never the accent; disabled and relabelled while pending', () => {
+  const idle = control({ count: 248, pending: false, onClick: () => {}, title: 't' });
   assert.match(idle, /> Download 248 tracks<\/button>/);
   assert.match(idle, /border-ink/);
+  assert.doesNotMatch(idle, /accent/);
   assert.doesNotMatch(idle, /disabled=""/);
-  assert.match(idle, /title="Download every track in this list, all pages/);
-
-  const ticked = render({ count: 1, selectedCount: 1, pending: false, onClick: () => {} });
-  assert.match(ticked, /> Download 1 track<\/button>/);
-  assert.match(ticked, /bg-\[var\(--accent\)\]/);
-  assert.match(ticked, /title="Download the 1 ticked track/);
-
-  const pending = render({ count: 248, selectedCount: 0, pending: true, onClick: () => {} });
+  assert.match(idle, /title="t"/);
+  const pending = control({ count: 248, pending: true, onClick: () => {}, title: 't' });
   assert.match(pending, /> Preparing…<\/button>/);
   assert.match(pending, /disabled=""/);
-
-  // Nothing listed yet (or an empty list): nothing to press.
-  assert.match(render({ count: null, selectedCount: 0, pending: false, onClick: () => {} }), /disabled=""/);
+  assert.match(control({ count: null, pending: false, onClick: () => {}, title: 't' }), /disabled=""/);
 });
 
-// ── The Liked list (Library → Tracks → Liked) ────────────────────────────────
-test('liked: ticked rows go as ids; none sends the view\'s sort for every liked track', () => {
-  assert.deepEqual(downloadBody(['x', 'y'], { kind: 'liked', sort: 'count' }), { ids: ['x', 'y'] });
-  assert.deepEqual(downloadBody([], { kind: 'liked', sort: 'count' }), { liked: { sort: 'count' } });
-  assert.deepEqual(downloadBody([], { kind: 'liked', sort: 'recent' }), { liked: { sort: 'recent' } });
+test('a list header shows the button, or its muted hint, or nothing', () => {
+  const btn = view({ offer: { kind: 'button', count: 57 }, kind: 'liked', pending: false, onClick: () => {} });
+  assert.match(btn, /> Download 57 tracks<\/button>/);
+  assert.match(btn, /title="Download every liked track, all pages/);
+  // The same element as the selection bar's: one component, one class list.
+  assert.equal(btnClass(btn, 'Download 57 tracks'),
+    btnClass(control({ count: 57, pending: false, onClick: () => {}, title: 'x' }), 'Download 57 tracks'));
+  const hint = view({ offer: { kind: 'hint', text: 'Filter the list or tick tracks to download' }, kind: 'browse', pending: false, onClick: () => {} });
+  assert.doesNotMatch(hint, /<button/);
+  assert.match(hint, /text-muted[^>]*>Filter the list or tick tracks to download</);
+  assert.equal(view({ offer: { kind: 'none' }, kind: 'browse', pending: false, onClick: () => {} }), '');
 });
 
-test('liked: the label counts every liked track, and ticked rows override it', () => {
-  // liked.total counts all pages, not the 50 on screen.
-  assert.equal(downloadLabel(downloadCount(0, 312), false), 'Download 312 tracks');
-  assert.equal(downloadLabel(downloadCount(3, 312), false), 'Download 3 tracks');
-  assert.equal(downloadTitle(0, 'liked'),
-    'Download every liked track, all pages (several come as one zip); tick rows to take only those');
-  assert.equal(downloadTitle(3, 'liked'), downloadTitle(3, 'browse'));
-  assert.match(downloadTitle(0, 'browse'), /^Download every track in this list/);
+test('the selection bar carries the download beside its own buttons, in their size and border', () => {
+  const html = renderToStaticMarkup(createElement(AddToPlaylistBar, {
+    count: 2, playlists: [], busy: false, onAdd: () => {}, onClear: () => {},
+    download: createElement(DownloadControl, { count: 2, pending: false, onClick: () => {}, title: selectionTitle(2) }),
+  }));
+  assert.match(html, /2 tracks selected/);
+  const order = ['Create playlist', 'Download 2 tracks', 'Clear selection'].map(l => html.indexOf(l));
+  const [add, dl, clear] = order as [number, number, number];
+  assert.ok(add > 0 && add < dl && dl < clear, String(order));
+  // Exactly the secondary sibling's look (Clear selection); the accent stays the bar's primary action's.
+  assert.equal(btnClass(html, 'Download 2 tracks'), btnClass(html, 'Clear selection'));
+  // Without a download slot, the bar is as before.
+  const bare = renderToStaticMarkup(createElement(AddToPlaylistBar, {
+    count: 1, playlists: [], busy: false, onAdd: () => {}, onClear: () => {},
+  }));
+  assert.doesNotMatch(bare, /Download/);
+});
 
-  const idle = render({ count: 312, selectedCount: 0, pending: false, onClick: () => {}, source: 'liked', sm: true });
-  assert.match(idle, /> Download 312 tracks<\/button>/);
-  assert.match(idle, /border-ink/);
-  assert.match(idle, /title="Download every liked track, all pages/);
-  assert.doesNotMatch(idle, /bg-\[var\(--accent\)\]/);
-  const ticked = render({ count: 3, selectedCount: 3, pending: false, onClick: () => {}, source: 'liked', sm: true });
-  assert.match(ticked, /> Download 3 tracks<\/button>/);
-  assert.match(ticked, /bg-\[var\(--accent\)\]/);
-  const pending = render({ count: 312, selectedCount: 0, pending: true, onClick: () => {}, source: 'liked', sm: true });
-  assert.match(pending, /disabled=""/);
-  assert.match(pending, /> Preparing…<\/button>/);
-  // No liked track yet: nothing to take.
-  assert.match(render({ count: 0, selectedCount: 0, pending: false, onClick: () => {}, source: 'liked' }), /disabled=""/);
+test('both list headers use the one shared component; ticked rows download from the shared bar only', () => {
+  const src = (p: string) => readFileSync(join(HERE, p), 'utf8');
+  for (const tab of ['tabs/BrowseTab.tsx', 'tabs/TracksTab.tsx']) {
+    const s = src(tab);
+    assert.match(s, /import \{ ListDownload \} from '\.\.\/DownloadButton';/, tab);
+    assert.match(s, /<ListDownload\b/, tab);
+    assert.doesNotMatch(s, /SelectionDownload|selected\b/, tab);
+  }
+  assert.match(src('../LibraryPanel.tsx'), /download=\{<SelectionDownload ids=\{/);
+  assert.doesNotMatch(src('BrowseFilters.tsx'), /actions/);
 });

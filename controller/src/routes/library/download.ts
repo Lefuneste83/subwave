@@ -6,7 +6,10 @@
 //   (`ids`), the Browse list's own filter (`filter`: every page of the list on
 //   screen, read with the list's own query, library-db browse.ts `filterAll`),
 //   or the Tracks tab's Liked list (`liked`: every liked track, in the view's
-//   order for its sort, read by the view's own `likedRows`). The selection is
+//   order for its sort, read by the view's own `likedRows`). A whole list never
+//   means the whole library: an unnarrowed Browse filter is refused, and so is
+//   any list above LIBRARY_DOWNLOAD_LIST_MAX tracks (400 `{ error, count, cap }`,
+//   music/download-policy.ts); ticked ids keep their own limit. The selection is
 //   resolved to track ids now and kept in memory
 //   under a random token; the answer is a short-lived signed link to it, plus
 //   the count and the estimated size (the walk's `file_size`) for the confirm.
@@ -49,10 +52,11 @@ import {
   MISSING_LIST_NAME, attachmentDisposition, missingListText, trackFileName, uniqueName, zipFileName,
   type NameParts,
 } from '../../music/download-names.js';
-import { libraryDownloadSchema, type LibraryDownloadBody } from '../../schemas/library-download.js';
+import { LIBRARY_DOWNLOAD_LIST_MAX, libraryDownloadSchema, type LibraryDownloadBody } from '../../schemas/library-download.js';
 import { signedLinkValid, signedQuery } from '../../util/signed-link.js';
 import { StoreZipWriter } from '../../util/zip-stream.js';
 import { browseFilterFromQuery, likedRows, likedViewFromQuery } from './browse.js';
+import { browseListNarrowed, listDownloadRefusal, type ListDownloadRefusal } from '../../music/download-policy.js';
 
 export const router = express.Router();
 
@@ -83,7 +87,20 @@ function remember(ids: string[], name: string, hints: Map<string, NameParts>, no
 /** Test hook: forget every selection. */
 export function _resetDownloadSelections(): void { selections.clear(); }
 
-function resolveSelection(body: LibraryDownloadBody): { ids: string[]; reindexing: boolean } {
+// The whole-list cap (LIBRARY_DOWNLOAD_LIST_MAX); a test lowers it rather than
+// seeding thousands of rows.
+let listCap = LIBRARY_DOWNLOAD_LIST_MAX;
+/** Test hook: set the whole-list cap. */
+export function _setListDownloadCap(n: number): void { listCap = n; }
+
+type Resolved =
+  | { ids: string[]; reindexing: boolean; refused?: undefined }
+  | { refused: ListDownloadRefusal };
+
+// A whole list (`filter`, `liked`) passes the guard of music/download-policy.ts:
+// an unnarrowed Browse list is refused before a row is read, and any list above
+// the cap once counted. Ticked `ids` keep only their schema limit.
+function resolveSelection(body: LibraryDownloadBody): Resolved {
   if (body.ids) {
     const seen = new Set<string>();
     const ids = body.ids.filter(id => (seen.has(id) ? false : (seen.add(id), true)));
@@ -91,13 +108,18 @@ function resolveSelection(body: LibraryDownloadBody): { ids: string[]; reindexin
   }
   if (body.liked) {
     // The view's own rows and order; it hides the station archive itself.
-    return { ids: likedRows(likedViewFromQuery(body.liked)).map(r => r.id), reindexing: false };
+    const ids = likedRows(likedViewFromQuery(body.liked)).map(r => r.id);
+    const refused = listDownloadRefusal({ narrowed: true, count: ids.length, cap: listCap });
+    return refused ? { refused } : { ids, reindexing: false };
   }
   const { opts } = browseFilterFromQuery(body.filter ?? {});
+  const unnarrowed = listDownloadRefusal({ narrowed: browseListNarrowed(opts), count: null, cap: listCap });
+  if (unnarrowed) return { refused: unnarrowed };
   const { rows, reindexing } = db.filterAll(opts);
   // The list hides station-archive rows an old tagger wrote (#273); so does this.
   const ids = rows.filter(r => !subsonic.isStationArchive(r)).map(r => r.id);
-  return { ids, reindexing: !!reindexing };
+  const refused = listDownloadRefusal({ narrowed: true, count: ids.length, cap: listCap });
+  return refused ? { refused } : { ids, reindexing: !!reindexing };
 }
 
 // Names for the ids the mirror does not hold, from the likes store's snapshot
@@ -128,7 +150,9 @@ router.post('/library/download', requireAdmin, validateBody(libraryDownloadSchem
   try {
     await library.load();
     await likes.load();
-    const { ids, reindexing } = resolveSelection(req.body as LibraryDownloadBody);
+    const resolved = resolveSelection(req.body as LibraryDownloadBody);
+    if (resolved.refused) return res.status(400).json(resolved.refused);
+    const { ids, reindexing } = resolved;
     if (ids.length === 0) return res.status(400).json({ error: 'no tracks to download' });
     let bytes = 0;
     let unsized = 0;

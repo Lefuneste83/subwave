@@ -540,8 +540,14 @@ export const voiceImportSchema = z.object({
 // - `liked`: the Tracks tab's Liked list, by its own view parameters (minus
 //   paging): every liked track, in the order the view shows for that sort.
 
-/** Ticked rows per request; a whole list goes as a `filter` instead. */
+/** Ticked rows per request: a deliberate choice, so a wide limit. */
 export const LIBRARY_DOWNLOAD_IDS_MAX = 10_000;
+
+/** A whole list (`filter` or `liked`) downloads at most this many tracks, and
+ *  a Browse list only once narrowed: never the whole library by accident
+ *  (music/download-policy.ts). The admin offers the list button under the same
+ *  number, read from the schema mirror. */
+export const LIBRARY_DOWNLOAD_LIST_MAX = 2_000;
 
 // Subsonic ids are short alphanumerics (the /cover/:id and preview rule).
 const trackId = z.string().regex(/^[\w-]{1,64}$/, 'bad track id');
