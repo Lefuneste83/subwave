@@ -9,18 +9,27 @@
 // 117.5, 123.0, ... about 5 % apart around 120): a 3 % step cannot be judged on
 // it, and a track it reads wrongly (a 125 BPM groove stored as 99.4) passes or
 // fails the step on a number that is not its tempo. So a Hot Mix judgement asks
-// the beat grid (library-db/grid.ts), in this order:
-//   - a grid written over the stored values (applied) → `tracks.bpm`, which is
-//     the grid's own tempo;
-//   - a measured grid whose main tempo is steady (grid-policy.ts steadyShare at
-//     GRID_WRITE_GATE.minSteadyShare, at most its maxBpm) but which was not
-//     written, typically held by its coverage on a metrical disagreement with
-//     the head (a grid that only refines the head's tempo is written,
-//     grid-policy.ts) → the grid's tempo;
-//   - anything else (no grid, an unsteady one, double time) → unknown, so the
-//     track is out of a Hot Mix pick like any unmeasured track.
-// Nothing stored is rewritten, and no other reader (a show without Hot Mix,
-// the effects, the tagging words) sees this: it is the Hot Mix view only.
+// the beat grid (library-db/grid.ts) one question: was it written over the
+// stored values (applied)? If so the tempo is `tracks.bpm`, which is the grid's
+// own; anything else is unknown, and the track is out of a Hot Mix pick like
+// any unmeasured track. Hot Mix thus reads the one decision grid-policy.ts
+// gridDecision makes, and adds none of its own: a grid passing it is applied
+// after every grid answer (and `npm run grid-apply` covers older rows), a grid
+// that refines the head's tempo included.
+//
+// What stays unknown, and why. A steady grid held by its coverage disagrees
+// with the head metrically (stored against grid at about double, half, 3/2,
+// 3/4 or some other ratio), and one of the two is wrong. An earlier resolver
+// trusted the grid there; the operator then blind-tested a random sample of
+// these tracks against a click at each tempo, and the grid was right about four
+// times in five, the stored tempo the rest (one of them a 99.4 stored against a
+// 125 grid, squarely in a house set's range). Four in five is not good enough
+// for a 3 % step: a wrong tempo puts a beat mix on a wrong grid, which is worse
+// than leaving the track out. A grid the operator reverted (applied -1) is
+// unknown too: the operator said it is wrong. A grid without the write (no grid,
+// unsteady, failed, double time) is unknown as before. Nothing stored is
+// rewritten, and no other reader (a show without Hot Mix, the effects, the
+// tagging words) sees this: it is the Hot Mix view only.
 //
 // The step limit. A pick may sit at most `maxStepPct` away from its anchor,
 // octave-safe: 64 BPM reads as 128, so a half-time breakdown track is not
@@ -64,8 +73,7 @@
 // own queueing is a manual action and stays exempt, as every manual trigger is.
 
 import { keyCompat, type Analysis } from './mix.js';
-import { GRID_WRITE_GATE, steadyShare } from './grid-policy.js';
-import type { GridSegment, GridApplied, GridStatus } from './library-db/grid.js';
+import type { GridApplied, GridStatus } from './library-db/grid.js';
 import { repairHotMix, type HotMixCurvePoint } from '../schemas/show.js';
 
 // Within this distance of the curve's tempo a candidate is on target: offered
@@ -98,22 +106,18 @@ export function takesRequests(show: HotMixShow): boolean {
 
 const usableBpm = (bpm: unknown): number | null => (finite(bpm) && bpm > 0 ? bpm : null);
 
-// What the resolver reads of one track: its stored tempo and its grid row
-// (null when the track has none). Read by library.mixTempoFor.
+// What the resolver reads of one track: its stored tempo and its grid row's
+// state (null when the track has none). Read by library.mixTempoFor.
 export interface MixTempoFacts {
   bpm: number | null;
-  grid: { status: GridStatus; bpm: number | null; applied: GridApplied; segments: GridSegment[]; decodedMs: number | null } | null;
+  grid: { status: GridStatus; applied: GridApplied } | null;
 }
 
-// The tempo a Hot Mix judgement may use (header), or null for unknown.
+// The tempo a Hot Mix judgement may use (header): the applied grid's, which is
+// the stored tempo, or null for unknown.
 export function mixTempoOf(f: MixTempoFacts | null | undefined): number | null {
   const g = f?.grid;
-  if (!g || g.status !== 'ok') return null;
-  if (g.applied === 1) return usableBpm(f!.bpm);
-  const bpm = usableBpm(g.bpm);
-  if (bpm == null || bpm > GRID_WRITE_GATE.maxBpm || !g.segments.length) return null;
-  const steady = steadyShare({ bpm, segments: g.segments, decodedMs: g.decodedMs });
-  return steady != null && steady >= GRID_WRITE_GATE.minSteadyShare ? bpm : null;
+  return g && g.status === 'ok' && g.applied === 1 ? usableBpm(f!.bpm) : null;
 }
 
 // `to` moved by whole octaves to sit nearest `from`: the tempo a mix would

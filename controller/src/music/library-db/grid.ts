@@ -247,52 +247,34 @@ export function getGrid(id: string, d: Database.Database = requireDb()): TrackGr
 }
 
 // What hot-mix-policy.ts mixTempoOf reads of one track: its stored tempo and
-// the grid's tempo, state and segments. One primary-key read; null when the
-// track has no library row. Typed here, the policy's MixTempoFacts.
+// its grid row's state. One primary-key read; null when the track has no
+// library row. Typed here, the policy's MixTempoFacts.
 export interface MixTempoRow {
   bpm: number | null;
-  grid: { status: GridStatus; bpm: number | null; applied: GridApplied; segments: GridSegment[]; decodedMs: number | null } | null;
+  grid: { status: GridStatus; applied: GridApplied } | null;
 }
+
+const appliedOf = (v: number | null): GridApplied => (v === 1 ? 1 : v === -1 ? -1 : 0);
 
 export function mixTempoFacts(id: string): MixTempoRow | null {
   const r = requireDb().prepare(
-    `SELECT t.bpm AS bpm, g.status AS g_status, g.bpm AS g_bpm, g.applied AS g_applied,
-       g.segments_json AS g_segments, g.decoded_ms AS g_decoded
+    `SELECT t.bpm AS bpm, g.status AS g_status, g.applied AS g_applied
      FROM tracks t LEFT JOIN track_grid g ON g.track_id = t.id WHERE t.id = ?`,
-  ).get(id) as {
-    bpm: number | null; g_status: GridStatus | null; g_bpm: number | null; g_applied: number | null;
-    g_segments: string | null; g_decoded: number | null;
-  } | undefined;
+  ).get(id) as { bpm: number | null; g_status: GridStatus | null; g_applied: number | null } | undefined;
   if (!r) return null;
-  return {
-    bpm: r.bpm,
-    grid: r.g_status == null ? null : {
-      status: r.g_status, bpm: r.g_bpm, applied: r.g_applied === 1 ? 1 : r.g_applied === -1 ? -1 : 0,
-      segments: parseSegments(r.g_segments), decodedMs: r.g_decoded,
-    },
-  };
+  return { bpm: r.bpm, grid: r.g_status == null ? null : { status: r.g_status, applied: appliedOf(r.g_applied) } };
 }
 
-// Every grid's MixTempoRow, for the show editor's Hot Mix count: one pass over
-// the measured grids (status ok), by id. A track with no 'ok' grid has no mix
-// tempo, so it needs no row here.
+// Every applied grid's MixTempoRow, for the show editor's Hot Mix count: one
+// pass, by id. Only an applied grid (status ok) gives a mix tempo, so no other
+// track needs a row here.
 export function measuredMixTempoFacts(): Map<string, MixTempoRow> {
   const rows = requireDb().prepare(
-    `SELECT g.track_id AS id, t.bpm AS bpm, g.bpm AS g_bpm, g.applied AS g_applied,
-       g.segments_json AS g_segments, g.decoded_ms AS g_decoded
-     FROM track_grid g JOIN tracks t ON t.id = g.track_id WHERE g.status = 'ok'`,
-  ).all() as Array<{ id: string; bpm: number | null; g_bpm: number | null; g_applied: number | null; g_segments: string | null; g_decoded: number | null }>;
+    `SELECT g.track_id AS id, t.bpm AS bpm
+     FROM track_grid g JOIN tracks t ON t.id = g.track_id WHERE g.status = 'ok' AND g.applied = 1`,
+  ).all() as Array<{ id: string; bpm: number | null }>;
   const out = new Map<string, MixTempoRow>();
-  for (const r of rows) {
-    out.set(r.id, {
-      bpm: r.bpm,
-      grid: {
-        status: 'ok', bpm: r.g_bpm, applied: r.g_applied === 1 ? 1 : r.g_applied === -1 ? -1 : 0,
-        // An applied grid answers from tracks.bpm: its segments are not read.
-        segments: r.g_applied === 1 ? [] : parseSegments(r.g_segments), decodedMs: r.g_decoded,
-      },
-    });
-  }
+  for (const r of rows) out.set(r.id, { bpm: r.bpm, grid: { status: 'ok', applied: 1 } });
   return out;
 }
 

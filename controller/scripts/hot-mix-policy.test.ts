@@ -37,16 +37,26 @@ function grid(bpm: number, { steady = 0.95, applied = 0 as -1 | 0 | 1, status = 
 
 test('resolver: an applied grid answers with the stored tempo, which is the grid\'s', () => {
   assert.equal(mixTempoOf({ bpm: 124.2, grid: grid(124.2, { applied: 1 }) }), 124.2);
+  // A refinement of the head's estimate is applied like any grid the write
+  // decision passes: its tempo is the stored one.
+  assert.equal(mixTempoOf({ bpm: 124, grid: grid(124, { applied: 1 }) }), 124);
   // Applied but the stored tempo is gone: nothing to trust.
   assert.equal(mixTempoOf({ bpm: null, grid: grid(124.2, { applied: 1 }) }), null);
+  assert.equal(mixTempoOf({ bpm: 0, grid: grid(124.2, { applied: 1 }) }), null);
 });
 
-test('resolver: a steady grid held only by its coverage answers with the grid\'s tempo', () => {
+test('resolver: a steady grid held by its coverage on a metrical disagreement is unknown', () => {
   // The head estimate read 99.4 over the first 40 s; the whole-track grid
-  // holds 125 on most of the track but was not written (coverage under 0.8).
-  assert.equal(mixTempoOf({ bpm: 99.38, grid: grid(125, { steady: 0.917 }) }), 125);
-  // An operator-reverted grid is not written either; its steady tempo still judges a mix.
-  assert.equal(mixTempoOf({ bpm: 99.38, grid: grid(125, { applied: -1 }) }), 125);
+  // holds 125 on most of the track but was not written (coverage under 0.8,
+  // and 125 is no refinement of 99.4). Neither number is trusted for a 3 % step.
+  assert.equal(mixTempoOf({ bpm: 99.38, grid: grid(125, { steady: 0.917 }) }), null);
+  assert.equal(mixTempoOf({ bpm: 62, grid: grid(124) }), null);
+  assert.equal(mixTempoOf({ bpm: 82.5, grid: grid(124) }), null);
+});
+
+test('resolver: an operator-reverted grid is unknown, however steady', () => {
+  assert.equal(mixTempoOf({ bpm: 99.38, grid: grid(125, { applied: -1 }) }), null);
+  assert.equal(mixTempoOf({ bpm: 125, grid: grid(125, { applied: -1 }) }), null);
 });
 
 test('resolver: an unsteady grid, no grid, a failed one or double time is unknown', () => {
@@ -54,18 +64,17 @@ test('resolver: an unsteady grid, no grid, a failed one or double time is unknow
   assert.equal(mixTempoOf({ bpm: 123.05, grid: null }), null);
   assert.equal(mixTempoOf({ bpm: 123.05, grid: { ...grid(125), status: 'unmeasurable' } }), null);
   assert.equal(mixTempoOf({ bpm: 123.05, grid: { ...grid(125), status: 'failed' } }), null);
+  // A non-ok row never answers, even one still marked applied.
+  assert.equal(mixTempoOf({ bpm: 123.05, grid: { ...grid(123.05, { applied: 1 }), status: 'failed' } }), null);
   assert.equal(mixTempoOf({ bpm: 110, grid: grid(220) }), null);
   assert.equal(mixTempoOf(null), null);
-  // The steady share is grid-policy's: every segment within its band counts.
-  const split = grid(125, { steady: 0.35 });
-  split.segments.push({ anchorMs: 200_000, periodUs: 60_000_000 / 126, beats: 200, downbeatMs: null });
-  assert.equal(mixTempoOf({ bpm: 99.38, grid: split }), 125);
+  assert.equal(mixTempoOf(undefined), null);
 });
 
 test('resolver: a resolved tempo is judged octave-safe like any other', () => {
   const w = tempoWindowFor(ON({ curve: [{ at: 0, bpm: 124 }] }), null, 0)!;
-  assert.equal(fitsTempoWindow(mixTempoOf({ bpm: 99.38, grid: grid(62.5) }), w), true);
-  assert.equal(fitsTempoWindow(mixTempoOf({ bpm: 99.38, grid: grid(125) }), w), true);
+  assert.equal(fitsTempoWindow(mixTempoOf({ bpm: 62.5, grid: grid(62.5, { applied: 1 }) }), w), true);
+  assert.equal(fitsTempoWindow(mixTempoOf({ bpm: 125, grid: grid(125, { applied: 1 }) }), w), true);
 });
 
 // ─── the step ───────────────────────────────────────────────────────────────

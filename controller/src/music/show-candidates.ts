@@ -103,7 +103,8 @@ export async function diagnoseShowCandidates(show: any): Promise<ShowCandidateDi
 }
 
 // A DJ Hot Mix show judges tempo only through the Hot Mix resolver (music/
-// hot-mix-policy.ts mixTempoOf): how much of the library it can judge, and,
+// hot-mix-policy.ts mixTempoOf, the applied grid's tempo): how much of the
+// library it can judge, and,
 // with a curve, how much of that ever fits its windows. Null for any other show.
 export function hotMixTempoNote(show: any, libraryRows: readonly Candidate[], tempos: Map<string, number> = library.mixTempoById()): string | null {
   const hm = hotMixOf(show);
@@ -116,7 +117,7 @@ export function hotMixTempoNote(show: any, libraryRows: readonly Candidate[], te
     known++;
     if (withinCurveReach(bpm, hm)) reach++;
   }
-  const head = `Hot Mix judges tempo on the measured beat grid only: ${known} of ${libraryRows.length} library tracks have a tempo it trusts, and the rest are left out of its picks.`;
+  const head = `Hot Mix judges tempo on the applied beat grid only: ${known} of ${libraryRows.length} library tracks have a tempo it trusts, and the rest are left out of its picks.`;
   if (!hm.curve.length) return head;
   const lo = Math.min(...hm.curve.map((p) => p.bpm));
   const hi = Math.max(...hm.curve.map((p) => p.bpm));
