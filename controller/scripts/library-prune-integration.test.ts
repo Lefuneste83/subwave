@@ -136,10 +136,9 @@ for (const incomplete of ['failed-album', 'malformed-album'] as const) {
     for (const [id, vector] of before) assertPreserved(id, vector);
     assert.equal(db.getTrack('keep-1')?.title, 'Fresh keep-1');
     assert.equal(db.getTrack('keep-2')?.title, 'Old keep-2');
-    assert.match(output, /Library walk incomplete/);
-    assert.match(output, /\[event\] \{"kind":"warning"/);
-    assert.match(output, /no analysis backend/);
-    assert.match(output, /\[analyze\] stats:/);
+    assert.match(output, /^⚠ The library walk stopped after 1 track \(.*\), so nothing was removed this run\.$/m);
+    assert.match(output, /^⚠ No audio analysis this run: the analyzer at 127\.0\.0\.1:1 did not answer\./m);
+    assert.match(output, /^■ Finished in /m, 'the run reached its end');
     assert.deepEqual(requests, ['getAlbumList2', 'getAlbum', 'getAlbum']);
   });
 }
@@ -154,8 +153,8 @@ test('a complete analyzer --walk permits ordinary deletion and reaches analysis'
   assertPreserved('keep-1', before);
   assert.equal(db.getTrack('keep-1')?.title, 'Fresh keep-1');
   assert.equal(db.getTrack('keep-2')?.title, 'Fresh keep-2');
-  assert.match(output, /no analysis backend/);
-  assert.match(output, /\[analyze\] stats:/);
+  assert.match(output, /^⚠ No audio analysis this run: the analyzer at 127\.0\.0\.1:1 did not answer\./m);
+  assert.match(output, /^■ Finished in /m, 'the run reached its end');
 });
 
 for (const confirmMassPrune of [false, true]) {

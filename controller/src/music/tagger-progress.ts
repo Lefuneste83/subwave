@@ -32,7 +32,10 @@ export interface TaggerProgress {
   updatedAt: string;
 }
 
+// Only for the controller (eventsAreRelayed): from a shell the run log's own
+// progress lines say the same, and a JSON line every few tracks buried them.
 export function reportProgress(p: Omit<TaggerProgress, 'updatedAt'>): void {
+  if (!eventsAreRelayed()) return;
   console.log(PROGRESS_PREFIX + JSON.stringify({ ...p, updatedAt: new Date().toISOString() }));
 }
 
@@ -79,6 +82,7 @@ export function reportRotation(r: Omit<TaggerRotation, 'at'>): void {
 export const CATALOGUE_PREFIX = '[catalogue] ';
 
 export function reportCatalogueReady(walked: number): void {
+  if (!eventsAreRelayed()) return; // only the controller reads it
   console.log(CATALOGUE_PREFIX + JSON.stringify({ walked }));
 }
 
@@ -99,36 +103,16 @@ export function eventsAreRelayed(env: NodeJS.ProcessEnv = process.env): boolean 
 
 // A run-log line (music/run-log-format.ts) carries its own mark or its own
 // indentation: the panel and the log file add no kind prefix to it.
-// MIRROR: web/components/admin/LibraryTaggingPanel.tsx `carriesOwnMark`.
+// MIRROR: web/lib/runLogLine.ts `carriesOwnMark`.
 const OWN_MARK_RE = /^(?:\s|━━|[▶▷✔⚠✖…■])/;
 export function carriesOwnMark(text: string): boolean {
   return OWN_MARK_RE.test(text);
 }
 
-// Bind an event logger to a module's console tag ('tag' / 'analyze'): the
-// terse `[tag] …` line in a shell, the event sentinel under the controller
-// (eventsAreRelayed). New status lines go through music/run-log.ts instead,
-// which words them in the run log's one format.
-export function makeEventLogger(prefix: string) {
-  return (kind: TaggerEventKind, text: string, opts: { hold?: boolean } = {}): void => {
-    // Collapse newlines: one event is one line.
-    const line = text.replace(/\s*\n\s*/g, ' ');
-    if (eventsAreRelayed()) reportEvent({ kind, text: line, ...opts });
-    else console.log(`[${prefix}] ${line}`);
-  };
-}
-
-// Slowest-first, zero-duration phases dropped. Shared by the CLI breakdown line
-// and the 'done' event's `timings` so the two can't drift.
+// Slowest-first, zero-duration phases dropped: the 'done' event's `timings`,
+// which the admin panel's "time per phase" reads.
 export function sortedPhaseTimings(timings: Record<string, number>): Array<[string, number]> {
   return Object.entries(timings)
     .filter(([, ms]) => ms > 0)
     .sort((a, b) => b[1] - a[1]);
-}
-
-// e.g. "seed 480s · learn 360s · embed 120s"; '' when nothing was timed.
-export function formatPhaseBreakdown(timings: Record<string, number>): string {
-  return sortedPhaseTimings(timings)
-    .map(([p, ms]) => `${p} ${Math.round(ms / 1000)}s`)
-    .join(' · ');
 }

@@ -234,7 +234,17 @@ test('a tag run re-embeds what phase 5 marked, then re-votes only this run\'s pr
   addTrack('old-prop'); tag('old-prop', 'calm', 'propagated'); embedRow('old-prop', THIN);
   embedded.splice(0);
 
-  await tagRun();
+  const first = await tagRun();
+  // The run log opens with one banner naming every step in order, and the
+  // walk is step 1 (music/run-log.ts).
+  assert.match(first, /^━━ Tagging run · \d+ steps$/m, first);
+  assert.match(first, /^ {4}1\. Read the music library$/m);
+  assert.match(first, /^ {4}Machines : Navidrome at 127\.0\.0\.1:\d+ · .*analyzer at 127\.0\.0\.1:\d+$/m);
+  assert.match(first, /^▶ \[1\/\d+\] Read the music library$/m);
+  // Every status line is said once: no line of the run log repeats.
+  const said = first.split('\n').filter(l => /^[▶▷✔⚠✖■]/.test(l));
+  assert.equal(new Set(said).size, said.length, said.join('\n'));
+  if (process.env.RUN_LOG_SAMPLE) writeFileSync(process.env.RUN_LOG_SAMPLE, first);
 
   // Phase 1 embedded the new tracks before phase 5 measured them; the trailing
   // re-embed rebuilt them, and old-prop, which this run's phase 5 also marked.

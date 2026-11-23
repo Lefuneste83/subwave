@@ -37,7 +37,9 @@ import type { WhereKind } from '../src/music/acoustics-plan.js';
 
 // ---- fake analyzer sidecar + Navidrome stream ------------------------------
 const requests: Array<Record<string, unknown>> = [];
-const clapCapable = true;
+let clapCapable = true;
+// /health analyze_audio_error: why CLAP did not load (null: the key is absent).
+let audioError: string | null = null;
 let vocalCapable = false;
 // Facet protocol on the stub (off = an analyzer that predates it).
 let facetsCapable = false;
@@ -51,6 +53,7 @@ function handler(req: IncomingMessage, res: ServerResponse) {
     res.end(JSON.stringify({
       ok: true, engines: ['analyze'],
       analyze_audio_capable: clapCapable, analyze_vocal_capable: vocalCapable,
+      ...(audioError ? { analyze_audio_error: audioError } : {}),
       ...(facetsCapable ? { analyze_facets_capable: true, analyze_ranged_tail_capable: true } : {}),
     }));
     return;
@@ -639,7 +642,7 @@ test('URL fallback omits stems and leaves a stems-only job retryable', async () 
   const lines: string[] = [];
   const log = console.log;
   console.log = (...a: unknown[]) => { lines.push(a.map(String).join(' ')); log(...a); };
-  const said = () => lines.filter((l) => l.startsWith('[analyze] Stems skipped for') && l.includes("station's state folder"));
+  const said = () => lines.filter((l) => l.startsWith('⚠ Stems skipped for') && l.includes("station's state folder"));
   try {
     requests.length = 0;
     const stats = await runAnalysisPass({ plan: facetPlan([id], ['stems']) });
@@ -660,6 +663,79 @@ test('URL fallback omits stems and leaves a stems-only job retryable', async () 
     console.log = log;
     rejectSharedPath = false;
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The analyzer's own view of the stems share: a cache root it sees with no
+// marker answers each stems request `unavailable`, naming the marker. That
+// used to read as `ok=0 fail=0` with the reason only in the analyzer's log.
+test('a stems share missing on the analyzer is said once, plainly, and no more stems are asked this pass', async () => {
+  const stemCacheStore = await import('../src/music/stem-cache.js');
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  const root = stemCacheStore.stemsRoot();
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, stemCacheStore.STEMS_MARKER), '');
+  const share = ['share-1', 'share-2', 'share-3', 'share-4'];
+  for (const id of share) db.upsertTrackMeta(id, { title: id, duration: 214 });
+  facetAnswers = { stems: { status: 'unavailable', reason: 'stems root has no .subwave-stems marker (share not mounted here?)' } };
+  const lines: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => { lines.push(a.map(String).join(' ')); };
+  try {
+    requests.length = 0;
+    const stats = await runAnalysisPass({ plan: facetPlan(share, ['head', 'stems']) });
+    const askedStems = requests.filter((r) => Array.isArray(r.facets) && (r.facets as string[]).includes('stems'));
+    assert.equal(askedStems.length, 1, 'only the request that found out asked for stems');
+    assert.equal(requests.length, share.length, 'every track still gets the rest of its work');
+    const said = lines.filter((l) => l.startsWith('✖ Stems not saved: the analyzer cannot see the stems share'));
+    assert.equal(said.length, 1, lines.join('\n'));
+    assert.match(said[0], new RegExp(`\\(${root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} has no \\.subwave-stems marker\\)`));
+    assert.match(said[0], /Mount the share on the analyzer host, then run Start tagging again\.$/);
+    assert.equal(stats.analyzed, share.length);
+    const mixed = lines.find((l) => /^[✔⚠✖] \[\d+\/\d+\] /.test(l)) ?? '';
+    assert.match(mixed, /^⚠ .*stems not saved for 4 \(they wait for the stems share\)/, lines.join('\n'));
+    // Nothing stamped: the stems stay due for the next run.
+    assert.equal(facetPlan(share, ['stems'], 'needs').items.length, share.length);
+
+    // A stems-only pass: never a silent zero.
+    lines.length = 0;
+    requests.length = 0;
+    await runAnalysisPass({ plan: facetPlan(share, ['stems']) });
+    assert.equal(requests.length, 1, 'stems are asked once, then the pass stops asking');
+    const result = lines.find((l) => /^[✔⚠✖] \[\d+\/\d+\] /.test(l)) ?? '';
+    assert.match(result, /0 done, 0 failed, 4 left for later \(their stems wait for the stems share\)/, lines.join('\n'));
+    assert.ok(result.startsWith('⚠'), result);
+  } finally {
+    console.log = log;
+    facetAnswers = {};
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// A model the analyzer failed to load (/health analyze_audio_error) is named
+// at the step that needed it, with its message and the fix, never only in an
+// admin banner.
+test('a CLAP load failure is said under the analysis step, with the cause and the fix', async () => {
+  const { resetRunLog } = await import('../src/music/run-log.js');
+  resetRunLog();
+  clapCapable = false;
+  audioError = 'CUDA out of memory. Tried to allocate 20.00 MiB (GPU 0; 7.79 GiB total capacity)';
+  analyzer._resetBackendCacheForTests();
+  db.upsertTrackMeta('clap-oom', { title: 'clap-oom', duration: 214 });
+  const lines: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => { lines.push(a.map(String).join(' ')); };
+  try {
+    await runAnalysisPass({ audioBackfill: true });
+    const step = lines.findIndex((l) => /^[▶▷] \[\d+\/\d+\] /.test(l));
+    const said = lines.findIndex((l) => l.startsWith('✖ Sounds-like fingerprint skipped: CLAP failed to load on the analyzer (CUDA out of memory.'));
+    assert.ok(step >= 0 && said > step, lines.join('\n'));
+    assert.match(lines[said], /Restart the analyzer once the GPU is free/);
+  } finally {
+    console.log = log;
+    clapCapable = true;
+    audioError = null;
+    analyzer._resetBackendCacheForTests();
   }
 });
 

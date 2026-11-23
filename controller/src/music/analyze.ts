@@ -15,7 +15,10 @@ import { stemStampDecision } from './stem-stamp-policy.js';
 import { runAudioMoodPass } from './audio-moods.js';
 import { runAudioDescriptorPass } from './audio-descriptor-pass.js';
 import { audioEnergyOptions, runAudioEnergyPass } from './propagated-energy.js';
-import { reportProgress, makeEventLogger } from './tagger-progress.js';
+import { reportProgress } from './tagger-progress.js';
+import * as runlog from './run-log.js';
+import * as F from './run-log-format.js';
+import { analysisBackendWhere, analyzerWhere } from './run-log-where.js';
 import { quietAfterMinutes, quietGateDecision, quietOnlyEnabled, type QuietState } from './analyze-quiet-pure.js';
 import { dispatchAnalysis, type DispatchOutcome } from './analyze-dispatch.js';
 import {
@@ -47,8 +50,67 @@ class OptInFailure extends Error {
 }
 import { leadIds, planRegularRun, regularRunFacets, type RegularRunWants } from './regular-run-plan.js';
 
-// Status events for the panel, mirrored to the `[analyze] …` console line.
-const logEvent = makeEventLogger('analyze');
+// The run log's analysis steps (run-log.ts). A tag run and a CLI analyze run
+// plan them in their banners (analysisStepDefs); each pass below opens its
+// own step, and a step a pass never reaches is listed as skipped.
+export const ANALYSIS_STEP = {
+  lead: 'analysis.lead',
+  models: 'analysis.models',
+  score: 'analysis.score',
+  grid: 'analysis.grid',
+  structure: 'analysis.structure',
+  backlog: 'analysis.backlog',
+} as const;
+type AnalysisStepId = typeof ANALYSIS_STEP[keyof typeof ANALYSIS_STEP];
+
+// What a regular run will ask for, by the operator's switches (no probe): the
+// model lane's products name its step.
+function laneWants(opts: { audioBackfill?: boolean; vocalBackfill?: boolean }): { clap: boolean; vocal: boolean; stems: boolean } {
+  let stems = false;
+  try { stems = settings.get()?.audio?.stemCache === true; } catch { /* unreadable: off */ }
+  return { clap: opts.audioBackfill ?? audioBackfillDefault(), vocal: opts.vocalBackfill ?? vocalBackfillDefault(), stems };
+}
+
+// The analysis steps a regular run plans, in the order it runs them.
+export function analysisStepDefs(opts: { audioBackfill?: boolean; vocalBackfill?: boolean } = {}): runlog.StepDef[] {
+  const wants = laneWants(opts);
+  const wholeFile = config.analyzer.wholeFile;
+  return [
+    ...(wholeFile ? [{ id: ANALYSIS_STEP.lead, title: F.STEP_TITLE.lead }] : []),
+    { id: ANALYSIS_STEP.models, title: F.modelLaneTitle(wants) },
+    ...(wants.clap ? [{ id: ANALYSIS_STEP.score, title: F.STEP_TITLE.score }] : []),
+    ...(beatGridWanted()
+      ? [{ id: ANALYSIS_STEP.grid, title: F.STEP_TITLE.grid }, { id: ANALYSIS_STEP.structure, title: F.STEP_TITLE.structure }]
+      : []),
+    ...(wholeFile ? [{ id: ANALYSIS_STEP.backlog, title: F.STEP_TITLE.backlog }] : []),
+  ];
+}
+
+const STEP_DEFAULT_TITLE: Record<AnalysisStepId, string> = {
+  [ANALYSIS_STEP.lead]: F.STEP_TITLE.lead,
+  [ANALYSIS_STEP.models]: 'Analyse the audio',
+  [ANALYSIS_STEP.score]: F.STEP_TITLE.score,
+  [ANALYSIS_STEP.grid]: F.STEP_TITLE.grid,
+  [ANALYSIS_STEP.structure]: F.STEP_TITLE.structure,
+  [ANALYSIS_STEP.backlog]: F.STEP_TITLE.backlog,
+};
+
+function analysisStep(id: AnalysisStepId): runlog.Step {
+  return runlog.step(id, STEP_DEFAULT_TITLE[id]);
+}
+
+// Said once per process: the analyzer did not answer.
+let unreachableSaid = false;
+function skipUnreachable(step: runlog.Step): void {
+  if (!unreachableSaid) {
+    unreachableSaid = true;
+    runlog.problem('warning', F.analyzerUnreachableProblem(F.hostOf(analyzer.answeringBase() || config.analyzer.urls[0])));
+  }
+  step.skip('the analyzer did not answer');
+}
+
+// Said once per process: tracks left out after repeated failures.
+let excludedSaid = false;
 
 export interface AnalyzeOptions {
   limit?: number;        // cap tracks this run (default: all that need it)
@@ -75,6 +137,11 @@ export interface AnalyzeOptions {
   // the sidecar (stage-policy.ts), so a track is streamed once per run. Set
   // by runPlannedRegularPass only.
   stage?: StageRun;
+  // The run-log step this pass reports as (run-log.ts); default the model lane.
+  step?: AnalysisStepId;
+  // Problems found before the pass (a model that failed to load, a stems
+  // share offline), said under its step's header.
+  notices?: Array<[F.ProblemKind, string]>;
 }
 
 interface StageRun {
@@ -176,7 +243,7 @@ async function waitForQuiet(gate: QuietGate, progress: { done: number; total: nu
     if (d.proceed) {
       if (gate.paused) {
         gate.paused = false;
-        logEvent('info', 'Stream is quiet — resuming analysis');
+        runlog.note('The stream is quiet again: analysis resumes.');
         // The per-track reporter only fires every 25 tracks, so restore now.
         reportProgress({ phase: 'analyze', label: 'Analysing audio', done: progress.done, total: progress.total });
       }
@@ -186,10 +253,7 @@ async function waitForQuiet(gate: QuietGate, progress: { done: number; total: nu
     const why = count && count > 0 ? `${count} listening` : 'waiting out the quiet window';
     if (!gate.paused) {
       gate.paused = true;
-      logEvent(
-        'info',
-        `Analysis paused — ${why}; resumes after ${quiet.minutes} min with no listeners`,
-      );
+      runlog.note(`Analysis paused (${why}): it resumes after ${quiet.minutes} min with no listeners.`);
     }
     reportProgress({
       phase: 'analyze',
@@ -222,26 +286,54 @@ export interface AnalyzeStats {
 // Provenance label stamped into audio_embedding_meta; the worker owns the model.
 const AUDIO_MODEL_LABEL = process.env.CLAP_MODEL || 'laion-clap';
 
-// Best-effort: a mood or descriptor failure must never fail the pass; the next
-// one retries.
+// The scoring step: zero-shot audio moods and sound descriptors over the
+// stored sounds-like vectors, then the library-wide energy check over the
+// cosines. Best-effort: a mood or descriptor failure must never fail the pass;
+// the next one retries.
 async function scoreAudioMoods(): Promise<void> {
+  const vectors = db.audioVectorCount();
+  // A run that did not plan the step (sounds-like off) and has no vectors says
+  // nothing, unless the energy check below finds work.
+  const planned = runlog.runLog.planned(ANALYSIS_STEP.score);
+  let st: runlog.Step | null = planned || vectors > 0 ? analysisStep(ANALYSIS_STEP.score) : null;
+  const step = (): runlog.Step => (st ??= analysisStep(ANALYSIS_STEP.score));
+  if (st && vectors > 0) {
+    st.start({
+      runsOn: `${analyzerWhere(analyzer.answeringBase())} (CLAP text model) · energies on this controller`,
+      scope: F.scoreScope({ vectors, moods: db.idsNeedingAudioMoods().length, descriptors: db.idsNeedingAudioDescriptors().length }),
+    });
+  }
+  const failed = (what: string, err: any): F.ScoreStats => {
+    step().start();
+    runlog.problem('warning', `${what} failed (the next run retries): ${F.shortenAnalyzerMessage(String(err?.message || err))}`);
+    return { scored: 0, skipped: 'failed' };
+  };
+  let moods: F.ScoreStats;
+  let descriptors: F.ScoreStats;
   try {
-    await runAudioMoodPass();
+    moods = await runAudioMoodPass();
   } catch (err: any) {
-    console.error(`[audio-moods] pass failed (non-fatal): ${err?.message || err}`);
+    moods = failed('Scoring audio moods', err);
   }
   try {
-    await runAudioDescriptorPass();
+    descriptors = await runAudioDescriptorPass();
   } catch (err: any) {
-    console.error(`[audio-descriptors] pass failed (non-fatal): ${err?.message || err}`);
+    descriptors = failed('Scoring sound descriptors', err);
   }
   // Must run AFTER the mood pass, which writes the cosines it calibrates
   // against. Separately wrapped so a failure here doesn't cost the mood labels.
+  let energy: string | null = null;
   try {
-    runAudioEnergyPass(audioEnergyOptions(settings.get()));
+    const r = F.energyResult(runAudioEnergyPass(audioEnergyOptions(settings.get())));
+    energy = 'summary' in r ? r.summary : null;
   } catch (err: any) {
-    console.error(`[audio-energy] pass failed (non-fatal): ${err?.message || err}`);
+    failed('The energy check', err);
   }
+  if (!st?.started && energy == null) {
+    st?.skip('no sounds-like fingerprints to score yet');
+    return;
+  }
+  step().done({ summary: F.scoreSummary({ moods, descriptors, energy }) });
 }
 
 async function lyricVocalFor(id: string, wanted: boolean): Promise<LyricVocalResult | null> {
@@ -297,9 +389,9 @@ function hasMeasuredTail(t: { outro?: unknown; tailSilenceMs?: number | null } |
 // not started when it was asked, and is asked again next run.
 export function wholeFileSkipNotice(capability: boolean | null): string {
   return capability === false
-    ? 'Whole-file analysis is on, but the analyzer reports it cannot run it (no ffmpeg in its image) — rebuild the analyzer'
-    : 'Whole-file analysis is on, but the analyzer has not said whether it can run it — an image that predates it ' +
-      '(rebuild the analyzer), or one whose workers were still starting; skipped this run, asked again next run';
+    ? 'the analyzer reports it cannot measure it (no ffmpeg in its image); rebuild the analyzer'
+    : 'the analyzer has not said whether it can measure it: an image that predates it ' +
+      '(rebuild the analyzer), or one whose workers were still starting; asked again next run';
 }
 
 // Stems need the analyzer to read the station's own state folder (the stem
@@ -310,9 +402,7 @@ export function wholeFileSkipNotice(capability: boolean | null): string {
 // with the count, never per track. Before this a mount that failed at the
 // analyzer host's boot cost every new track its stems for hours, unsaid.
 export function sharedStateNotice(tracks: number, stateRoot: string): string {
-  return `Stems skipped for ${tracks.toLocaleString('en-GB')} track${tracks === 1 ? '' : 's'}: the analyzer cannot read ` +
-    `the station's state folder (${stateRoot}) — its shared mount on the analyzer host is down or points elsewhere. ` +
-    'Mount it there and restart the analyzer; the tracks are asked again next run';
+  return F.sharedStateProblem(tracks, stateRoot);
 }
 
 export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<AnalyzeStats> {
@@ -336,14 +426,17 @@ export async function runAnalysisPass(opts: AnalyzeOptions = {}): Promise<Analyz
   // track's bpm/key back for hours. A failing slice costs its own figures,
   // never the regular pass.
   const lead = await runWholeFileBackfill({
-    limit: opts.limit, ids: db.needsAnalysisIds(opts.limit), label: 'for the tracks about to be analysed', noticeSkip: false,
+    limit: opts.limit, ids: db.needsAnalysisIds(opts.limit), step: ANALYSIS_STEP.lead, noticeSkip: false,
   });
   const stats = await runAnalysisPassOnce(opts);
   // The rest of the library (ids: every track that needs the facets); the one
   // slice that says when the analyzer cannot measure them.
   const rest = stats.available
-    ? await runWholeFileBackfill({ limit: opts.limit, ids: undefined, label: '', noticeSkip: true })
+    ? await runWholeFileBackfill({ limit: opts.limit, ids: undefined, step: ANALYSIS_STEP.backlog, noticeSkip: true })
     : null;
+  runlog.runLog.skipOpen([ANALYSIS_STEP.grid, ANALYSIS_STEP.structure],
+    stats.available ? 'needs whole-file analysis on and an analyzer that measures each product on request' : 'the analyzer did not answer');
+  if (!stats.available) runlog.runLog.skipOpen([ANALYSIS_STEP.backlog, ANALYSIS_STEP.score], 'the analyzer did not answer');
   if (!lead && !rest) return stats;
   const wholeFile = {
     analyzed: (lead?.analyzed ?? 0) + (rest?.analyzed ?? 0),
@@ -363,7 +456,9 @@ async function plannedRegularRunAvailable(): Promise<boolean> {
 // the whole-file lane first for the tracks about to be read with head or tail
 // due, then the model lane's plan, then (while a show has Hot Mix on) the beat
 // grid and the structure measured on it, then the rest of the whole-file lane.
-// The widening decisions (and their notices) are the legacy pass's own.
+// The widening decisions are the legacy pass's own; their problems (a model
+// that failed to load, a lean image, a stems share offline) are said under
+// the model lane's header.
 async function runPlannedRegularPass(opts: AnalyzeOptions): Promise<AnalyzeStats> {
   const backend = analyzer.backendLabel();
   const audio = backfillDecision({
@@ -378,16 +473,17 @@ async function runPlannedRegularPass(opts: AnalyzeOptions): Promise<AnalyzeStats
     dimension: 'stem', wanted: settings.get()?.audio?.stemCache === true,
     capable: analyzer.vocalActivityAvailable(), error: analyzer.vocalActivityError(), backend,
   });
-  if (!audio.widen && audio.notice) logEvent(analyzer.audioEmbeddingError() ? 'warning' : 'info', audio.notice);
-  if (!vocal.widen && vocal.notice) logEvent(analyzer.vocalActivityError() ? 'warning' : 'info', vocal.notice);
-  if (!stem.widen && stem.notice) logEvent(analyzer.vocalActivityError() ? 'warning' : 'info', stem.notice);
+  const notices: Array<[F.ProblemKind, string]> = [];
+  if (!audio.widen && audio.notice) notices.push([analyzer.audioEmbeddingError() ? 'error' : 'warning', audio.notice]);
+  if (!vocal.widen && vocal.notice) notices.push([analyzer.vocalActivityError() ? 'error' : 'warning', vocal.notice]);
+  if (!stem.widen && stem.notice) notices.push([analyzer.vocalActivityError() ? 'error' : 'warning', stem.notice]);
   let stems = stem.widen;
   if (stems) {
     // An unmounted stems share must not read as an empty cache (stem-cache.ts).
     const root = await stemCacheStore.stemsRootStatus({ readOnly: true });
     if (!root.online) {
       stems = false;
-      logEvent('warning', root.message ?? 'Stem cache offline: stems skipped this pass');
+      notices.push(['warning', root.message ?? 'The stems cache is offline: stems are skipped this run']);
     }
   }
   const wants = { clap: audio.widen, vocal: vocal.widen, stems };
@@ -400,7 +496,7 @@ async function runPlannedRegularPass(opts: AnalyzeOptions): Promise<AnalyzeStats
   // whatever happens (a release is idempotent).
   const stage = stageRunFor(leading);
   try {
-    return await plannedRegularSteps(opts, ids, leading, stage, wants);
+    return await plannedRegularSteps(opts, ids, leading, stage, wants, notices);
   } finally {
     if (stage) await analyzer.releaseStage(stage.token);
   }
@@ -429,9 +525,10 @@ async function plannedRegularSteps(
   leading: readonly string[],
   stage: StageRun | null,
   wants: RegularRunWants,
+  notices: Array<[F.ProblemKind, string]>,
 ): Promise<AnalyzeStats> {
   const lead = await runWholeFileBackfill({
-    limit: opts.limit, ids: leading, label: 'for the tracks about to be analysed', noticeSkip: false,
+    limit: opts.limit, ids: leading, step: ANALYSIS_STEP.lead, noticeSkip: false,
     stage: stage ?? undefined,
   });
 
@@ -451,7 +548,8 @@ async function plannedRegularSteps(
     existing: await stemCacheStore.cachedTrackIdsAmong(planned),
   }));
   logRegularPlan(plan);
-  const stats = await runAnalysisPassOnce({ ...opts, plan });
+  analysisStep(ANALYSIS_STEP.models).retitle(F.modelLaneTitle(wants));
+  const stats = await runAnalysisPassOnce({ ...opts, plan, step: ANALYSIS_STEP.models, notices });
   // Before the rest of lane 1: the tracks just analysed already have their
   // whole-file figures (the lead slice), and what is left there is the
   // library's backlog (hours when the lane is first switched on), which must
@@ -461,8 +559,11 @@ async function plannedRegularSteps(
   // the backlog, which only streams.
   if (stage) await analyzer.releaseStage(stage.token);
   const rest = stats.available
-    ? await runWholeFileBackfill({ limit: opts.limit, ids: undefined, label: '', noticeSkip: true })
+    ? await runWholeFileBackfill({ limit: opts.limit, ids: undefined, step: ANALYSIS_STEP.backlog, noticeSkip: true })
     : null;
+  if (!stats.available) {
+    runlog.runLog.skipOpen([ANALYSIS_STEP.score, ANALYSIS_STEP.grid, ANALYSIS_STEP.structure, ANALYSIS_STEP.backlog], 'the analyzer did not answer');
+  }
   const wholeFile = lead || rest
     ? {
         analyzed: (lead?.analyzed ?? 0) + (rest?.analyzed ?? 0),
@@ -473,22 +574,25 @@ async function plannedRegularSteps(
   return { ...stats, ...(wholeFile ? { wholeFile } : {}), ...(beatGrid ? { beatGrid } : {}) };
 }
 
+// The plan's per-product counts, for --verbose (the step's scope line says
+// what the operator needs).
 function logRegularPlan(plan: AcousticsPlan): void {
   for (const c of plan.byFacet) {
     if (c.matched === 0) continue;
     const skipped = Object.entries(c.skipped).map(([k, v]) => `${k} ${v}`).join(', ');
-    console.log(`[analyze] regular run: ${c.facet} ${c.planned} planned of ${c.matched} due${skipped ? ` (skipped: ${skipped})` : ''}`);
+    runlog.debug(`plan: ${c.facet} ${c.planned} planned of ${c.matched} due${skipped ? ` (skipped: ${skipped})` : ''}`);
   }
 }
 
 // The opt-in beat grid, then the structure, for every track that needs them
 // (`--where needs`, the tracks this run just analysed first), while a show
-// has Hot Mix on (beat-grid-run-policy.ts decides, and words the notice). The
-// structure is measured on the grid stored when it is planned, so its plan is
-// made only once the grid step has written: planned together, a new track has
-// no grid yet (`no-grid`) and would wait a whole run for its structure. Each
-// step is non-fatal, like a whole-file slice. null when neither measured a
-// track, so a run without Hot Mix returns the stats it always did.
+// has Hot Mix on (beat-grid-run-policy.ts decides, and gives each skipped
+// step its reason). The structure is measured on the grid stored when it is
+// planned, so its plan is made only once the grid step has written: planned
+// together, a new track has no grid yet (`no-grid`) and would wait a whole run
+// for its structure. Each step is non-fatal, like a whole-file slice. null
+// when neither measured a track, so a run without Hot Mix returns the stats
+// it always did.
 async function runBeatGridSteps(
   limit: number | undefined,
   ids: readonly string[],
@@ -504,13 +608,22 @@ async function runBeatGridSteps(
   const decision = beatGridRunDecision({
     hotMix: true, gridCapable: analyzer.gridAvailable(), structureCapable: analyzer.structureAvailable(),
   });
-  if (decision.notice) logEvent('warning', decision.notice);
   const order = newTracksFirst(ids, analysed);
   const total = { analyzed: 0, failed: 0, scope: 0 };
   let ran = false;
   for (const facet of ['grid', 'structure'] as const) {
-    if (!decision[facet]) continue;
-    const label = facet === 'grid' ? 'Beat grid' : 'Track structure';
+    const id = facet === 'grid' ? ANALYSIS_STEP.grid : ANALYSIS_STEP.structure;
+    const st = analysisStep(id);
+    if (!decision[facet]) {
+      const loadError = facet === 'grid' ? analyzer.gridError() : null;
+      if (loadError) {
+        st.skip('Beat This failed to load on the analyzer');
+        runlog.problem('error', F.modelProblem({ product: 'Beat grid', model: 'Beat This', error: loadError, backend: analyzer.backendLabel() }));
+      } else {
+        st.skip(decision.reasons[facet] ?? 'not measured this run');
+      }
+      continue;
+    }
     try {
       const plan = planAcoustics({
         ids: order,
@@ -522,69 +635,85 @@ async function runBeatGridSteps(
         limit,
       });
       logRegularPlan(plan);
-      if (plan.items.length === 0) continue;
-      logEvent('info', `${label} for Hot Mix: ${plan.items.length.toLocaleString('en-GB')} tracks to measure`);
+      if (plan.items.length === 0) {
+        st.skip('nothing missing');
+        continue;
+      }
       // No vector written: the model lane already scored this run's. The
       // grid may keep the run's copy for the structure; the structure reuses.
-      const s = await runAnalysisPassOnce({ plan, scoreAudio: false, ...(stage ? { stage: { ...stage, step: facet } } : {}) });
+      const s = await runAnalysisPassOnce({ plan, scoreAudio: false, step: id, ...(stage ? { stage: { ...stage, step: facet } } : {}) });
       total.analyzed += s.analyzed;
       total.failed += s.failed;
       total.scope += s.scope;
       ran = true;
     } catch (err) {
-      logEvent('warning', `${label} failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+      runlog.problem('warning', `${st.title} stopped (the next run retries): ${F.failureReason(err instanceof Error ? err.message : String(err))}`);
+      st.skip('stopped by an error');
     }
   }
   return ran ? total : null;
 }
 
 // One slice of the whole-file backfill. `ids` limits it to those tracks
-// (undefined: every track that needs the facets); `label` names the slice in
-// the log line; `noticeSkip` says the analyzer-cannot-measure notice, once per
-// run.
-async function runWholeFileBackfill({ limit, ids, label: what, noticeSkip, stage }: {
+// (undefined: every track that needs the facets); `step` is the run-log step
+// it reports as; `noticeSkip` says the analyzer-cannot-measure reason (the
+// slice after the regular pass; the lead slice just skips).
+async function runWholeFileBackfill({ limit, ids, step, noticeSkip, stage }: {
   limit: number | undefined;
   ids: readonly string[] | undefined;
-  label: string;
+  step: AnalysisStepId;
   noticeSkip: boolean;
   stage?: StageRun;
 }): Promise<AnalyzeStats['wholeFile'] | null> {
   if (!config.analyzer.wholeFile) return null;
-  if (ids && ids.length === 0) return null;
+  const st = analysisStep(step);
+  if (ids && ids.length === 0) {
+    st.skip('no new tracks to analyse');
+    return null;
+  }
   try {
-    if (!(await analyzer.isAvailable().catch(() => false))) return null;
+    if (!(await analyzer.isAvailable().catch(() => false))) {
+      skipUnreachable(st);
+      return null;
+    }
     const plan = await wholeFileBackfillPlan(limit, ids);
     if (!plan) return null;
     const skipped = plan.byFacet.reduce((n, c) => n + (c.skipped['no-whole-file'] ?? 0), 0);
     if (skipped > 0 && plan.items.length === 0) {
-      // Said once per run, by the slice after the regular pass.
-      if (noticeSkip) logEvent('warning', wholeFileSkipNotice(analyzer.wholeFileAvailable()));
+      st.skip(noticeSkip ? wholeFileSkipNotice(analyzer.wholeFileAvailable()) : 'the analyzer has not confirmed it can measure it');
       return null;
     }
-    if (plan.items.length === 0) return null;
-    logEvent('info', `Whole-file loudness + edges${what ? ` ${what}` : ''}: ${plan.items.length.toLocaleString('en-GB')} tracks to measure`);
+    if (plan.items.length === 0) {
+      st.skip('nothing missing');
+      return null;
+    }
     // No closing scoring: a whole-file slice writes no CLAP vector and no
     // mood score, so the zero-shot passes and the library-wide energy check
     // would rerun over inputs it left exactly as they were. They run once,
     // after the model lane (the step that writes vectors), as before; the
     // energy check, idempotent over unchanged inputs, ran here before the
     // model lane and again after the rest of the library for nothing.
-    const whole = await runAnalysisPassOnce({ plan, scoreAudio: false, ...(stage ? { stage } : {}) });
+    const whole = await runAnalysisPassOnce({ plan, scoreAudio: false, step, ...(stage ? { stage } : {}) });
     return { analyzed: whole.analyzed, failed: whole.failed, scope: whole.scope };
   } catch (err) {
-    logEvent('warning', `Whole-file loudness + edges failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+    runlog.problem('warning', `${st.title} stopped (the next run retries): ${F.failureReason(err instanceof Error ? err.message : String(err))}`);
+    st.skip('stopped by an error');
     return null;
   }
 }
 
 async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeStats> {
+  const st = analysisStep(opts.step ?? ANALYSIS_STEP.models);
   if (!(await analyzer.isAvailable())) {
-    // The only two things resolveBackend() consults, named by their env vars.
-    console.log('[analyze] no analysis backend (ANALYZE_URL sidecar / ANALYZE_PYTHON venv) — skipping');
+    // Neither an ANALYZE_URL sidecar nor an ANALYZE_PYTHON venv answered.
+    skipUnreachable(st);
     return { available: false, backend: 'none', analyzed: 0, failed: 0, scope: 0, audioEmbedded: 0, vocalAnalyzed: 0 };
   }
   const backend = analyzer.backendLabel();
-  logEvent('info', `Audio engine: ${backend}`);
+  // Said under the step's header once it is printed (its scope and lane are
+  // settled below): problems, then plain notes.
+  const pending: Array<[F.ProblemKind, string]> = [...(opts.notices ?? [])];
+  const pendingNotes: string[] = [];
 
   // Resolved up front so a --re-analyze not redoing vocal preserves existing
   // vocal_ranges rather than wiping what it won't rebuild.
@@ -615,11 +744,11 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
     const root = await stemCacheStore.stemsRootStatus({ prepare: true });
     if (!root.online) {
       stemCache = false;
-      logEvent('warning', root.message ?? 'Stem cache offline: stems skipped this pass');
+      pending.push(['warning', root.message ?? 'The stems cache is offline: stems are skipped this run']);
     } else if (root.message) {
-      logEvent('warning', root.message);
+      pending.push(['warning', root.message]);
     } else if (root.action === 'create' || root.action === 'adopt') {
-      console.log(`[analyze] stem cache: ${root.action === 'create' ? 'created' : 'marked existing cache at'} ${stemCacheStore.stemsRoot()} (${stemCacheStore.STEMS_MARKER})`);
+      runlog.debug(`stem cache: ${root.action === 'create' ? 'created' : 'marked existing cache at'} ${stemCacheStore.stemsRoot()} (${stemCacheStore.STEMS_MARKER})`);
     }
   }
 
@@ -627,13 +756,13 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
   // A raw --re-analyze leaves the scope null and redoes the whole library.
   let reAnalyzeScope: string[] | null = null;
   const plan = opts.plan;
-  if (plan && opts.reAnalyze) console.log('[analyze] facet plan given — ignoring --re-analyze');
+  if (plan && opts.reAnalyze) runlog.debug('facet plan given: --re-analyze ignored');
   if (opts.reAnalyze && !plan) {
     if (opts.rescan) reAnalyzeScope = db.analysedIds();
     db.clearAnalysis({ keepVocal: !vocalBackfill, clearStems: stemCache });
-    console.log(
-      `[analyze] --re-analyze: cleared existing analysis${vocalBackfill ? '' : ' (kept vocal ranges)'}` +
-        (reAnalyzeScope ? ` — re-scan scope: ${reAnalyzeScope.length} already-analysed tracks` : ''),
+    pendingNotes.push(
+      `Redo requested: the stored analysis was cleared${vocalBackfill ? '' : ' (vocal ranges kept)'}` +
+        (reAnalyzeScope ? `, and only the ${F.fmtCount(reAnalyzeScope.length)} tracks analysed before are redone` : ''),
     );
   }
 
@@ -663,30 +792,28 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
     const seen = new Set(bpmIds);
     const audioIds = db.unanalysedAudioIds(cap).filter(id => !seen.has(id));
     ids = cap ? [...bpmIds, ...audioIds].slice(0, cap) : [...bpmIds, ...audioIds];
-    if (audioIds.length > 0) {
-      console.log(`[analyze] audio backfill: +${ids.length - bpmIds.length} already-analysed tracks missing an audio vector`);
-    }
   } else if (audioDecision.notice && !reAnalyzeScope && !plan) {
-    // Warn on a broken model (operator-clearable), info when it was never built.
-    logEvent(analyzer.audioEmbeddingError() ? 'warning' : 'info', audioDecision.notice);
+    // An error for a broken model (operator-clearable), a warning when it was never built.
+    pending.push([analyzer.audioEmbeddingError() ? 'error' : 'warning', audioDecision.notice]);
   }
+  const audioAdded = ids.length - bpmIds.length;
 
   // Vocal backfill: same idea, same two gates, for tracks missing vocal-activity
   // ranges. Tail widening also re-targets tracks whose outro predates tail vocal
   // detection, only on an explicit `=== true` — old sidecars never report the
   // flag and a stale image must keep the head-only scope.
   const includeTailMissing = tailVocalBackfillAvailable(analyzer.tailVocalAvailable());
+  let vocalAdded = 0;
+  let stemAdded = 0;
   if (vocalBackfill && !reAnalyzeScope && !plan) {
     const seen = new Set(ids);
     const vocalIds = db.needsVocalIds(cap, includeTailMissing).filter(id => !seen.has(id));
     const before = ids.length;
     ids = cap ? [...ids, ...vocalIds].slice(0, cap) : [...ids, ...vocalIds];
-    if (ids.length > before) {
-      console.log(`[analyze] vocal backfill: +${ids.length - before} tracks missing vocal-activity ranges`);
-    }
+    vocalAdded = ids.length - before;
   } else if (vocalDecision.notice && !reAnalyzeScope && !plan) {
     // Only when widening was actually attempted.
-    logEvent(analyzer.vocalActivityError() ? 'warning' : 'info', vocalDecision.notice);
+    pending.push([analyzer.vocalActivityError() ? 'error' : 'warning', vocalDecision.notice]);
   }
 
   // Stem backfill: the fourth widening. `stemCache` already carries the Demucs
@@ -713,12 +840,12 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
     const reserved = ids.filter(id => !existingStemDirs.has(id)).length;
     const backfillSlots = Math.max(0, stemSlotsLeft - reserved);
     if (backfillSlots <= 0) {
-      console.log(
+      pendingNotes.push(
         stemSlotsLeft <= 0
-          ? `[analyze] stem backfill skipped — cache is at its ${settings.get()?.audio?.stemCacheGb ?? 15} GB budget ` +
-              '(raise it in Settings → Stems to cache more tracks)'
-          : `[analyze] stem backfill skipped — the ${reserved} ride-along stem writes already queued this pass ` +
-              `claim the budget's remaining ~${stemSlotsLeft} track slots`,
+          ? `Stems: the cache is at its ${settings.get()?.audio?.stemCacheGb ?? 15} GB budget, so no more tracks get stems ` +
+              '(raise it in Settings → Stems to cache more)'
+          : `Stems: the ${reserved} tracks already in this pass take the budget's last ~${stemSlotsLeft} slots, ` +
+              'so no other track gets stems this run',
       );
     } else {
       const seen = new Set(ids);
@@ -737,16 +864,14 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
       const stemIds = needing.slice(0, room);
       if (stemIds.length > 0) {
         ids = [...ids, ...stemIds];
+        stemAdded = stemIds.length;
         const left = needing.length - stemIds.length;
-        console.log(
-          `[analyze] stem backfill: +${stemIds.length} tracks with no cached stems` +
-            (left > 0 ? ` (${left} left for later passes — budget holds ~${backfillSlots} more)` : ''),
-        );
+        if (left > 0) pendingNotes.push(`Stems: ${F.fmtCount(left)} more tracks wait for later runs (the budget holds ~${F.fmtCount(backfillSlots)} more)`);
       }
     }
   } else if (stemDecision.notice && !reAnalyzeScope && !plan) {
-    // Same warn/info split as audio and vocal above.
-    logEvent(analyzer.vocalActivityError() ? 'warning' : 'info', stemDecision.notice);
+    // Same error/warning split as audio and vocal above.
+    pending.push([analyzer.vocalActivityError() ? 'error' : 'warning', stemDecision.notice]);
   }
 
   // Only ids pulled in solely by the CLAP widening may take the fast path;
@@ -768,11 +893,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
       plannedFacets.set(item.id, item.facets.filter(db.isAnalysisFacet));
     }
     ids = plan.items.map(i => i.id);
-    logEvent(
-      'info',
-      `Facet plan: ${plan.facets.join(', ')} where ${plan.where.kind}` +
-        `${plan.where.reason ? ':' + plan.where.reason : ''} — ${ids.length} tracks`,
-    );
+    runlog.debug(`facet plan: ${plan.facets.join(', ')} where ${plan.where.kind}${plan.where.reason ? ':' + plan.where.reason : ''}, ${ids.length} tracks`);
     const wantsStems = plan.items.some(i => i.request.stems);
     if (wantsStems) {
       // The plan's own root check: the one above only runs with the settings
@@ -780,9 +901,9 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
       const root = await stemCacheStore.stemsRootStatus({ prepare: true });
       if (!root.online) {
         planStemsOffline = true;
-        logEvent('warning', root.message ?? 'Stem cache offline: stems skipped this plan');
+        pending.push(['warning', root.message ?? 'The stems cache is offline: stems are skipped this run']);
       } else {
-        if (root.message) logEvent('warning', root.message);
+        if (root.message) pending.push(['warning', root.message]);
         // The only place a plan sizes the budget (the widening above skips plans),
         // whether or not the settings toggle is on: an explicit stems plan needs it.
         // Only the plan's own tracks are ever looked up in the dir set
@@ -804,20 +925,24 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
     const f = plannedFacets.get(id);
     return rangedOk && !!f && f.length === 1 && f[0] === 'tail' && !analyzer.tailWindowFor(db.getTrack(id));
   };
-  if (plan) {
-    logEvent(
-      'info',
-      useFacets
-        ? `Analyzer speaks the facet protocol${rangedOk ? ' (tail-only tracks read by HTTP Range)' : ''}`
-        : 'Analyzer predates the facet protocol — planned tracks get a flat analysis',
-    );
-  }
+  if (plan && !useFacets) pendingNotes.push('This analyzer predates per-product requests: each planned track gets a full analysis');
+  if (plan && useFacets) runlog.debug(`facet protocol${rangedOk ? ', tail-only tracks read by HTTP Range' : ''}`);
   let rangedTracks = 0;
   let rangedBytes = 0;
   let rangedSize = 0;
   const fallbackReasons = new Map<string, number>();
   // Tracks whose stems the analyzer could not write: no shared state (sharedStateNotice).
   let stemsWithoutSharedState = 0;
+  // The analyzer answered a stems request `unavailable` because the cache
+  // root it sees has no marker: the stems share is not mounted on the
+  // analyzer host. Said once, and no further stems are requested this pass
+  // (each would be separated for nothing); the tracks stay due, since an
+  // unavailable answer stamps nothing. An analyzer that predates the facet
+  // protocol never says so: its flat answers are unchanged.
+  let stemsShareMissing = false;
+  // Tracks whose stems were due but not saved because the analyzer cannot see
+  // the stems share: they stay due, and the step's result says how many.
+  let stemsNotSaved = 0;
 
   // Pass-wide flags the tail of the pass reports on (sweep, Demucs warning).
   const passStems = plan ? !planStemsOffline && plan.items.some(i => i.request.stems) : stemCache;
@@ -825,23 +950,29 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
 
   // Say what the scope leaves out: "all tracks current" is also true of a
   // library whose files can never be analysed.
+  // Said once a run: the tracks left out of every scope after repeated failures.
   const excludedFailures = db.analysisFailedCount();
-  if (excludedFailures > 0) {
-    logEvent(
+  if (excludedFailures > 0 && !excludedSaid) {
+    excludedSaid = true;
+    pending.push([
       'warning',
-      `${excludedFailures} track${excludedFailures === 1 ? '' : 's'} excluded after ` +
-        `${db.MAX_ANALYSIS_FAILURES} failed attempts — see Library → analysis failures for the reasons`,
-    );
+      `${F.fmtCount(excludedFailures)} track${excludedFailures === 1 ? ' is' : 's are'} left out after ` +
+        `${db.MAX_ANALYSIS_FAILURES} failed attempts each; Library → analysis failures lists the reasons`,
+    ]);
   }
+  const sayPending = (notes = true) => {
+    for (const [kind, text] of pending) runlog.problem(kind, text);
+    if (notes) for (const text of pendingNotes) st.note(text);
+  };
 
   if (ids.length === 0) {
-    console.log('[analyze] nothing to analyse — all tracks current');
+    st.skip('nothing missing');
+    sayPending(false);
     // Zero-shot scoring can still have work (older vectors, changed vocabulary).
     if (opts.scoreAudio !== false) await scoreAudioMoods();
     return { available: true, backend, analyzed: 0, failed: 0, scope: 0, audioEmbedded: 0, vocalAnalyzed: 0 };
   }
   if (passStems) await stemCacheStore.markPassPending();
-  logEvent('info', `Analysing audio for ${ids.length.toLocaleString('en-GB')} tracks…`);
   reportProgress({ phase: 'analyze', label: 'Analysing audio', done: 0, total: ids.length });
 
   let analyzed = 0;
@@ -861,11 +992,15 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
         } else db.recordAnalysisFailure(f.id, f.reason);
       } catch (stampErr: any) {
         // Never let bookkeeping end the pass.
-        console.error(`[analyze] ${f.id} failure stamp failed: ${stampErr?.message || stampErr}`);
+        runlog.debug(`${f.id}: failure stamp failed: ${stampErr?.message || stampErr}`);
       }
     }
     pendingFailureStamps = [];
   };
+  // Failures by their plain reason, and tracks nothing could be asked of, for
+  // the step's result.
+  const failureReasons = new Map<string, number>();
+  let skippedTracks = 0;
   let audioEmbedded = 0;
   let vocalAnalyzed = 0;
   // Only the quiet-clock state lives here, so it carries across tracks.
@@ -873,10 +1008,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
   {
     const quiet = await readQuietConfig();
     if (quiet.enabled) {
-      logEvent(
-        'info',
-        `Quiet-times gate on — analysis only runs once the stream has had no listeners for ${quiet.minutes} min`,
-      );
+      pendingNotes.push(`Quiet times on: analysis runs only once the stream has had no listeners for ${quiet.minutes} min`);
     }
   }
   // Stamp the provenance row once, on the first vector written this run.
@@ -918,6 +1050,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
     const want = planned.get(id);
     // A planned track gets stems only when its plan asks for them.
     if (plan && (!want?.stems || planStemsOffline)) return undefined;
+    if (stemsShareMissing) return undefined;
     const trackStemDecision = stemCacheStore.stemWriteDecision({
       cacheOn: plan ? true : stemCache,
       slotsLeft: stemSlotsLeft,
@@ -930,10 +1063,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
     if (trackStemDecision.want && existingStemDirs.has(id)) rewroteExistingStems = true;
     if ((plan ? true : stemCache) && !trackStemDecision.want && !stemGateAnnounced) {
       stemGateAnnounced = true;
-      console.log(
-        `[analyze] stem cache budget reached mid-pass — stems skipped for the remaining net-new tracks ` +
-          '(raise audio.stemCacheGb in Settings → Stems to cache more)',
-      );
+      runlog.note('Stems: the cache budget was reached during this step, so the remaining new tracks get no stems (raise it in Settings → Stems to cache more).');
     }
     return trackStemDecision.want ? stemCacheStore.dirFor(id) : undefined;
   };
@@ -951,7 +1081,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
     // The tail window ends where the music stops, when the edges are known
     // (also for the Demucs tail pass behind vocal and stems: TAIL_WINDOW_FACETS).
     const tailWindow = analyzer.usesTailWindow(facets) ? analyzer.tailWindowFor(db.getTrack(id)) : null;
-    const stems_dir = facets.includes('stems')
+    const stems_dir = facets.includes('stems') && !stemsShareMissing
       ? (admittedStems ? admittedStems.dir : allocateStems(id))
       : undefined;
     // A tail measured on its own also brings the outro's vocal ranges when the
@@ -983,6 +1113,15 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
       ranged ? undefined : (localPath ?? undefined),
     ) : null;
     if (res?.stemsWithoutSharedState) stemsWithoutSharedState += 1;
+    const stemsAnswer = res?.facets.stems;
+    const shareMissingNow = stemsAnswer?.status === 'unavailable' && F.isStemsShareMissing(stemsAnswer.reason);
+    if (shareMissingNow && !stemsShareMissing) {
+      stemsShareMissing = true;
+      runlog.problem('error', F.stemsShareMissingProblem(stemCacheStore.stemsRoot()));
+    }
+    // Due, and not saved for want of the share: asked and refused, or no
+    // longer asked once the pass knew.
+    if (facets.includes('stems') && (shareMissingNow || (stemsShareMissing && !stems_dir && !admittedStems?.dir))) stemsNotSaved += 1;
     if (res?.source.kind === 'ranged') {
       rangedTracks += 1;
       rangedBytes += res.source.bytesRead ?? 0;
@@ -1169,7 +1308,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
         // A non-audio response (stale library entry) is not retryable by url.
         if (err instanceof analyzer.NonAudioResponseError) throw err;
         // Otherwise a transient fetch failure — fall back to the url path.
-        console.error(`[analyze] ${id} prefetch failed (${err?.message || err}); using url path`);
+        runlog.debug(`${id}: prefetch failed (${err?.message || err}); using the url path`);
       } else if ('path' in settled) {
         localPath = settled.path;
         localComplete = settled.complete;
@@ -1264,7 +1403,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
         if (a.outro == null && (lyricVocal != null || (vocal && a.vocalRanges != null))) {
           const prior = db.getTrack(id);
           if (prior?.outro && prior.outro.vocalRanges == null) {
-            console.log(`[analyze] ${id}: tail vocals not computable (incomplete download; stored outro predates tail detection) — stays in the vocal backfill scope`);
+            runlog.debug(`${id}: tail vocals not computable (incomplete download; stored outro predates tail detection), stays due`);
           }
         }
       }
@@ -1278,7 +1417,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
           }
           storedAudio = true;
         } catch (err: any) {
-          console.error(`[analyze] ${id} audio-vector write failed: ${err?.message || err}`);
+          runlog.debug(`${id}: sounds-like vector write failed: ${err?.message || err}`);
         }
       }
       return { kind: 'analyzed', audioEmbedded: storedAudio, vocalAnalyzed: storedVocal };
@@ -1294,6 +1433,7 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
     index: number,
   ): Promise<void> => {
     if (outcome.status === 'fulfilled') {
+      if (outcome.value.kind === 'skipped') skippedTracks += 1;
       if (outcome.value.kind === 'analyzed') {
         analyzed += 1;
         if (outcome.value.audioEmbedded) audioEmbedded += 1;
@@ -1307,23 +1447,21 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
       consecutiveFailures += 1;
       const err: any = outcome.reason;
       const reason = String(err?.message || err);
-      console.error(`[analyze] ${id} failed: ${reason}`);
+      runlog.debug(`${id} failed: ${reason}`);
+      const plain = F.failureReason(reason);
+      failureReasons.set(plain, (failureReasons.get(plain) ?? 0) + 1);
       if (failureCountsAgainstTrack(consecutiveFailures)) {
         pendingFailureStamps.push({ id, reason, ...(err instanceof OptInFailure ? { optIn: err.failed } : {}) });
       } else if (consecutiveFailures === SYSTEMIC_FAILURE_RUN + 1) {
-        logEvent(
-          'warning',
-          `${SYSTEMIC_FAILURE_RUN + 1} tracks in a row failed to analyse — treating this as a fault ` +
-            'in the pass rather than the files (is the music backend reachable?), so these failures ' +
-            'are not counted against any track until one analyses successfully again',
-        );
+        runlog.problem('warning', F.systemicFailureProblem(SYSTEMIC_FAILURE_RUN + 1, reason));
         pendingFailureStamps = [];
       }
     }
     const done = index + 1;
     orderedDone = done;
     if (done % 25 === 0 || done === ids.length) {
-      console.log(`[analyze] ${done}/${ids.length} (ok=${analyzed} fail=${failed})`);
+      // The result line follows straight after the last one.
+      if (done < ids.length) st.progress(done, ids.length);
       reportProgress({
         phase: 'analyze',
         label: 'Analysing audio',
@@ -1342,11 +1480,25 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
     : config.analyzer.concurrency;
   const effectiveConcurrency = backend === 'sidecar' ? requestedConcurrency : 1;
   if (backend === 'local' && requestedConcurrency > 1) {
-    logEvent(
-      'info',
-      `ANALYZE_CONCURRENCY=${requestedConcurrency} applies to HTTP sidecars; local ANALYZE_PYTHON remains single-flight`,
-    );
+    runlog.debug(`ANALYZE_CONCURRENCY=${requestedConcurrency} applies to HTTP sidecars; local ANALYZE_PYTHON remains single-flight`);
   }
+
+  // The step's header: what runs where, over what scope.
+  const needs: Array<[string, number]> = plan
+    ? plan.byFacet.filter(c => c.facet !== 'year').map(c => [F.PRODUCT[c.facet] ?? c.facet, c.planned])
+    : [
+        [`${F.PRODUCT.head}, ${F.PRODUCT.tail}`, bpmIds.length], [F.PRODUCT.clap, audioAdded],
+        [F.PRODUCT.vocal, vocalAdded], [F.PRODUCT.stems, stemAdded],
+      ];
+  st.start({
+    runsOn: F.runsOnAnalyzer({
+      where: analysisBackendWhere(backend, analyzer.answeringBase()),
+      lane: wholeFileLane ? 'cpu' : 'models',
+      concurrency: effectiveConcurrency,
+    }),
+    scope: F.scopeProducts({ tracks: ids.length, pool: db.trackCount(), needs }),
+  });
+  sayPending();
 
   if (effectiveConcurrency === 1) {
     // One-ahead prefetch, rejections settled immediately so none floats as an
@@ -1365,7 +1517,6 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
       await commitOutcome(outcome, ids[i], i);
     }
   } else {
-    logEvent('info', `Analyzer concurrency: ${effectiveConcurrency} in-flight sidecar jobs`);
     const admittedStems = new Map<number, { dir: string | undefined }>();
     await dispatchAnalysis(ids, {
       concurrency: effectiveConcurrency,
@@ -1387,16 +1538,15 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
   flushFailureStamps();
 
   if (rangedTracks > 0) {
-    logEvent(
-      'info',
-      `Ranged tail reads: ${rangedTracks} tracks, ${(rangedBytes / 1024 ** 2).toFixed(0)} MB fetched` +
+    runlog.debug(
+      `ranged tail reads: ${rangedTracks} tracks, ${(rangedBytes / 1024 ** 2).toFixed(0)} MB fetched` +
         (rangedSize > 0 ? ` (${Math.round((rangedBytes / rangedSize) * 100)} % of their total size)` : ''),
     );
   }
   for (const [why, n] of fallbackReasons) {
-    console.log(`[analyze] ${n} track(s) fell back to the capped download: ${why}`);
+    runlog.debug(`${n} track(s) fell back to the capped download: ${why}`);
   }
-  if (stemsWithoutSharedState > 0) logEvent('warning', sharedStateNotice(stemsWithoutSharedState, config.stateRoot));
+  if (stemsWithoutSharedState > 0) runlog.problem('warning', sharedStateNotice(stemsWithoutSharedState, config.stateRoot));
 
   // Best-effort sweep of the staging dir in case a prefetch left an orphan.
   await rm(`${config.stateRoot}/analyze-tmp`, { recursive: true, force: true }).catch(() => {});
@@ -1422,38 +1572,49 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
         keepLast: await sweepKeepLastFromDisk().catch(() => undefined),
       }).catch(() => null);
     if (swept && swept.removed > 0) {
-      console.log(`[analyze] stem cache sweep: evicted ${swept.removed} track dirs (${Math.round(swept.freedBytes / 1024 ** 2)} MB)`);
+      st.note(`Stems: ${F.fmtCount(swept.removed)} older stem sets removed to stay within the budget (${Math.round(swept.freedBytes / 1024 ** 2)} MB freed)`);
     }
     // The only place a stuck-over-budget cache reaches the event log (#1257).
     if (swept && swept.overBudgetBytes > 0) {
-      logEvent(
+      runlog.problem(
         'warning',
-        `Stem cache is ${(swept.overBudgetBytes / 1024 ** 3).toFixed(1)} GB over its ${settings.get()?.audio?.stemCacheGb ?? 15} GB budget and the sweep could not evict down to it` +
-          (swept.failedDirs ? ` (${swept.failedDirs} dir delete(s) failed — check ownership/permissions on state/stems)` : ''),
+        `The stems cache is ${(swept.overBudgetBytes / 1024 ** 3).toFixed(1)} GB over its ${settings.get()?.audio?.stemCacheGb ?? 15} GB budget and could not be trimmed back to it` +
+          (swept.failedDirs ? `: ${swept.failedDirs} folder(s) could not be deleted. Check the ownership and permissions of the stems folder` : ''),
       );
     }
   }
+
+  // The worker degrades silently when Demucs fails to load: every track reads
+  // "ok" with vocal_ranges omitted, re-targeting the same tracks forever (#996).
+  if (passVocal && analyzed > 0 && vocalAnalyzed === 0) {
+    runlog.problem(
+      'warning',
+      'No vocal ranges were stored: Demucs probably failed to load on the analyzer. ' +
+        'Look for "Demucs load failed" in the analyzer log, then restart the analyzer.',
+    );
+  }
+
+  // The result: counts, the products written, and the failures by reason.
+  for (const [reason, n] of [...failureReasons].sort((x, y) => y[1] - x[1]).slice(0, 3)) {
+    st.note(`${F.fmtCount(n)} failed: ${reason}`);
+  }
+  const left = skippedTracks > 0
+    ? { count: skippedTracks, why: stemsShareMissing ? 'their stems wait for the stems share' : 'nothing could be asked of them this run' }
+    : undefined;
+  // Stems refused on a track whose other work was done: the step is partial.
+  const stemsLeft = !left && stemsNotSaved > 0 ? `; stems not saved for ${F.fmtCount(stemsNotSaved)} (they wait for the stems share)` : '';
+  st.done({
+    summary: F.analysisSummary({
+      done: analyzed, failed, left,
+      products: [[F.PRODUCT.clap, audioEmbedded], [F.PRODUCT.vocal, vocalAnalyzed]],
+    }) + stemsLeft,
+    outcome: stemsLeft ? 'partial' : F.outcomeOf({ done: analyzed, failed, left }),
+  });
 
   // Zero-shot audio moods and sound descriptors over the vectors this and past
   // passes wrote; no-op when there is nothing new or the backend has no text
   // tower. A step that wrote no vector skips it (scoreAudio false).
   if (opts.scoreAudio !== false) await scoreAudioMoods();
 
-  // The worker degrades silently when Demucs fails to load: every track reads
-  // "ok" with vocal_ranges omitted, re-targeting the same tracks forever (#996).
-  if (passVocal && analyzed > 0 && vocalAnalyzed === 0) {
-    logEvent(
-      'warning',
-      'Vocal backfill stored no vocal-activity ranges — Demucs likely failed to load at runtime; check the analyzer container logs for "Demucs load failed"',
-    );
-  }
-
-  logEvent(
-    'success',
-    `Audio analysed — ${analyzed.toLocaleString('en-GB')} tracks` +
-      (audioEmbedded > 0 ? `, ${audioEmbedded.toLocaleString('en-GB')} sounds-like` : '') +
-      (vocalAnalyzed > 0 ? `, ${vocalAnalyzed.toLocaleString('en-GB')} vocal` : '') +
-      (failed > 0 ? ` · ${failed.toLocaleString('en-GB')} failed` : ''),
-  );
   return { available: true, backend, analyzed, failed, scope: ids.length, audioEmbedded, vocalAnalyzed };
 }

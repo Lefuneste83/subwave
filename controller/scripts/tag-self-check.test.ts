@@ -37,12 +37,16 @@ for (let i = 0; i < N; i++) {
 
 const okVote = () => ({ moods: ['happy'], energy: 'high', confidence: 0.9, votingNeighbours: 5 }) as never;
 
-async function capture(fn: () => Promise<void>): Promise<string[]> {
+// The check returns what the run log prints for its step (a summary, a skip
+// or a failure), and prints nothing itself.
+async function capture(fn: () => Promise<unknown>): Promise<string[]> {
   const lines: string[] = [];
   const log = console.log;
   console.log = (...a: unknown[]) => { lines.push(a.map(String).join(' ')); };
-  try { await fn(); } finally { console.log = log; }
-  return lines;
+  let result: unknown;
+  try { result = await fn(); } finally { console.log = log; }
+  assert.deepEqual(lines, [], 'the check prints nothing itself');
+  return Object.values(result as Record<string, string>);
 }
 
 test('the truth is read when the check starts, not while it votes', async () => {
@@ -54,8 +58,8 @@ test('the truth is read when the check starts, not while it votes', async () => 
     return okVote();
   }, 0.35, { yieldBetweenVotes: true }));
   assert.equal(votes, Math.min(SELF_CHECK_SAMPLE, N));
-  const summary = lines.find((l) => /self-check/i.test(l)) ?? '';
-  assert.match(summary, /mood agreement 100%, energy match 100%/, `scored against the truth read at the start: ${summary}`);
+  const summary = lines[0] ?? '';
+  assert.match(summary, /moods agree 100%, energies match 100%/, `scored against the truth read at the start: ${summary}`);
   for (let i = 0; i < N; i++) db.upsertTrackTags(`t${i}`, { moods: ['happy'], energy: 'high', source: 'llm', confidence: 1, promptHash: 'h', model: 'm' } as never);
 });
 

@@ -64,12 +64,12 @@ export function summariseEval(cases: EvalCase[], confidenceThreshold: number): E
 
 // One human-readable line for the run log / progress panel.
 export function formatEvalSummary(s: EvalSummary): string {
-  if (s.sampled === 0) return 'propagation self-check skipped (not enough trusted tags)';
+  if (s.sampled === 0) return 'nothing to check against (not enough trusted tags)';
   const pct = (n: number, d: number) => `${Math.round((n / Math.max(1, d)) * 100)}%`;
   const parts = [
-    `${pct(s.gatePassed, s.sampled)} of ${s.sampled} held-out tracks would auto-tag`,
+    `${s.sampled} tagged tracks re-voted from their neighbours: ${pct(s.gatePassed, s.sampled)} would be tagged automatically`,
   ];
-  if (s.moodJaccard != null) parts.push(`mood agreement ${Math.round(s.moodJaccard * 100)}%`);
-  if (s.energyComparable > 0) parts.push(`energy match ${pct(s.energyMatched, s.energyComparable)}`);
-  return `Propagation self-check — ${parts.join(', ')}`;
+  if (s.moodJaccard != null) parts.push(`moods agree ${Math.round(s.moodJaccard * 100)}%`);
+  if (s.energyComparable > 0) parts.push(`energies match ${pct(s.energyMatched, s.energyComparable)}`);
+  return parts.join(', ');
 }

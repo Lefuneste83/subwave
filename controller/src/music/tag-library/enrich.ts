@@ -4,7 +4,7 @@
 
 import * as subsonic from '../subsonic.js';
 import * as lastfm from '../lastfm.js';
-import { runYearLookups } from '../original-year.js';
+import { runYearLookups, yearSources, type YearPassStats } from '../original-year.js';
 import * as db from '../library-db.js';
 import * as settings from '../../settings.js';
 import { createLastfmPacer, type LastfmPacer } from '../lastfm-pacer.js';
@@ -12,12 +12,26 @@ import { selectTrackTagIds } from '../enrich-scope.js';
 import { listAfterArtistLookup } from '../lastfm-tag-policy.js';
 import { reportProgress } from '../tagger-progress.js';
 import { mapPool, memoizeByKey } from '../../util/async-pool.js';
-import { logEvent } from './log.js';
+import * as runlog from '../run-log.js';
+import * as F from '../run-log-format.js';
+import { LASTFM_WHERE, navidromeWhere } from '../run-log-where.js';
+
+// What the enrich step fetches this run, by the operator's switches: its
+// title in the run's banner.
+export function enrichSwitches(): { lastfm: boolean; lyrics: boolean; years: boolean } {
+  const enrichCfg = (settings.get() as any).embedding?.enrichment ?? {};
+  return {
+    lastfm: lastfm.lastfmEnrichEnabled(enrichCfg.lastfmTags, lastfm.hasLastfmKey()),
+    lyrics: enrichCfg.lyrics !== false,
+    years: enrichCfg.originalYear !== false,
+  };
+}
 
 export async function phaseEnrich(
   ids: string[],
   reEnrich: boolean,
   limit: number = Infinity,
+  step: runlog.Step = runlog.step('enrich', 'Fetch track details'),
 ): Promise<void> {
   const enrichCfg = (settings.get() as any).embedding?.enrichment ?? {};
   // With a Last.fm api_key we hit the API directly (it returns tags); the
@@ -32,16 +46,28 @@ export async function phaseEnrich(
   const trackTagIds = trackTagsOn
     ? selectTrackTagIds({ reEnrich, limit, ids, owed: db.idsNeedingLastfmTrackTags() })
     : [];
-  if (ids.length === 0 && yearIds.length === 0 && trackTagIds.length === 0) return;
-  if (!lastfmEnabled && !lyricsEnabled && yearIds.length === 0) {
-    console.log('[tag] phase-0 skipped: lastfmTags and lyrics disabled, no original-year lookups pending');
+  if (ids.length === 0 && yearIds.length === 0 && trackTagIds.length === 0) {
+    step.skip('nothing to fetch');
     return;
   }
-  if (lastfmEnabled) {
-    const methods = trackTagsOn ? 'track.getTopTags + artist.getTopTags' : 'artist.getTopTags';
-    console.log(
-      `[tag] phase-0 Last.fm tags via ${hasKey ? `direct API (${methods})` : 'Navidrome getArtistInfo2 (no api_key — likely empty)'}`,
-    );
+  if (!lastfmEnabled && !lyricsEnabled && yearIds.length === 0) {
+    step.skip('Last.fm tags and lyrics are off, and no original year is due');
+    return;
+  }
+  // Skip the loop when both are disabled: running it would stamp enrichedAt on
+  // empty rows and mask a later re-enable.
+  const metaIds = lastfmEnabled || lyricsEnabled ? ids : [];
+  const runsOn = [
+    lastfmEnabled ? (hasKey ? LASTFM_WHERE : `${navidromeWhere()} (artist info)`) : '',
+    lyricsEnabled && metaIds.length ? `${navidromeWhere()} (lyrics)` : '',
+    yearIds.length ? `${yearSources()} (original years)` : '',
+  ].filter(Boolean);
+  step.start({
+    runsOn: runsOn.join(' · '),
+    scope: F.enrichScope({ tracks: metaIds.length, trackTags: trackTagIds.length, years: yearIds.length, pool: db.trackCount() }),
+  });
+  if (lastfmEnabled && !hasKey) {
+    step.note('No Last.fm API key: artist tags come through the music server, which usually has none. Add a key in Settings → Library tagger.');
   }
   reportProgress({ phase: 'enrich', label: 'Enriching metadata', done: 0, total: ids.length });
   // Memoize on the in-flight PROMISE, not the value, so the pool below shares one
@@ -53,7 +79,6 @@ export async function phaseEnrich(
   let enrichedTracks = 0;
   let enrichedLyrics = 0;
   let enrichedTags = 0;
-  let enrichedYears = 0;
 
   // I/O-bound, so drain with a bounded pool. DB writes are synchronous
   // (better-sqlite3) and so serialise on the event loop without locking.
@@ -62,9 +87,6 @@ export async function phaseEnrich(
     Math.min(32, parseInt(process.env.TAG_ENRICH_CONCURRENCY || '', 10) || 6),
   );
 
-  // Skip the loop when both are disabled: running it would stamp enrichedAt on
-  // empty rows and mask a later re-enable.
-  const metaIds = lastfmEnabled || lyricsEnabled ? ids : [];
   await mapPool(metaIds, concurrency, async (id) => {
     const t = db.getTrack(id);
     if (!t) return;
@@ -102,21 +124,20 @@ export async function phaseEnrich(
     if (!trackTagsOn && fetchedTags) enrichedTags += 1;
     if (lyricExcerpt) enrichedLyrics += 1;
     if (enrichedTracks % 100 === 0) {
-      console.log(
-        `[tag] enriched ${enrichedTracks}/${metaIds.length} (lastfm: ${enrichedTags}, lyrics: ${enrichedLyrics})`,
-      );
+      step.progress(enrichedTracks, metaIds.length);
       reportProgress({ phase: 'enrich', label: 'Enriching metadata', done: enrichedTracks, total: metaIds.length });
     }
   });
 
   enrichedTags += await backfillLastfmTrackTags(trackTagIds, concurrency);
-  enrichedYears = await backfillOriginalYears(yearIds, reEnrich, concurrency);
+  const years = await backfillOriginalYears(yearIds, reEnrich, concurrency);
 
-  logEvent(
-    'info',
-    `Metadata fetched for ${enrichedTracks.toLocaleString('en-GB')} tracks ` +
-      `(${enrichedTags} Last.fm, ${enrichedLyrics} lyrics, ${enrichedYears} original years)`,
-  );
+  step.done({
+    summary: F.enrichSummary({
+      tracks: enrichedTracks, tags: enrichedTags, lyrics: enrichedLyrics,
+      years: years.found, yearsAsked: years.asked, yearErrors: years.errors,
+    }),
+  });
 }
 
 // Track-level Last.fm tags, opt-in (embedding.enrichment.lastfmTrackTags). One
@@ -132,7 +153,7 @@ export async function backfillLastfmTrackTags(
   pacer: LastfmPacer = createLastfmPacer(),
 ): Promise<number> {
   if (!ids.length) return 0;
-  console.log(`[tag] track tags: ${ids.length} tracks to look up via Last.fm (~4/s)`);
+  runlog.debug(`track tags: ${ids.length} tracks to look up via Last.fm (~4/s)`);
   reportProgress({ phase: 'enrich', label: 'Fetching track tags', done: 0, total: ids.length });
   const source = lastfm.pacedTagSource(pacer);
   let checked = 0;
@@ -154,19 +175,14 @@ export async function backfillLastfmTrackTags(
     if (merged.answered && merged.trackTagCount > 0) ownTags += 1;
     if (stored) listed += 1;
     if (checked % 100 === 0) {
-      console.log(`[tag] track tags ${checked}/${ids.length} (${ownTags} with their own tags)`);
+      runlog.progress(checked, ids.length);
       reportProgress({ phase: 'enrich', label: 'Fetching track tags', done: checked, total: ids.length });
     }
   });
   const left = ids.length - answered - unaskable;
-  logEvent(
-    pacer.gaveUp ? 'warning' : 'info',
-    `Last.fm track tags: ${answered.toLocaleString('en-GB')} tracks answered, ` +
-      `${ownTags.toLocaleString('en-GB')} with tags of their own` +
-      (pacer.gaveUp
-        ? ` — Last.fm stopped answering, ${left.toLocaleString('en-GB')} left for the next run`
-        : left > 0 ? `, ${left.toLocaleString('en-GB')} left for the next run` : ''),
-  );
+  const said = `Last.fm track tags: ${F.fmtCount(answered)} tracks answered, ${F.fmtCount(ownTags)} with tags of their own`;
+  if (pacer.gaveUp) runlog.problem('warning', `${said}. Last.fm stopped answering, so ${F.fmtCount(left)} are left for the next run.`);
+  else runlog.note(`${said}${left > 0 ? `, ${F.fmtCount(left)} left for the next run` : ''}`);
   return listed;
 }
 
@@ -199,7 +215,6 @@ export async function backfillOriginalYears(
   yearIds: string[],
   retryMisses: boolean,
   concurrency: number,
-): Promise<number> {
-  const stats = await runYearLookups(yearIds, { force: retryMisses, concurrency });
-  return stats.found;
+): Promise<YearPassStats> {
+  return runYearLookups(yearIds, { force: retryMisses, concurrency });
 }

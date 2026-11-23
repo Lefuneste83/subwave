@@ -48,6 +48,7 @@ process.env.STATE_DIR = stateDir;
 
 const db = await import('../src/music/library-db.js');
 const { audioEnergyOptions, runAudioEnergyPass } = await import('../src/music/propagated-energy.js');
+const { energyResult } = await import('../src/music/run-log-format.js');
 await db.open({ embeddingDim: 768, adoptStoredDim: true });
 
 after(async () => {
@@ -292,20 +293,11 @@ test('re-running is idempotent — nothing left to correct', () => {
   );
 });
 
-// The pass's log lines, captured from its console output.
-function logsOf(run: () => void): string[] {
-  const lines: string[] = [];
-  const orig = console.log;
-  console.log = (...args: unknown[]) => {
-    const line = args.map(String).join(' ');
-    if (line.startsWith('[audio-energy] ')) lines.push(line.slice('[audio-energy] '.length));
-  };
-  try {
-    run();
-  } finally {
-    console.log = orig;
-  }
-  return lines;
+// What the run log says of a pass (run-log-format.ts energyResult): its
+// summary, or nothing when the pass is a skip.
+function logsOf(run: () => ReturnType<typeof runAudioEnergyPass>): string[] {
+  const r = energyResult(run());
+  return 'summary' in r ? [r.summary] : [];
 }
 
 // Runs fn against a library whose score maps are all hidden, then puts them
@@ -324,7 +316,7 @@ function withNoScores<T>(fn: () => T): T {
 
 test('with both switches off, an empty library skips exactly as before the switches', () => {
   let res!: ReturnType<typeof runAudioEnergyPass>;
-  const logs = logsOf(() => { res = withNoScores(() => runAudioEnergyPass(OFF)); });
+  const logs = logsOf(() => (res = withNoScores(() => runAudioEnergyPass(OFF))));
   assert.deepEqual(res, { scope: 0, corrected: 0, agreed: 0, undecided: 0, skipped: 'no propagated tracks with audio scores' });
   assert.deepEqual(logs, [], 'and logs nothing, as before');
 });
@@ -332,12 +324,12 @@ test('with both switches off, an empty library skips exactly as before the switc
 test('with both switches off, the log line is the correction sentence alone', () => {
   const logs = logsOf(() => runAudioEnergyPass(OFF));
   assert.equal(logs.length, 1);
-  assert.match(logs[0], /^Audio-derived energy over \d+ propagated tracks — \d+ corrected, \d+ confirmed, \d+ left as-is \(audio not decisive\)$/);
+  assert.match(logs[0], /^\d+ of \d+ spread energies corrected, \d+ confirmed, \d+ left as they were \(audio not decisive\)$/);
 });
 
 test('a switch that is on says so even with nothing to do', () => {
   let res!: ReturnType<typeof runAudioEnergyPass>;
-  const idle = logsOf(() => { res = withNoScores(() => runAudioEnergyPass({ fillEmpty: true, overruleLlm: true })); });
+  const idle = logsOf(() => (res = withNoScores(() => runAudioEnergyPass({ fillEmpty: true, overruleLlm: true }))));
   assert.equal(res.skipped, 'no tracks with audio scores for this pass');
   assert.equal(res.fillScope, 0);
   assert.deepEqual(res.filled, { high: 0, medium: 0, low: 0 });
@@ -345,7 +337,7 @@ test('a switch that is on says so even with nothing to do', () => {
   assert.equal(res.overruled, 0);
   assert.equal(idle.length, 1);
   assert.match(idle[0], /no empty energies to fill/);
-  assert.match(idle[0], /no LLM energies with audio scores to check/);
+  assert.match(idle[0], /no LLM energies to check/);
 
   // With rows to correct but none to fill: on reads "nothing to fill", off says nothing.
   const sql = db.requireDb();

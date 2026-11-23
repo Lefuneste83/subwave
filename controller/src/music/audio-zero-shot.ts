@@ -31,7 +31,7 @@ export interface ZeroShotStats {
 }
 
 export interface ZeroShotSpec {
-  tag: string; // the per-batch console prefix
+  tag: string; // names the pass in its per-batch detail line
   logEvent: (kind: TaggerEventKind, text: string) => void;
   version: number; // rides the stored state beside the vocabulary hash
   vocabHash(): string;
@@ -195,7 +195,7 @@ export async function runZeroShotPass(spec: ZeroShotSpec): Promise<ZeroShotStats
     if (batch.length >= 500) {
       spec.writeScores(batch);
       batch = [];
-      console.log(`[${spec.tag}] ${scored}/${ids.length}`);
+      spec.logEvent('info', `${spec.tag}: ${scored}/${ids.length} scored`);
     }
   }
   spec.writeScores(batch);

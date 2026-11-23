@@ -5,6 +5,7 @@
 // music/original-year-policy.ts; which tracks are due is the year facet row
 // (library-db/facets.ts yearLookupDueIds).
 
+import * as runlog from './run-log.js';
 import * as subsonic from './subsonic.js';
 import * as musicbrainz from './musicbrainz.js';
 import * as discogs from './discogs.js';
@@ -47,13 +48,11 @@ export interface YearPassStats {
 // inside the run's scope); a resolved or manual year is never re-asked.
 export async function runYearLookups(
   ids: readonly string[],
-  opts: { force?: boolean; concurrency?: number; label?: string } = {},
+  opts: { force?: boolean; concurrency?: number } = {},
 ): Promise<YearPassStats> {
   const stats: YearPassStats = { asked: 0, found: 0, discogs: 0, notFound: 0, errors: 0 };
   if (!ids.length) return stats;
-  const label = opts.label ?? '[tag]';
-  const sources = discogs.discogsToken() && !discogs.discogsRefused() ? 'MusicBrainz, then Discogs' : 'MusicBrainz';
-  console.log(`${label} original years: ${ids.length} era-suspect tracks to resolve via ${sources} (~1/s)`);
+  runlog.debug(`original years: ${ids.length} era-suspect tracks to resolve via ${yearSources()} (~1/s)`);
   reportProgress({ phase: 'enrich', label: 'Resolving original years', done: 0, total: ids.length });
   await mapPool([...ids], Math.max(1, Math.min(opts.concurrency ?? 4, 4)), async (id) => {
     const t = db.getTrack(id);
@@ -72,15 +71,14 @@ export async function runYearLookups(
     else if (outcome.kind === 'not-found') stats.notFound += 1;
     else stats.errors += 1;
     if (stats.asked % 25 === 0) {
-      console.log(`${label} original years ${stats.asked}/${ids.length} (${stats.found} resolved, ${stats.errors} errors)`);
+      runlog.progress(stats.asked, ids.length);
       reportProgress({ phase: 'enrich', label: 'Resolving original years', done: stats.asked, total: ids.length });
     }
   });
-  console.log(
-    `${label} original years done: ${stats.found} found` +
-      (stats.discogs ? ` (${stats.discogs} from Discogs)` : '') +
-      `, ${stats.notFound} not found, ${stats.errors} errors` +
-      (stats.errors ? ' (retried later: 1 h, 1 day, then 7 days)' : ''),
-  );
   return stats;
+}
+
+// Where the lookups go, for the step's "Runs on" line.
+export function yearSources(): string {
+  return discogs.discogsToken() && !discogs.discogsRefused() ? 'MusicBrainz, then Discogs' : 'MusicBrainz';
 }

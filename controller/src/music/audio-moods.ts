@@ -4,7 +4,7 @@
 import crypto from 'node:crypto';
 import * as db from './library-db.js';
 import { moodVocab, moodPromptFor } from '../settings.js';
-import { makeEventLogger } from './tagger-progress.js';
+import { stepDetail } from './run-log.js';
 import { CALIBRATION_VERSION, selectAudioMoods, type MoodBaselines } from './audio-calibration.js';
 import {
   relabelAllFromStoredScores,
@@ -12,8 +12,6 @@ import {
   type ZeroShotSpec,
   type ZeroShotStats,
 } from './audio-zero-shot.js';
-
-const logEvent = makeEventLogger('audio-moods');
 
 // Prompt for one mood: its operator-edited CLAP sound-description
 // (settings.moods[].clapPrompt), or the bare word. CLAP was trained on audio
@@ -46,7 +44,7 @@ export type AudioMoodStats = ZeroShotStats;
 
 const MOOD_PASS: ZeroShotSpec = {
   tag: 'audio-moods',
-  logEvent,
+  logEvent: stepDetail,
   version: CALIBRATION_VERSION,
   vocabHash: () => moodVocabHash(),
   vocab: () => {

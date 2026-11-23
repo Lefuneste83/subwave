@@ -162,8 +162,11 @@ const at = (id: string, f: string) => requests.findIndex((q) => of(id)(q) && ask
 // A regular run with the whole-file lane on (the planned regular run), the
 // console lines it printed captured.
 // The closing zero-shot scoring (audio moods, descriptors, the library-wide
-// audio-energy check) says one [audio-energy] line per pass that runs it.
-const isEnergyLine = (l: string) => l.startsWith('[audio-energy]');
+// audio-energy check) is its own step in the run log: one result line per pass
+// that runs it.
+const isEnergyLine = (l: string) => /^[✔⚠✖] \[\d+\/\d+\] Score moods, sound descriptors and energies/.test(l);
+const header = (title: RegExp) => (l: string) => new RegExp(`^▶ \\[\\d+/\\d+\\] ${title.source}`).test(l);
+const skipLine = (title: RegExp) => (l: string) => new RegExp(`^▷ \\[\\d+/\\d+\\] ${title.source}.* — skipped: `).test(l);
 let energyLinesWithoutHotMix = -1;
 
 async function regularRun(): Promise<{ stats: Awaited<ReturnType<typeof runAnalysisPass>>; lines: string[] }> {
@@ -214,8 +217,8 @@ test('with Hot Mix on, a new track is analysed, then gridded, then its structure
   // The off-Hot-Mix track from the test before is due too, and taken.
   assert.ok(at('off1', 'grid') >= 0, 'the backlog is measured too');
   assert.ok(at('znew1', 'grid') < at('off1', 'grid'), 'the run\'s new tracks go first');
-  assert.ok(lines.some((l) => /regular run: grid \d+ planned of \d+ due/.test(l)), lines.join('\n'));
-  assert.ok(lines.some((l) => /regular run: structure \d+ planned of \d+ due/.test(l)), lines.join('\n'));
+  assert.ok(lines.some(header(/Beat grid for Hot Mix/)), lines.join('\n'));
+  assert.ok(lines.some(header(/Phrase structure for Hot Mix/)), lines.join('\n'));
   assert.deepEqual(stats.beatGrid, { analyzed: 4, failed: 0, scope: 4 }, JSON.stringify(stats));
   // The grid and structure steps write no vector, so they never repeat the
   // library-wide scoring: as many audio-energy passes as without Hot Mix.
@@ -228,7 +231,7 @@ test('with Hot Mix on, a new track is analysed, then gridded, then its structure
   assert.ok(!('beatGrid' in again.stats), 'nothing measured: no figures');
 });
 
-test('an analyzer without the grid gets nothing gridded, says so, and still measures stored grids', async () => {
+test('an analyzer without the grid gets nothing gridded, its step says why, and stored grids are still measured', async () => {
   await hotMix(true);
   gridCapable = false;
   structureCapable = true;
@@ -241,12 +244,13 @@ test('an analyzer without the grid gets nothing gridded, says so, and still meas
   assert.ok(!requests.some((q) => asks(q, 'grid')), JSON.stringify(requests));
   assert.ok(at('stored1', 'structure') >= 0, 'the structure runs on the stored grid');
   assert.equal(db.getStructure('stored1')?.status, 'ok');
-  const notices = lines.filter((l) => l.startsWith('[analyze] A show has Hot Mix on'));
-  assert.equal(notices.length, 1, lines.join('\n'));
-  assert.match(notices[0], /cannot measure the beat grid/);
+  const skipped = lines.filter(skipLine(/Beat grid for Hot Mix/));
+  assert.equal(skipped.length, 1, lines.join('\n'));
+  assert.match(skipped[0], /cannot measure it/);
+  assert.ok(lines.some(header(/Phrase structure for Hot Mix/)), 'the structure step ran');
 });
 
-test('an analyzer that has not said is asked for neither, and the run says so once', async () => {
+test('an analyzer that has not said is asked for neither, and each step says so once', async () => {
   await hotMix(true);
   gridCapable = undefined;
   structureCapable = undefined;
@@ -255,9 +259,9 @@ test('an analyzer that has not said is asked for neither, and the run says so on
   assert.ok(at('unknown1', 'head') >= 0);
   assert.ok(!requests.some((q) => asks(q, 'grid') || asks(q, 'structure')), JSON.stringify(requests));
   assert.ok(!('beatGrid' in stats));
-  const notices = lines.filter((l) => l.startsWith('[analyze] A show has Hot Mix on'));
-  assert.equal(notices.length, 1, lines.join('\n'));
-  assert.match(notices[0], /has not said/);
+  const skipped = lines.filter((l) => skipLine(/Beat grid for Hot Mix/)(l) || skipLine(/Phrase structure for Hot Mix/)(l));
+  assert.equal(skipped.length, 2, lines.join('\n'));
+  for (const l of skipped) assert.match(l, /has not said/);
 });
 
 test('a grid the analyzer fails on is counted as a failure, never fatal to the run', async () => {
@@ -289,7 +293,7 @@ test('a regular run scores once, after the model lane, never after a whole-file 
   assert.ok(loud >= 0 && loud < at('once1', 'head'), 'the lead whole-file slice ran first');
   assert.equal(lines.filter(isEnergyLine).length, 1, lines.join('\n'));
   const scored = lines.findIndex(isEnergyLine);
-  const modelLane = lines.findIndex((l) => /regular run: head \d+ planned/.test(l));
+  const modelLane = lines.findIndex(header(/Find the intro, outro, tempo and key/));
   assert.ok(modelLane >= 0 && scored > modelLane, lines.join('\n'));
 });
 
