@@ -10,6 +10,10 @@
 //   - revert restores and stays reverted through a re-analysis until a forced
 //     apply; a failed grid attempt changes nothing;
 //   - a moved tempo word marks the text vector, an unmoved one doesn't;
+//   - a grid held only by its coverage that refines the head's tempo (within
+//     10 %) writes the tempo, keeps the head's beats and bars, keeps the head
+//     for --revert, and the ending's tempo follows; one on another metrical
+//     level stays held;
 //   - the window and bar arithmetic.
 // Run: `npm test -- grid-apply`.
 
@@ -272,6 +276,49 @@ test('the ending goes back with the head when the grid no longer passes; held ne
   seed('o7');
   db.writeGridResult('o7', { grid: answer() });
   assert.equal(db.getGrid('o7')!.headOutroJson, null);
+});
+
+// 124.0 over librosa's 123.05, 0.786 of the beats on the grid.
+test('a coverage-held grid refining the head writes its tempo and keeps the head\'s beats and bars', () => {
+  seed('f1', 123.05);
+  db.writeGridResult('f1', { grid: answer({ coverage: 0.786 }) });
+  const r = row('f1');
+  assert.equal(r.bpm, 124);
+  assert.deepEqual(JSON.parse(r.beats_json!), HEAD_BEATS);
+  assert.deepEqual(JSON.parse(r.bars_json!), HEAD_BARS);
+  const g = grid('f1');
+  assert.equal(g.applied, 1);
+  assert.equal(g.headBpm, 123.05);
+  assert.deepEqual(JSON.parse(g.headBeatsJson!), HEAD_BEATS);
+  // Re-run over the applied row: the head is the kept one, not the grid's own.
+  assert.equal(db.applyGridToTrack('f1', { force: true }), 'applied');
+  assert.equal(grid('f1').headBpm, 123.05);
+  assert.equal(db.revertGridOnTrack('f1'), true);
+  assert.equal(row('f1').bpm, 123.05);
+  assert.deepEqual(JSON.parse(row('f1').bars_json!), HEAD_BARS);
+  assert.equal(grid('f1').applied, -1);
+});
+
+test('a coverage-held grid on another metrical level stays held', () => {
+  seed('f2', 99.38);
+  db.writeGridResult('f2', { grid: answer({ coverage: 0.786 }) });
+  assert.equal(row('f2').bpm, 99.38);
+  assert.equal(grid('f2').applied, 0);
+  seed('f3', 62); // half the grid's tempo
+  db.writeGridResult('f3', { grid: answer({ coverage: 0.786 }) });
+  assert.equal(row('f3').bpm, 62);
+});
+
+test('the ending follows a refined tempo, its beats and bars kept', () => {
+  db.upsertTrackMeta('f4', { title: 'f4', artist: 'A', album: 'B', duration: 340 } as never);
+  db.upsertTrackAnalysis('f4', { bpm: 123.05, musicalKey: '8A', loudnessLufs: -9, beats: HEAD_BEATS, bars: HEAD_BARS, outro: OUTRO, source: 'full' } as never);
+  db.writeGridResult('f4', { grid: answer({ coverage: 0.786 }) });
+  const o = outroOf('f4');
+  assert.equal(o.bpm, 124);
+  assert.deepEqual(o.beats, TAIL_BEATS);
+  assert.deepEqual(o.bars, TAIL_BARS);
+  assert.equal(db.revertGridOnTrack('f4'), true);
+  assert.equal(outroOf('f4').bpm, 61);
 });
 
 test('window and bar arithmetic', () => {

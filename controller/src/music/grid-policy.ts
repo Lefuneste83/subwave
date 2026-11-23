@@ -4,7 +4,8 @@
 // applyGridToTrack) and the dry-run report (music/grid-report.ts). Pure.
 //
 // A grid replaces the stored BPM only when the model held it with confidence:
-//   - most detected beats sit on the fitted grid (coverage);
+//   - most detected beats sit on the fitted grid (coverage), OR the grid
+//     refines the head's own tempo (below);
 //   - the main tempo covers most of the track, counted over every segment
 //     within STEADY_TEMPO_BAND of it (a live drummer or a break splits a steady
 //     song into segments that all agree; the main segment alone held 27 such
@@ -12,6 +13,23 @@
 //   - at most maxBpm: the only confident grids above it were double-time
 //     readings (220 and 226 for songs near 110). Octave-safe: a grid above it
 //     is held, the stored value kept, never halved to fit.
+// The refinement. The head's tempo (tracks.bpm without an applied grid) is
+// librosa beat_track over the first 40 s, quantised to the tempogram's lags
+// (…112.35, 117.45, 123.05, 129.20…, about 5 % apart near 120): it can be off
+// by half a step even when it found the right pulse. A grid whose tempo sits
+// within refineBand (10 %, a plain ratio, never octave-folded) of that head
+// estimate agrees with it on the metrical level, and is always the more
+// precise reading of the same pulse, so the coverage gate holds the TEMPO only
+// when the two disagree on the level (x2, x0.5, 3:2, x1.26…): a metrical
+// correction needs the evidence coverage gives. The steady share and the
+// 200 BPM ceiling still apply. Only the tempo: a coverage-held grid's beats
+// and bars are never written (both stay the head's, as when the bars are
+// held for their downbeats), since coverage is what says the grid's beats
+// sit where the music's do. No head tempo (null, 0, absent: a caller that has
+// none, or a track the head never measured) is the coverage rule alone. For a
+// row the grid is already written over, the head is the kept one
+// (track_grid.head_bpm), never the grid's own value (headTempoOf).
+//
 // Bar lines also need the downbeats to agree on one phase (one real track
 // read 0.56: its bar line split across two phases). With the BPM written and
 // the bars held, beats and bars both stay the head's own, so they never
@@ -53,6 +71,9 @@ export const GRID_WRITE_GATE = {
   minHalfbar: 0.9,        // downbeats on the dominant phase or two beats away
   minDropDb: 15,          // the drop that placed a half-bar grid's bar line
   maxBpm: 200,
+  // A grid within this ratio of the head's tempo refines it (header): the
+  // tempo is written without the coverage, never the beats or bars.
+  refineBand: 0.1,
 } as const;
 
 // The head analysis reads the first ANALYZE_SECONDS (40 s by default): with no
@@ -80,6 +101,20 @@ export interface GridDecision {
   bars: boolean;
   steadyShare: number | null;
   held: string[];
+  // The tempo passed by the refinement alone (coverage under the gate).
+  refined: boolean;
+}
+
+// The head tempo the decision compares the grid with: the kept head of a row
+// the grid is written over, else the row's own stored tempo.
+export function headTempoOf(g: Pick<TrackGrid, 'applied' | 'headBpm'> | null | undefined, storedBpm: number | null | undefined): number | null {
+  const v = g?.applied === 1 ? g.headBpm : storedBpm;
+  return v != null && Number.isFinite(v) && v > 0 ? v : null;
+}
+
+// The grid's tempo over the head's, or null with no usable head.
+export function headRatio(gridBpm: number, headBpm: number | null | undefined): number | null {
+  return headBpm != null && Number.isFinite(headBpm) && headBpm > 0 && Number.isFinite(gridBpm) ? gridBpm / headBpm : null;
 }
 
 const r2 = (v: number | null | undefined) => (v == null || !Number.isFinite(v) ? null : Math.round(v * 100) / 100);
@@ -94,20 +129,29 @@ export function halfbarTrusted(g: Pick<GridShape, 'downbeatHalfbar' | 'downbeatP
     g.downbeatPhase === 'drop' && drop != null && Number.isFinite(drop) && drop >= GRID_WRITE_GATE.minDropDb;
 }
 
-export function gridDecision(g: GridShape | null | undefined): GridDecision {
+export function gridDecision(g: GridShape | null | undefined, headBpm?: number | null): GridDecision {
   if (!g || g.status !== 'ok' || g.bpm == null || !g.segments.length) {
-    return { bpm: false, bars: false, steadyShare: null, held: ['no measured grid'] };
+    return { bpm: false, bars: false, steadyShare: null, held: ['no measured grid'], refined: false };
   }
   const steady = steadyShare(g);
   const held: string[] = [];
-  if ((g.coverage ?? 0) < GRID_WRITE_GATE.minCoverage) held.push(`coverage ${r2(g.coverage)}`);
+  const covered = (g.coverage ?? 0) >= GRID_WRITE_GATE.minCoverage;
+  const ratio = headRatio(g.bpm, headBpm);
+  // The band's edge is in (a float epsilon: 110 / 100 - 1 is 0.10000000000000009).
+  const refines = ratio != null && Math.abs(ratio - 1) <= GRID_WRITE_GATE.refineBand + 1e-9;
+  if (!covered && !refines) {
+    held.push(`coverage ${r2(g.coverage)}` +
+      (ratio != null ? `, grid ${g.bpm} vs head ${headBpm} BPM (x${f2(ratio)})` : ''));
+  }
   if ((steady ?? 0) < GRID_WRITE_GATE.minSteadyShare) held.push(`steady tempo on ${r2(steady)} of the track`);
   if (g.bpm > GRID_WRITE_GATE.maxBpm) held.push(`${g.bpm} BPM, above ${GRID_WRITE_GATE.maxBpm}: possibly double time`);
   const bpm = held.length === 0;
   const phased = !!g.beatsPerBar && g.segments.some((s) => s.downbeatMs != null);
-  const bars = bpm && phased &&
+  const bars = bpm && covered && phased &&
     ((g.downbeatAgreement ?? 0) >= GRID_WRITE_GATE.minDownbeatAgreement || halfbarTrusted(g));
-  if (bpm && !bars) {
+  if (bpm && !covered) {
+    held.push(`bars: coverage ${r2(g.coverage)}`);
+  } else if (bpm && !bars) {
     // The share appears only once the worker reported it: a grid measured
     // before keeps its old message.
     held.push(`bars: downbeat agreement ${r2(g.downbeatAgreement)}` +
@@ -115,7 +159,7 @@ export function gridDecision(g: GridShape | null | undefined): GridDecision {
         ? `, half-bar ${f2(g.downbeatHalfbar)}, ${g.downbeatPhase === 'drop' ? `drop ${g.downbeatDropDb} dB` : 'no clear drop'}`
         : ''));
   }
-  return { bpm, bars, steadyShare: steady, held };
+  return { bpm, bars, steadyShare: steady, held, refined: bpm && !covered };
 }
 
 // The head window the stored beats and bars cover: up to the last of them,

@@ -110,6 +110,16 @@ test('the gate holds an unconfident grid, and its word change is no re-embed', (
   assert.equal(drift.wouldWriteBpm, true);
 });
 
+test('the report decides with the head tempo: a coverage-held refinement writes its BPM, not its bars', () => {
+  const r = R.compareGrid(track({ bpm: 123.05 }), grid({ coverage: 0.786 }))!;
+  assert.equal(r.wouldWriteBpm, true);
+  assert.equal(r.wouldWriteBars, false);
+  assert.equal(r.heldBecause, 'bars: coverage 0.79');
+  const far = R.compareGrid(track({ bpm: 99.38 }), grid({ coverage: 0.786, bpm: 125 }))!;
+  assert.equal(far.wouldWriteBpm, false);
+  assert.match(far.heldBecause ?? '', /^coverage 0.79/);
+});
+
 test('bars are held when the downbeats split, written when they agree', () => {
   assert.equal(R.compareGrid(track(), grid({ downbeatAgreement: 0.56 }))!.wouldWriteBars, false);
   assert.match(R.compareGrid(track(), grid({ downbeatAgreement: 0.56 }))!.heldBecause ?? '', /downbeat agreement 0.56/);

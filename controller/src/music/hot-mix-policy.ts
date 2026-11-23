@@ -14,7 +14,9 @@
 //     the grid's own tempo;
 //   - a measured grid whose main tempo is steady (grid-policy.ts steadyShare at
 //     GRID_WRITE_GATE.minSteadyShare, at most its maxBpm) but which was not
-//     written, typically held only by its coverage → the grid's tempo;
+//     written, typically held by its coverage on a metrical disagreement with
+//     the head (a grid that only refines the head's tempo is written,
+//     grid-policy.ts) → the grid's tempo;
 //   - anything else (no grid, an unsteady one, double time) → unknown, so the
 //     track is out of a Hot Mix pick like any unmeasured track.
 // Nothing stored is rewritten, and no other reader (a show without Hot Mix,

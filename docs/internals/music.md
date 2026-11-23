@@ -928,6 +928,23 @@ head's, so they never disagree): most detected beats on the grid (coverage ≥
 song) on ≥ 0.6 of the track, at most 200 BPM (the only confident readings above
 it were double time; held, never halved), bars also downbeat agreement ≥ 0.75,
 or the half-bar case below.
+**The refinement.** Coverage holds the TEMPO only when the grid disagrees with
+the head on the metrical level. The head's tempo (`tracks.bpm` with no grid
+applied) is librosa `beat_track` over the first 40 s, quantised to the
+tempogram's lags (…112.35, 117.45, 123.05, 129.20…, about 5 % apart near 120),
+so it can sit half a step off a pulse it found correctly. A grid within 10 % of
+it (`GRID_WRITE_GATE.refineBand`, a plain ratio, never octave-folded) reads the
+same pulse more precisely, and its tempo is written under the coverage gate;
+the steady share and the 200 BPM ceiling still apply. A metrical disagreement
+(×2, ×0.5, 3:2, ×1.26…) is a correction, not a refinement, and still needs the
+coverage. The bars always need it: a grid that passes on its tempo alone keeps
+the head's beats and bars (held reason `bars: coverage 0.79`), as a grid whose
+downbeats split does. The head is the kept one (`head_bpm`) on a row the grid
+is already written over, never the grid's own value, and a track with no head
+tempo decides on the coverage alone. `gridDecision(g, headBpm)` takes it;
+`applyGridToTrack` and the grid report pass it. The 23 Nov production count:
+5,104 grids held by coverage alone, of which 2,799 within 4 % and 80 at 4–10 %
+of the head, the rest metrical disagreements left held.
 **The half-bar case.** Beat This! often cannot tell beat 1 from beat 3 in the
 body of a 4/4 track: its downbeats land on phase p and p+2 alternately, the
 single-phase agreement falls under 0.75, and the track had no bars (no
@@ -977,6 +994,14 @@ after every head or tail write, so a re-analysis's fresh head values become the 
 kept and the grid goes over them again. The head's own values stay on the grid
 row (`head_*`); `npm run grid-apply -- --revert` puts them back and marks the
 rows reverted (a re-analysis doesn't re-apply them) until `npm run grid-apply`.
+`npm run grid-apply` also re-decides every measured grid under today's gate
+(a gate change such as the refinement reaches grids measured before it only
+through it). Its sample mode checks a gate on a few tracks first:
+`--ids <file>` (one id per line) limits the run, and `--report <csv>` writes
+one row per track (stored BPM before and after, head and grid tempo and their
+ratio, coverage, steady share, applied before/after, the outcome, which rule
+passed the tempo, the tempo word before/after); with `--dry-run` it reports
+what would change and writes nothing.
 A moved tempo word marks the vector (`markTextVectorDirtyIfSoundChanged`); the
 next tagging run re-embeds it. `npm run grid-report` is the read-only dry run
 (stored against grid tempo, octave and 3:2 fixes, tempo-word moves, bar shifts):

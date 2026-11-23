@@ -311,6 +311,15 @@ export function gridIdsApplied(state: GridApplied): string[] {
     .map((r) => r.track_id);
 }
 
+// What `npm run grid-apply`'s report reads of one track: a narrow
+// primary-key read (the row's analysis JSON is never touched). Null when the
+// track has no library row.
+export function gridApplyTrackFacts(id: string): { artist: string; title: string; bpm: number | null } | null {
+  const r = requireDb().prepare('SELECT artist, title, bpm FROM tracks WHERE id = ?').get(id) as
+    { artist: string | null; title: string | null; bpm: number | null } | undefined;
+  return r ? { artist: r.artist ?? '', title: r.title ?? '', bpm: r.bpm } : null;
+}
+
 // Ids with a measured grid, for `npm run grid-apply`.
 export function measuredGridIds(): string[] {
   return (requireDb().prepare(`SELECT track_id FROM track_grid WHERE status = 'ok' ORDER BY track_id`).all() as Array<{ track_id: string }>)

@@ -11,6 +11,14 @@
 //   - A grid measured before the worker reported the half-bar share (null)
 //     decides exactly as before: the single-phase rule alone, and the same
 //     held message.
+//   - A grid held ONLY by its coverage still writes its tempo when it refines
+//     the head's own estimate (within GRID_WRITE_GATE.refineBand, a plain
+//     ratio, never octave-folded): the head is librosa's 40 s beat_track,
+//     quantised to tempogram lags about 5 % apart, so a grid within 10 % is
+//     the same metrical level, measured more precisely. Its bars stay held on
+//     coverage, and a metrical disagreement (x2, x0.5, 3:2, x1.26) still needs
+//     the coverage. No head tempo (null/0/absent): the coverage rule exactly
+//     as before.
 // Run: `npm test -- grid-policy`.
 
 import test from 'node:test';
@@ -75,4 +83,72 @@ test('the rescue never bypasses the BPM gate, the metre or a placed downbeat', (
   assert.equal(gridDecision({ ...base, ...rescue, bpm: 240 }).bars, false);
   assert.equal(gridDecision({ ...base, ...rescue, beatsPerBar: null }).bars, false);
   assert.equal(gridDecision({ ...base, ...rescue, segments: [{ ...base.segments[0], downbeatMs: null }] }).bars, false);
+});
+
+// The refinement rule. 124.0 over a head of 123.05, 0.786 of the beats on the
+// grid, the main tempo on ~0.92 of the track.
+const at = (bpm: number) => {
+  const periodUs = Math.round(60_000_000 / bpm);
+  return { bpm, segments: [{ anchorMs: 480, periodUs, beats: Math.round(312_800_000 / periodUs) + 1, downbeatMs: 480 }] };
+};
+const refine = { ...base, coverage: 0.786, ...at(124.0) };
+
+test('the refinement band is 10 %', () => {
+  assert.equal(GRID_WRITE_GATE.refineBand, 0.1);
+});
+
+test('a coverage-held grid within 10 % of the head writes its tempo, never its bars', () => {
+  const d = gridDecision(refine, 123.05);
+  assert.ok((d.steadyShare ?? 0) > 0.9);
+  assert.equal(d.bpm, true);
+  assert.equal(d.bars, false, 'the bars still need the coverage');
+  assert.deepEqual(d.held, ['bars: coverage 0.79']);
+  assert.equal(d.refined, true);
+  // Both edges of the band, plain ratio.
+  assert.equal(gridDecision({ ...refine, ...at(110) }, 100).bpm, true);
+  assert.equal(gridDecision({ ...refine, ...at(90) }, 100).bpm, true);
+  assert.equal(gridDecision({ ...refine, ...at(111) }, 100).bpm, false);
+  assert.equal(gridDecision({ ...refine, ...at(89) }, 100).bpm, false);
+});
+
+test('a coverage-held grid on another metrical level stays held', () => {
+  // 125 against a head of 99.38: ratio 1.26.
+  const far = gridDecision({ ...refine, ...at(125) }, 99.38);
+  assert.equal(far.bpm, false);
+  assert.equal(far.bars, false);
+  assert.equal(far.refined, false);
+  assert.match(far.held.join('; '), /^coverage 0.79/);
+  assert.match(far.held.join('; '), /head 99.38/);
+  // An octave either way, and 3:2: never folded into the band.
+  assert.equal(gridDecision(refine, 62).bpm, false);
+  assert.equal(gridDecision(refine, 248).bpm, false);
+  assert.equal(gridDecision(refine, 82.7).bpm, false);
+});
+
+test('no head tempo: the coverage rule exactly as before', () => {
+  const old = gridDecision(refine);
+  assert.equal(old.bpm, false);
+  assert.deepEqual(old.held, ['coverage 0.79']);
+  assert.deepEqual(gridDecision(refine, null), old);
+  assert.deepEqual(gridDecision(refine, 0), old);
+  assert.deepEqual(gridDecision(refine, Number.NaN), old);
+});
+
+test('at full coverage the head tempo changes nothing, whatever the ratio', () => {
+  const full = gridDecision(base);
+  assert.equal(full.refined, false);
+  for (const head of [62, 99.38, 123.05, 248, null]) {
+    assert.deepEqual(gridDecision(base, head), full, `head ${head}`);
+  }
+  const split = gridDecision({ ...base, downbeatAgreement: 0.53 }, 62);
+  assert.deepEqual(split.held, ['bars: downbeat agreement 0.53']);
+});
+
+test('the refinement never bypasses the steady share or the 200 BPM ceiling', () => {
+  const fast = gridDecision({ ...refine, bpm: 205, segments: [{ anchorMs: 480, periodUs: 292683, beats: 1070, downbeatMs: 480 }] }, 200);
+  assert.equal(fast.bpm, false);
+  assert.match(fast.held.join('; '), /above 200/);
+  const unsteady = gridDecision({ ...refine, segments: [{ anchorMs: 480, periodUs: 483871, beats: 300, downbeatMs: 480 }] }, 123.05);
+  assert.equal(unsteady.bpm, false);
+  assert.match(unsteady.held.join('; '), /steady tempo on/);
 });
