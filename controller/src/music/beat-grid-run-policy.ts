@@ -24,36 +24,25 @@ export interface BeatGridRunInput {
 export interface BeatGridRunDecision {
   grid: boolean;
   structure: boolean;
-  // Said once per run when Hot Mix wants a step the analyzer cannot (or has
-  // not said it can) run; null otherwise.
-  notice: string | null;
+  // Why a step Hot Mix wants does not run this pass, for its skip line in the
+  // run log (run-log.ts); absent for a step that runs.
+  reasons: Partial<Record<'grid' | 'structure', string>>;
 }
 
-const NAMES = { grid: 'the beat grid', structure: 'the track structure' } as const;
-
 export function beatGridRunDecision(input: BeatGridRunInput): BeatGridRunDecision {
-  if (!input.hotMix) return { grid: false, structure: false, notice: null };
-  const grid = input.gridCapable === true;
-  const structure = input.structureCapable === true;
-  const refused = (['grid', 'structure'] as const).filter((f) => (f === 'grid' ? input.gridCapable : input.structureCapable) === false);
-  const unknown = (['grid', 'structure'] as const).filter((f) => (f === 'grid' ? input.gridCapable : input.structureCapable) == null);
-  if (refused.length === 0 && unknown.length === 0) return { grid, structure, notice: null };
-  const names = (fs: readonly ('grid' | 'structure')[]) => fs.map((f) => NAMES[f]).join(' or ');
-  const parts: string[] = [];
-  if (refused.length) {
-    parts.push(
-      `the analyzer reports it cannot measure ${names(refused)} — rebuild the analyzer` +
-        (refused.includes('grid') ? ' (the beat grid needs the heavy image built with WITH_BEAT_GRID=1)' : ''),
-    );
+  if (!input.hotMix) return { grid: false, structure: false, reasons: {} };
+  const reasons: BeatGridRunDecision['reasons'] = {};
+  for (const f of ['grid', 'structure'] as const) {
+    const capable = f === 'grid' ? input.gridCapable : input.structureCapable;
+    if (capable === false) {
+      reasons[f] = 'this analyzer reports it cannot measure it; rebuild the analyzer' +
+        (f === 'grid' ? ' (the beat grid needs the heavy image built with WITH_BEAT_GRID=1)' : '');
+    } else if (capable == null) {
+      reasons[f] = 'the analyzer has not said whether it can measure it: an image that predates it ' +
+        '(rebuild the analyzer), or one whose workers were still starting; asked again next run';
+    }
   }
-  if (unknown.length) {
-    parts.push(
-      `the analyzer has not said whether it can measure ${names(unknown)} — an image that predates it ` +
-        '(rebuild the analyzer), or one whose workers were still starting; skipped this run, asked again next run',
-    );
-  }
-  const tail = !grid && structure ? '; the track structure is still measured on the grids already stored' : '';
-  return { grid, structure, notice: `A show has Hot Mix on, but ${parts.join('; and ')}${tail}` };
+  return { grid: input.gridCapable === true, structure: input.structureCapable === true, reasons };
 }
 
 /**

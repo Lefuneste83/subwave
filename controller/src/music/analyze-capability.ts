@@ -3,6 +3,8 @@
 // (scripts/analyze-capability.test.ts). The messages are the contract: this is
 // the only place an operator with a broken analyzer finds out what broke.
 
+import { modelProblem } from './run-log-format.js';
+
 type AnalysisDimension = 'audio' | 'vocal' | 'stem';
 
 // Which backend is answering, so the retry advice names something that exists.
@@ -53,58 +55,34 @@ export interface CapabilityDecision {
   notice: string | null;
 }
 
-const LABEL: Record<AnalysisDimension, string> = {
-  audio: 'audio',
-  vocal: 'vocal',
-  stem: 'stem',
+// What the dimension gives the station, and the model it needs, in the
+// operator's terms. Vocal ranges and the stem cache are the same Demucs
+// separation, so they fail together.
+const PRODUCT: Record<AnalysisDimension, string> = {
+  audio: 'Sounds-like fingerprint',
+  vocal: 'Vocals',
+  stem: 'Stems for blends',
 };
 
-// What the dimension needs, in the operator's terms. Vocal ranges and the stem
-// cache are the same Demucs separation, so they fail together.
 const MODEL: Record<AnalysisDimension, string> = {
   audio: 'CLAP',
   vocal: 'Demucs',
   stem: 'Demucs',
 };
 
-// How to get an image that has the model. Names the image rather than a build
-// arg: `ANALYZER_HEAVY=1` is the switch the compose files read, and it is inert
-// on the AIO (docs/unraid.md).
-const HEAVY_HINT =
-  'set ANALYZER_HEAVY=1 and recreate the analyzer, or run the -heavy AIO image';
-
-// What the operator has to restart to clear the sticky capability latch, which
-// is not the same process on every deployment: a sidecar remembers the error in
-// the analyzer container (server.py capability_errors, not cleared by a worker
-// respawn), while a local/AIO install latches in the controller's own module
-// state and only clears when the controller goes down.
-function retryHint(backend: AnalysisBackend): string {
-  if (backend === 'sidecar') return 'restart the analyzer (`docker compose restart analyzer`)';
-  if (backend === 'local') {
-    return 'restart the controller (this deployment runs the analyzer in-process, so there is no separate analyzer to restart)';
-  }
-  return 'restart the analyzer — or the controller, if it runs the analyzer in-process';
-}
-
+// The notice is the run log's model problem (run-log-format.ts modelProblem):
+// the model, the analyzer's own message shortened, and the fix. A model that
+// failed to load is remembered by whatever runs it (the analyzer container's
+// capability latch; the controller's own module state on a local/AIO
+// install), so the fix names that restart.
 export function backfillDecision(x: CapabilityInputs): CapabilityDecision {
   if (!x.wanted) return { widen: false, notice: null };
   if (x.capable !== false) return { widen: true, notice: null };
-  const label = LABEL[x.dimension];
-  const model = MODEL[x.dimension];
-  if (x.error) {
-    // The image has the model and it failed to load. The latch will not clear
-    // itself, so the retry has to be a restart.
-    return {
-      widen: false,
-      notice:
-        `${label} backfill skipped — ${model} is installed but failed to load: ${x.error}. ` +
-        `Fix the cause, then ${retryHint(x.backend ?? null)} to retry (the failure is remembered ` +
-        'until then, so the pass stops re-analysing tracks it cannot fill).',
-    };
-  }
   return {
     widen: false,
-    notice: `${label} backfill skipped — this analyzer is built without ${model} (${HEAVY_HINT})`,
+    notice: modelProblem({
+      product: PRODUCT[x.dimension], model: MODEL[x.dimension], error: x.error, backend: x.backend ?? null,
+    }),
   };
 }
 

@@ -81,7 +81,7 @@ test('a FAILED LOAD is told the truth instead, and never told to switch image', 
   assert.ok(!/ANALYZER_HEAVY/.test(d.notice!), 'load failure repeats the lean-image advice');
   assert.ok(!/built without/.test(d.notice!));
   // And it says how to retry, because the latch is deliberately sticky.
-  assert.match(d.notice!, /restart the analyzer/);
+  assert.match(d.notice!, /Restart the analyzer/);
 });
 
 test('the vocal dimension names Demucs, not CLAP', () => {
@@ -90,7 +90,7 @@ test('the vocal dimension names Demucs, not CLAP', () => {
   const broken = backfillDecision({
     dimension: 'vocal', wanted: true, capable: false, error: 'checkpoint is corrupt',
   });
-  assert.match(broken.notice!, /Demucs is installed but failed to load/);
+  assert.match(broken.notice!, /^Vocals skipped: Demucs failed to load/);
   assert.match(broken.notice!, /checkpoint is corrupt/);
 });
 
@@ -100,12 +100,12 @@ test('the stem dimension gets the same split, not the old dead-end advice', () =
   // to "use the heavy analyzer image" — advice to do the thing already done, in
   // the widening the rest of this module exists to stop doing that in.
   const lean = backfillDecision({ dimension: 'stem', wanted: true, capable: false, error: null });
-  assert.match(lean.notice!, /^stem backfill skipped/);
+  assert.match(lean.notice!, /^Stems for blends skipped/);
   assert.match(lean.notice!, /built without Demucs/);
   const broken = backfillDecision({
     dimension: 'stem', wanted: true, capable: false, error: 'checkpoint is corrupt',
   });
-  assert.match(broken.notice!, /Demucs is installed but failed to load/);
+  assert.match(broken.notice!, /Demucs failed to load/);
   assert.match(broken.notice!, /checkpoint is corrupt/);
   assert.ok(!/ANALYZER_HEAVY/.test(broken.notice!), 'stem load failure repeats the lean-image advice');
 });
@@ -120,18 +120,19 @@ test('the retry names a process that exists on THIS deployment', () => {
   // sending a heavy-image operator to the heavy image.
   const args = { dimension: 'audio', wanted: true, capable: false, error: 'no weights' } as const;
   const sidecar = backfillDecision({ ...args, backend: 'sidecar' });
-  assert.match(sidecar.notice!, /docker compose restart analyzer/);
+  assert.match(sidecar.notice!, /Restart the analyzer once/);
+  assert.ok(!/controller/.test(sidecar.notice!));
 
   const local = backfillDecision({ ...args, backend: 'local' });
-  assert.match(local.notice!, /restart the controller/);
+  assert.match(local.notice!, /Restart the controller/);
   assert.ok(
-    !/docker compose restart analyzer/.test(local.notice!),
+    !/Restart the analyzer/.test(local.notice!),
     'local backend told to restart a container it does not have',
   );
 
   // Unknown backend gets wording that covers both rather than guessing.
   const unknown = backfillDecision(args);
-  assert.match(unknown.notice!, /restart the analyzer/);
+  assert.match(unknown.notice!, /Restart the analyzer/);
   assert.match(unknown.notice!, /controller/);
 });
 
