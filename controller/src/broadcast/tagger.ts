@@ -448,8 +448,10 @@ function spawnChild(
         if (line.startsWith(EVENT_PREFIX)) {
           try {
             const ev = JSON.parse(line.slice(EVENT_PREFIX.length)) as TaggerEvent;
-            // makeEventLogger prints a terse echo just before this sentinel on the
-            // same stream; drop it so the drawer has no duplicate line.
+            // An older child printed a terse echo just before this sentinel on
+            // the same stream; drop it so the drawer has no duplicate line. A
+            // child now emits one or the other (tagger-progress.ts
+            // eventsAreRelayed).
             const last = tagger.lastLog[tagger.lastLog.length - 1];
             if (typeof last === 'string' && stripLogPrefix(last) === ev.text) tagger.lastLog.pop();
             tagger.lastLog.push({ kind: ev.kind, text: ev.text, at: ev.at });

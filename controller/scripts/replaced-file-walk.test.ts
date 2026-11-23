@@ -167,7 +167,9 @@ async function reconcile(...flags: string[]): Promise<{ out: string; check: stri
   const child = spawn(
     process.execPath,
     ['--import', 'tsx', '--import', preload, 'src/music/tag-library.ts', '--reconcile-only', ...flags],
-    { cwd: controller, env: process.env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 },
+    // As the controller spawns it: the status lines arrive as [event]
+    // sentinels, the channel the holds ride (tagger-progress.ts).
+    { cwd: controller, env: { ...process.env, SUBWAVE_TAGGER_MANAGED: '1' }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 },
   );
   let out = '';
   child.stdout.on('data', chunk => { out += chunk; });

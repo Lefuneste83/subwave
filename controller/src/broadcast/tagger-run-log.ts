@@ -10,9 +10,10 @@
 // newest RUN_LOG_CAP lines are held in memory; a reader that fell further
 // behind is told `gap`, and the file still has them all.
 //
-// A raw line is held RUN_LOG_HOLD_MS before it is committed, because the child's
-// makeEventLogger prints a terse echo just before each [event] sentinel and the
-// event replaces it, exactly as lastLog drops it. A held line keeps the time it
+// A raw line is held RUN_LOG_HOLD_MS before it is committed, because an older
+// child printed a terse echo just before each [event] sentinel and the event
+// replaced it, exactly as lastLog drops it (a child now emits one or the other,
+// tagger-progress.ts eventsAreRelayed). A held line keeps the time it
 // arrived. The log closes on the child's 'close', once its pipes have drained,
 // never on 'exit' and never because the next run started, and the page keeps
 // reading until the log reports `closed`.
@@ -25,7 +26,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { TaggerEvent } from '../music/tagger-progress.js';
+import { carriesOwnMark, type TaggerEvent } from '../music/tagger-progress.js';
 import type { MaintenanceMode } from './tagger-followups.js';
 
 export type RunLogLine = string | TaggerEvent;
@@ -154,7 +155,10 @@ export class RunLog {
   private commitEvent(ev: TaggerEvent): void {
     this.push({ seq: ++this.seq, line: ev });
     const ts = Number.isNaN(Date.parse(ev.at)) ? this.nowFn() : Date.parse(ev.at);
-    this.writeToSink(`${hhmmss(ts)}  [${ev.kind}] ${oneLine(ev.text)}\n`);
+    // A run-log line (music/run-log-format.ts) carries its own mark: no
+    // `[kind]` prefix in front of it.
+    const kind = carriesOwnMark(ev.text) ? '' : `[${ev.kind}] `;
+    this.writeToSink(`${hhmmss(ts)}  ${kind}${oneLine(ev.text)}\n`);
   }
 
   private push(entry: RunLogEntry): void {

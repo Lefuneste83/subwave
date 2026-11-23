@@ -105,6 +105,21 @@ test('event echo suppresses the preceding raw line', () => {
   assert.equal(sink.lines[0], '05:27:41  [success] Tagged 3 tracks\n');
 });
 
+test('a run-log line carries its own mark: the file adds no [kind] in front of it', () => {
+  t = 1_000_000;
+  const sink = makeSink();
+  const log = new RunLog({ runId: 'r4b', now, sink });
+  const at = '2026-10-21T05:27:41.000Z';
+  log.event({ kind: 'success', text: '✔ [3/9] Measure loudness — 29 done, 0 failed · 37 s', at }, () => false);
+  log.event({ kind: 'info', text: '    Runs on : analyzer at analyzer.local:8080', at }, () => false);
+  log.event({ kind: 'info', text: 'Scanned 3 tracks', at }, () => false);
+  assert.deepEqual(sink.lines, [
+    '05:27:41  ✔ [3/9] Measure loudness — 29 done, 0 failed · 37 s\n',
+    '05:27:41      Runs on : analyzer at analyzer.local:8080\n',
+    '05:27:41  [info] Scanned 3 tracks\n',
+  ]);
+});
+
 test('non-echo raw is committed before the event', () => {
   t = 1_000_000;
   const log = new RunLog({ runId: 'r5', now });

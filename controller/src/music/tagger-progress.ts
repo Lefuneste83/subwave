@@ -82,16 +82,39 @@ export function reportCatalogueReady(walked: number): void {
   console.log(CATALOGUE_PREFIX + JSON.stringify({ walked }));
 }
 
-// Bind an event logger to a module's console tag ('tag' / 'analyze'). Each call
-// emits BOTH the terse `[tag] …` line (docker logs stay greppable) AND the event
-// sentinel, so call sites stay one line. Both go to stdout back-to-back so the
-// capture side can drop the plain echo and keep only the structured entry.
+// Set on a controller-spawned child's env (broadcast/tagger.ts): the controller
+// reads this child's stdout and relays the sentinels. Re-exported by
+// tagger-lock.ts, which reads it for the pidfile.
+export const MANAGED_ENV = 'SUBWAVE_TAGGER_MANAGED';
+
+// Whether this process's stdout is read by the controller. Each status line is
+// then emitted ONCE, as the event sentinel the panel and the run's log file
+// render; run from a shell (`npm run tag-library` / `npm run analyze`), once,
+// as the plain line the operator reads. Never both: a plain echo before each
+// sentinel was the source of every doubled line in the run log, whenever the
+// capture side failed to pair the two (any prefix it did not know).
+export function eventsAreRelayed(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[MANAGED_ENV] === '1';
+}
+
+// A run-log line (music/run-log-format.ts) carries its own mark or its own
+// indentation: the panel and the log file add no kind prefix to it.
+// MIRROR: web/components/admin/LibraryTaggingPanel.tsx `carriesOwnMark`.
+const OWN_MARK_RE = /^(?:\s|━━|[▶▷✔⚠✖…■])/;
+export function carriesOwnMark(text: string): boolean {
+  return OWN_MARK_RE.test(text);
+}
+
+// Bind an event logger to a module's console tag ('tag' / 'analyze'): the
+// terse `[tag] …` line in a shell, the event sentinel under the controller
+// (eventsAreRelayed). New status lines go through music/run-log.ts instead,
+// which words them in the run log's one format.
 export function makeEventLogger(prefix: string) {
   return (kind: TaggerEventKind, text: string, opts: { hold?: boolean } = {}): void => {
-    // Collapse newlines: a multi-line echo defeats the controller's de-dup.
+    // Collapse newlines: one event is one line.
     const line = text.replace(/\s*\n\s*/g, ' ');
-    console.log(`[${prefix}] ${line}`);
-    reportEvent({ kind, text: line, ...opts });
+    if (eventsAreRelayed()) reportEvent({ kind, text: line, ...opts });
+    else console.log(`[${prefix}] ${line}`);
   };
 }
 
