@@ -15,7 +15,7 @@ const endpointStats = new Map<string, any>();
 // songId -> { id, title, artist, count }: how often each song has come back.
 const songCoverage = new Map<string, any>();
 
-type RequestPurpose = 'api' | 'connection-test' | 'cover' | 'analysis-download' | 'analysis-loudness' | 'admin-preview';
+type RequestPurpose = 'api' | 'connection-test' | 'cover' | 'analysis-download' | 'analysis-loudness' | 'admin-preview' | 'admin-download';
 interface RequestProducer {
   endpoint: string;
   purpose: RequestPurpose;
