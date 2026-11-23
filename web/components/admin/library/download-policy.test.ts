@@ -4,7 +4,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   CONFIRM_BYTES, CONFIRM_TRACKS, browseFilterParams, confirmText, downloadBody, downloadCount,
-  downloadLabel, fmtBytes, needsConfirm, sizeText, type BrowseFilterState,
+  downloadLabel, downloadTitle, fmtBytes, needsConfirm, sizeText, type BrowseFilterState,
 } from './download-policy';
 import { DownloadControl } from './DownloadButton';
 
@@ -25,12 +25,12 @@ test('the label counts the ticked rows, else the whole list', () => {
 });
 
 test('ticked rows go as ids; none sends the list filter, paging aside', () => {
-  assert.deepEqual(downloadBody(['b', 'a'], NONE), { ids: ['b', 'a'] });
+  assert.deepEqual(downloadBody(['b', 'a'], { kind: 'browse', filter: NONE }), { ids: ['b', 'a'] });
   const f: BrowseFilterState = {
     moods: ['calm', 'dreamy'], energy: 'low', vocal: 'instrumental', genre: 'Jazz',
     yearFrom: '1990', yearTo: '1999', q: ' artist:Ane ', sort: 'title',
   };
-  assert.deepEqual(downloadBody([], f), {
+  assert.deepEqual(downloadBody([], { kind: 'browse', filter: f }), {
     filter: {
       moods: 'calm,dreamy', energy: 'low', vocal: 'instrumental', genre: 'Jazz',
       yearFrom: '1990', yearTo: '1999', q: 'artist:Ane', sort: 'title',
@@ -83,4 +83,35 @@ test('the button: count, accent while rows are ticked, disabled and relabelled w
 
   // Nothing listed yet (or an empty list): nothing to press.
   assert.match(render({ count: null, selectedCount: 0, pending: false, onClick: () => {} }), /disabled=""/);
+});
+
+// ── The Liked list (Library → Tracks → Liked) ────────────────────────────────
+test('liked: ticked rows go as ids; none sends the view\'s sort for every liked track', () => {
+  assert.deepEqual(downloadBody(['x', 'y'], { kind: 'liked', sort: 'count' }), { ids: ['x', 'y'] });
+  assert.deepEqual(downloadBody([], { kind: 'liked', sort: 'count' }), { liked: { sort: 'count' } });
+  assert.deepEqual(downloadBody([], { kind: 'liked', sort: 'recent' }), { liked: { sort: 'recent' } });
+});
+
+test('liked: the label counts every liked track, and ticked rows override it', () => {
+  // liked.total counts all pages, not the 50 on screen.
+  assert.equal(downloadLabel(downloadCount(0, 312), false), 'Download 312 tracks');
+  assert.equal(downloadLabel(downloadCount(3, 312), false), 'Download 3 tracks');
+  assert.equal(downloadTitle(0, 'liked'),
+    'Download every liked track, all pages (several come as one zip); tick rows to take only those');
+  assert.equal(downloadTitle(3, 'liked'), downloadTitle(3, 'browse'));
+  assert.match(downloadTitle(0, 'browse'), /^Download every track in this list/);
+
+  const idle = render({ count: 312, selectedCount: 0, pending: false, onClick: () => {}, source: 'liked', sm: true });
+  assert.match(idle, /> Download 312 tracks<\/button>/);
+  assert.match(idle, /border-ink/);
+  assert.match(idle, /title="Download every liked track, all pages/);
+  assert.doesNotMatch(idle, /bg-\[var\(--accent\)\]/);
+  const ticked = render({ count: 3, selectedCount: 3, pending: false, onClick: () => {}, source: 'liked', sm: true });
+  assert.match(ticked, /> Download 3 tracks<\/button>/);
+  assert.match(ticked, /bg-\[var\(--accent\)\]/);
+  const pending = render({ count: 312, selectedCount: 0, pending: true, onClick: () => {}, source: 'liked', sm: true });
+  assert.match(pending, /disabled=""/);
+  assert.match(pending, /> Preparing…<\/button>/);
+  // No liked track yet: nothing to take.
+  assert.match(render({ count: 0, selectedCount: 0, pending: false, onClick: () => {}, source: 'liked' }), /disabled=""/);
 });

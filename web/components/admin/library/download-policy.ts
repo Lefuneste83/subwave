@@ -1,10 +1,11 @@
 // The Library download button's rules (DownloadButton.tsx), pure so they are
-// tested without a browser. One button in the Browse filter box: with rows
-// ticked it takes those; with none, the whole list on screen (every page of
-// the active filters and search). The controller side is
-// controller/src/routes/library/download.ts.
+// tested without a browser. The button sits in two places, each its own
+// source: the Browse filter box (the whole list on screen, every page of the
+// active filters and search) and the Tracks tab's Liked mode (every liked
+// track, all pages, in the view's sort). In both, ticked rows win. The
+// controller side is controller/src/routes/library/download.ts.
 
-import type { Energy, Sort, Vocal } from './types';
+import type { Energy, LikedSort, Sort, Vocal } from './types';
 
 export interface BrowseFilterState {
   moods: string[]; energy: Energy; vocal: Vocal; genre: string;
@@ -28,14 +29,25 @@ export function browseFilterParams(f: BrowseFilterState): Record<string, string>
   return p;
 }
 
-export type DownloadBody = { ids: string[] } | { filter: Record<string, string> };
+// What "everything" means for the button where it sits.
+export type DownloadSource =
+  | { kind: 'browse'; filter: BrowseFilterState }
+  | { kind: 'liked'; sort: LikedSort };
 
-export function downloadBody(selected: readonly string[], filter: BrowseFilterState): DownloadBody {
-  return selected.length > 0 ? { ids: [...selected] } : { filter: browseFilterParams(filter) };
+export type DownloadBody =
+  | { ids: string[] }
+  | { filter: Record<string, string> }
+  | { liked: { sort: LikedSort } };
+
+export function downloadBody(selected: readonly string[], source: DownloadSource): DownloadBody {
+  if (selected.length > 0) return { ids: [...selected] };
+  return source.kind === 'liked'
+    ? { liked: { sort: source.sort } }
+    : { filter: browseFilterParams(source.filter) };
 }
 
-// How many tracks a press takes: the ticked ones, else the list's total (null
-// until the list has answered).
+// How many tracks a press takes: the ticked ones, else the list's total, all
+// pages (null until the list has answered).
 export function downloadCount(selectedCount: number, listTotal: number | null): number | null {
   return selectedCount > 0 ? selectedCount : listTotal;
 }
@@ -46,10 +58,12 @@ export function downloadLabel(count: number | null, pending: boolean): string {
   return `Download ${count.toLocaleString('en-US')} track${count === 1 ? '' : 's'}`;
 }
 
-export function downloadTitle(selectedCount: number): string {
-  return selectedCount > 0
-    ? `Download the ${selectedCount} ticked track${selectedCount === 1 ? '' : 's'} (several come as one zip)`
-    : 'Download every track in this list, all pages (several come as one zip); tick rows to take only those';
+export function downloadTitle(selectedCount: number, source: DownloadSource['kind'] = 'browse'): string {
+  if (selectedCount > 0) {
+    return `Download the ${selectedCount} ticked track${selectedCount === 1 ? '' : 's'} (several come as one zip)`;
+  }
+  const what = source === 'liked' ? 'every liked track' : 'every track in this list';
+  return `Download ${what}, all pages (several come as one zip); tick rows to take only those`;
 }
 
 // What POST /library/download answers.

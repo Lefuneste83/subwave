@@ -1,5 +1,6 @@
 // The admin Library download (routes/library/download.ts): an admin names a
-// selection (ticked ids, or the Browse list's filter), gets a signed link, and
+// selection (ticked ids, the Browse list's filter, or the Liked list), gets a
+// signed link, and
 // the link streams one original file or a STORED zip built as it goes, from a
 // fake Subsonic server on a real socket. The archives are checked by Python's
 // zipfile (CRCs included) and, when installed, `unzip -t`.
@@ -19,6 +20,26 @@ const dir = mkdtempSync(join(tmpdir(), 'subwave-library-download-'));
 process.env.STATE_DIR = dir;
 process.env.ADMIN_USER = 'download-admin';
 process.env.ADMIN_PASS = 'download-pass';
+
+// The likes store, as the station wrote it: hearts on mirror tracks, one on an
+// id a re-import left behind (`stale-old`: neither the mirror nor the music
+// server knows it), one on the station's own archive (the Liked view hides it).
+const like = (songId: string, likedAt: string, n: number, track: Record<string, unknown> = {}) =>
+  Array.from({ length: n }, (_, i) => ({
+    songId, track: { id: songId, title: songId, ...track }, airingKey: `${songId}|${i}`,
+    listenerKey: `l${i}`, likedAt,
+  }));
+writeFileSync(join(dir, 'likes.json'), JSON.stringify({
+  secret: 'test-secret',
+  likes: [
+    ...like('a3', '2026-01-01T00:00:00.000Z', 3, { artist: 'Cee', title: 'Party' }),
+    ...like('stale-old', '2026-01-02T00:00:00.000Z', 1, { artist: 'Old Artist', title: 'Old Title' }),
+    ...like('mp3', '2026-01-03T00:00:00.000Z', 2, { artist: 'Eff', title: 'AC/DC: "Live"?' }),
+    ...like('a2', '2026-01-04T00:00:00.000Z', 1, { artist: 'Bee', title: 'Calm Two' }),
+    ...like('archive', '2026-01-05T00:00:00.000Z', 1, { title: '13-00' }),
+    ...like('a1', '2026-01-06T00:00:00.000Z', 1, { artist: 'Ane', title: 'Calm One' }),
+  ],
+}));
 
 const { config } = await import('../src/config.js');
 const express = (await import('express')).default;
@@ -46,8 +67,14 @@ const nd = await listen((req, res) => {
   fake.requests.push({ path: u.pathname, id, range: req.headers.range });
   const isDownload = u.pathname === '/rest/download';
   const isRawStream = u.pathname === '/rest/stream' && u.searchParams.get('format') === 'raw';
+  if (u.pathname === '/rest/getSong') {
+    // The music server knows every seeded id; an id a re-import retired is gone.
+    if (id === 'stale-old') return errorDoc(res, 70);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(`{"subsonic-response":{"status":"ok","song":{"id":${JSON.stringify(id)},"title":"x"}}}`);
+  }
   if (!isDownload && !isRawStream) { res.writeHead(404); return res.end(); }
-  if (id === 'gone') return errorDoc(res, 70);
+  if (id === 'gone' || id === 'stale-old') return errorDoc(res, 70);
   // A server with downloads switched off: `download` refuses, `stream` serves.
   if (id === 'refused' && isDownload) return errorDoc(res, 50);
   if (id === 'slow') {
@@ -313,6 +340,80 @@ test('the browser going away aborts the track being fetched and fetches no other
   assert.equal(fake.slowClosed, true, 'the upstream request was aborted');
   await new Promise(res => setTimeout(res, 100));
   assert.deepEqual(fake.requests.map(q => q.id), ['slow']);
+});
+
+// ── The Liked list ───────────────────────────────────────────────────────────
+// Every page of GET /library/liked for one sort, as the Liked view shows it.
+async function likedPages(sort: string) {
+  const listed: Array<{ id: string; artist: string | null; title: string | null }> = [];
+  for (let offset = 0; ; offset += 2) {
+    const r = await fetch(`${base}/library/liked?${new URLSearchParams({ sort, limit: '2', offset: String(offset) })}`, { headers: auth });
+    assert.equal(r.status, 200);
+    const page = await r.json() as { total: number; rows: typeof listed };
+    listed.push(...page.rows);
+    if (offset + 2 >= page.total) break;
+  }
+  return listed;
+}
+
+test('liked: only an admin, and the body names one of ids, filter or liked', async () => {
+  assert.equal((await fetch(`${base}/library/download`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ liked: {} }),
+  })).status, 401);
+  for (const body of [
+    { liked: {}, ids: ['a1'] }, { liked: {}, filter: {} }, { liked: true }, { liked: { sort: 'bogus' } },
+    { liked: { sort: 'recent', page: 2 } },
+  ]) {
+    const r = await fetch(`${base}/library/download`, { method: 'POST', headers: json, body: JSON.stringify(body) });
+    assert.equal(r.status, 400, JSON.stringify(body));
+  }
+  assert.equal(fake.requests.length, 0);
+});
+
+test('liked: every liked track across the pages, in the view\'s order; a stale heart lands in _missing.txt', async () => {
+  for (const sort of ['recent', 'count', 'artist']) {
+    const listed = await likedPages(sort);
+    assert.ok(listed.length > 2, 'the list spans several pages');
+    const link = await linkFor({ liked: { sort } });
+    assert.equal(link.count, listed.length, sort);
+    assert.match(link.name, new RegExp(`^library-${listed.length}-tracks-`));
+    fake.requests = [];
+    const z = inspectZip(Buffer.from(await (await fetch(`${base}${link.path}`)).arrayBuffer()));
+    assert.equal(z.bad, null);
+    // Fetched in the view's order, the archive row hidden as the view hides it.
+    assert.deepEqual(fake.requests.filter(q => q.path === '/rest/download').map(q => q.id), listed.map(t => t.id), sort);
+    assert.ok(!listed.some(t => t.id === 'archive'));
+    const served = listed.filter(t => t.id !== 'stale-old');
+    const used = new Set<string>(['_missing.txt']);
+    assert.deepEqual(z.names, [
+      ...served.map(t => names.uniqueName(names.trackFileName({ id: t.id, artist: t.artist, title: t.title, fileSuffix: t.id === 'mp3' ? 'mp3' : 'flac' }), used)),
+      '_missing.txt',
+    ], sort);
+    // Named from the heart's own snapshot: the mirror no longer knows the id.
+    const text = Buffer.from(z.contents['_missing.txt'], 'base64').toString('utf8');
+    assert.match(text, /^1 track could not be fetched/);
+    assert.match(text, /Old Artist - Old Title {2}\[id stale-old\]/);
+  }
+  assert.deepEqual((await likedPages('recent')).map(t => t.id), ['a1', 'a2', 'mp3', 'stale-old', 'a3']);
+  assert.deepEqual((await likedPages('count')).map(t => t.id), ['a3', 'mp3', 'a1', 'a2', 'stale-old']);
+  // No sort named: the view's default, most recent first.
+  assert.equal((await linkFor({ liked: {} })).count, 5);
+});
+
+test('liked: one track no longer in the library is a 404 JSON, and no link is minted', async () => {
+  for (const body of [{ ids: ['stale-old'] }, { liked: { q: 'old title' } }]) {
+    fake.requests = [];
+    const r = await fetch(`${base}/library/download`, { method: 'POST', headers: json, body: JSON.stringify(body) });
+    assert.equal(r.status, 404, JSON.stringify(body));
+    const j = await r.json() as { error: string; path?: string };
+    assert.match(j.error, /no longer in the library/);
+    assert.equal(j.path, undefined);
+    assert.ok(!fake.requests.some(q => q.path === '/rest/download' || q.path === '/rest/stream'));
+  }
+  // One liked track the library still holds: its original file.
+  const one = await linkFor({ liked: { q: 'calm one' } });
+  assert.equal(one.single, true);
+  assert.equal(one.name, 'Ane - Calm One.flac');
 });
 
 // ── The zip writer itself ────────────────────────────────────────────────────

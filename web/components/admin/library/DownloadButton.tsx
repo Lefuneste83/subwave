@@ -1,8 +1,9 @@
 'use client';
 
-// The Library download: one button in the Browse filter box. With rows
-// ticked it downloads those; with none, every track of the list on screen,
-// all pages. One track saves as its original file, several as one zip that the
+// The Library download: a button in the Browse filter box and in the Tracks
+// tab's Liked mode. With rows ticked it downloads those; with none, every
+// track of the list on screen, all pages (Browse: its filters and search;
+// Liked: every liked track, in the view's sort). One track saves as its original file, several as one zip that the
 // controller builds as it streams. The POST answers a short-lived signed link
 // and the browser navigates to it, so a many-GB body goes straight to disk
 // instead of through fetch() into memory (the rules: download-policy.ts; the
@@ -18,26 +19,31 @@ import { notify } from '../../../lib/notify';
 import { useLibrary } from './LibraryContext';
 import {
   confirmText, downloadBody, downloadCount, downloadLabel, downloadTitle, needsConfirm, sizeText,
-  type BrowseFilterState, type DownloadBody, type DownloadLink,
+  type DownloadBody, type DownloadLink, type DownloadSource,
 } from './download-policy';
 
 // The view, apart from the hooks, so its states render in a test.
-export function DownloadControl({ count, selectedCount, pending, onClick }: {
+// `sm`: the small size of a card's action row (Liked mode), beside its other
+// small buttons; the Browse filter box takes the full-height one.
+export function DownloadControl({ count, selectedCount, pending, onClick, source = 'browse', sm = false }: {
   count: number | null;
   selectedCount: number;
   pending: boolean;
   onClick: () => void;
+  source?: DownloadSource['kind'];
+  sm?: boolean;
 }) {
   return (
     <Btn
       // The ticked rows drive it: shown in the accent, like any on state.
       tone={selectedCount > 0 ? 'accent' : undefined}
+      sm={sm}
       onClick={onClick}
       disabled={pending || !count}
-      title={downloadTitle(selectedCount)}
-      className="h-10 w-full sm:w-auto"
+      title={downloadTitle(selectedCount, source)}
+      className={sm ? undefined : 'h-10 w-full sm:w-auto'}
     >
-      <Download /> {downloadLabel(count, pending)}
+      {sm ? <Download size={11} /> : <Download />} {downloadLabel(count, pending)}
     </Btn>
   );
 }
@@ -55,9 +61,10 @@ function startDownload(link: DownloadLink) {
     + (link.single ? '' : ' in one zip') + ` · ${sizeText(link)}`);
 }
 
-export function DownloadButton({ filter, listTotal }: {
-  filter: BrowseFilterState;
+export function DownloadButton({ source, listTotal, sm = false }: {
+  source: DownloadSource;
   listTotal: number | null;
+  sm?: boolean;
 }) {
   const { adminFetch, selected } = useLibrary();
   const [confirm, setConfirm] = useState<DownloadLink | null>(null);
@@ -74,7 +81,7 @@ export function DownloadButton({ filter, listTotal }: {
   const press = async () => {
     let link: DownloadLink;
     try {
-      link = await mutation.mutateAsync(downloadBody(Array.from(selected), filter));
+      link = await mutation.mutateAsync(downloadBody(Array.from(selected), source));
     } catch {
       return; // useAdminMutation has toasted it
     }
@@ -84,7 +91,10 @@ export function DownloadButton({ filter, listTotal }: {
 
   return (
     <>
-      <DownloadControl count={count} selectedCount={selected.size} pending={mutation.isPending} onClick={press} />
+      <DownloadControl
+        count={count} selectedCount={selected.size} pending={mutation.isPending} onClick={press}
+        source={source.kind} sm={sm}
+      />
       <V3AlertDialog
         open={confirm !== null}
         onOpenChange={open => { if (!open) setConfirm(null); }}
