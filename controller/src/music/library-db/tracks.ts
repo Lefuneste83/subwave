@@ -1572,7 +1572,9 @@ export function writeStructureResult(id: string, r: StructureResult, gridAt: str
 // The whole-track grid over the head analysis's tempo and bar lines (F17):
 // the one write of a grid into tracks.bpm/beats_json/bars_json, and its
 // undoing. music/grid-policy.ts decides; this only moves values.
-//   - Passing the gate: bpm becomes the grid's; when the bars pass too, the
+//   - Passing the gate (with the head's tempo as the decision's reference:
+//     a grid held only by its coverage passes on its tempo when it refines
+//     the head's, its bars held): bpm becomes the grid's; when the bars pass too, the
 //     beats and bars over the head window (the span the stored ones cover)
 //     become the grid's, otherwise both stay the head's, so they never
 //     disagree. The head's own values are kept on the grid row (head_*).
@@ -1596,7 +1598,9 @@ export function applyGridToTrack(id: string, opts: { force?: boolean } = {}): Gr
     const head = g.applied === 1
       ? { bpm: g.headBpm, beatsJson: g.headBeatsJson, barsJson: g.headBarsJson }
       : { bpm: row.bpm, beatsJson: row.beats_json, barsJson: row.bars_json };
-    const decision = gridDecision(g);
+    // The decision compares the grid with the head's own tempo (the kept one
+    // once written), so a grid refining it passes without the coverage.
+    const decision = gridDecision(g, head.bpm);
     if (!decision.bpm) {
       if (g.applied !== 1) {
         if (g.applied === -1) setGridApplied(d, id, 0, null);
@@ -1750,7 +1754,7 @@ export function revertGridOnTrack(id: string): boolean {
       d.prepare('UPDATE tracks SET bpm = ?, beats_json = ?, bars_json = ? WHERE id = ?')
         .run(g.headBpm, g.headBeatsJson, g.headBarsJson, id);
     }
-    applyGridToOutro(d, id, g, gridDecision(g), true);
+    applyGridToOutro(d, id, g, gridDecision(g, g.headBpm), true);
     setGridApplied(d, id, -1, null);
     if (g.applied === 1) markTextVectorDirtyIfSoundChanged(id, ['measured']);
     return g.applied === 1;

@@ -23,8 +23,8 @@ export function formatSummary(rows: readonly GridReportRow[]): string[] {
     `stored BPM against the grid: same ${s.byRelation.same} (${pct(s.byRelation.same)}), double ${s.byRelation.double}, half ${s.byRelation.half}, ` +
       `3:2 ${s.byRelation['three-halves']}, 2:3 ${s.byRelation['two-thirds']}, other ${s.byRelation.other}, no stored BPM ${s.byRelation['no-stored-bpm']}`,
     `  same tempo: median |Δ| ${s.medianAbsDelta ?? '-'} BPM (librosa's tempo grid, corrected)`,
-    `gate (coverage ≥ ${GRID_WRITE_GATE.minCoverage}, main tempo on ≥ ${GRID_WRITE_GATE.minSteadyShare} of the track, at most ${GRID_WRITE_GATE.maxBpm} BPM; bars also downbeat agreement ≥ ${GRID_WRITE_GATE.minDownbeatAgreement}):`,
-    `  BPM would be written for ${s.wouldWriteBpm} (${pct(s.wouldWriteBpm)}); ${s.bpmChangesOver1} of them move by more than 1 BPM`,
+    `gate (coverage ≥ ${GRID_WRITE_GATE.minCoverage} or within ${GRID_WRITE_GATE.refineBand * 100} % of the head's tempo, main tempo on ≥ ${GRID_WRITE_GATE.minSteadyShare} of the track, at most ${GRID_WRITE_GATE.maxBpm} BPM; bars also coverage and downbeat agreement ≥ ${GRID_WRITE_GATE.minDownbeatAgreement}):`,
+    `  BPM would be written for ${s.wouldWriteBpm} (${pct(s.wouldWriteBpm)}); ${s.bpmChangesOver1} of them move by more than 1 BPM; ${s.refined} by refining the head's tempo under the coverage gate`,
     `  held (stored value kept): ${s.held}`,
     `  Sound: tempo word moves (text vector re-embedded): ${s.reEmbeds} (${pct(s.reEmbeds)})`,
     `  bars would be written for ${s.wouldWriteBars}; today's first bar line off the grid's downbeat on ${s.barShifts}`,

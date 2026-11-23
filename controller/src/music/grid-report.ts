@@ -136,6 +136,8 @@ export interface GridReportRow {
   // What step 4 would write under GRID_WRITE_GATE.
   wouldWriteBpm: boolean;
   wouldWriteBars: boolean;
+  // The BPM passes only by refining the head's tempo (grid-policy.ts).
+  refined: boolean;
   heldBecause: string | null;
 }
 
@@ -148,7 +150,9 @@ export function compareGrid(t: GridReportTrack, g: TrackGrid): GridReportRow | n
   const after = soundWords(trackAcoustics({ ...t, bpm: g.bpm })).measured;
   const firstBar = (t.bars ?? []).find((b) => Number.isFinite(b) && b >= 0);
   const offset = firstBar != null ? barOffsetBeats(g, firstBar) : null;
-  const decision = gridDecision(g);
+  // The head's tempo is the decision's reference (grid-policy.ts, the
+  // refinement): `t` already carries it (withHeadValues).
+  const decision = gridDecision(g, t.bpm);
   const confident = decision.bpm;
   const steady = decision.steadyShare;
   return {
@@ -177,6 +181,7 @@ export function compareGrid(t: GridReportTrack, g: TrackGrid): GridReportRow | n
     beatsPerBar: g.beatsPerBar,
     wouldWriteBpm: confident,
     wouldWriteBars: decision.bars,
+    refined: decision.refined,
     heldBecause: decision.held.length ? decision.held.join('; ') : null,
   };
 }
@@ -187,6 +192,7 @@ export interface GridReportSummary {
   bpmChangesOver1: number;      // |Δ| > 1 BPM, among those step 4 would write
   wouldWriteBpm: number;
   wouldWriteBars: number;
+  refined: number;              // of wouldWriteBpm, by the refinement alone
   reEmbeds: number;
   barShifts: number;            // among those step 4 would write bars for
   held: number;
@@ -203,6 +209,7 @@ export function summariseGridReport(rows: readonly GridReportRow[]): GridReportS
     bpmChangesOver1: rows.filter((r) => r.wouldWriteBpm && (r.deltaBpm == null || Math.abs(r.deltaBpm) > 1)).length,
     wouldWriteBpm: rows.filter((r) => r.wouldWriteBpm).length,
     wouldWriteBars: rows.filter((r) => r.wouldWriteBars).length,
+    refined: rows.filter((r) => r.refined).length,
     reEmbeds: rows.filter((r) => r.reEmbed).length,
     barShifts: rows.filter((r) => r.wouldWriteBars && r.barShift).length,
     held: rows.filter((r) => !r.wouldWriteBpm).length,
