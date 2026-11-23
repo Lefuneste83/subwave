@@ -15,6 +15,10 @@
 #     no-GPU fallback is unchanged;
 #   - the card is tested once per process, whatever the failure: no request
 #     tests it again or moves the worker to cuda, however much later it comes;
+#   - out of memory at that one test is waited out for a bounded time (the
+#     model-load schedule, CUDA_OOM_RETRY_DELAYS_S) before falling back: a
+#     co-resident process giving the card back gets the worker cuda, a card
+#     still full after the wait gets cpu as before; no other failure waits;
 #   - the warning's advice fits the cause: out of memory gets neither the
 #     driver nor the image-tag advice, and says a restart once memory is free
 #     puts the analyzer back on the GPU;
@@ -33,6 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import analyze_worker as aw  # noqa: E402
 
 failures = 0
+SLEEPS = []  # every self-test wait resolve() took, never really slept
 
 CU128_ARCHES = ["sm_75", "sm_80", "sm_86", "sm_90", "sm_100", "sm_120"]
 CU124_ARCHES = ["sm_50", "sm_60", "sm_70", "sm_75", "sm_80", "sm_86", "sm_90"]
@@ -125,10 +130,11 @@ def resolve(env, torch_mod):
     """Run resolve_device() fresh with ANALYZE_DEVICE=env and `torch_mod` as
     torch. Returns (device, log lines)."""
     lines = []
-    saved = (sys.modules.get("torch"), aw.log, os.environ.get("ANALYZE_DEVICE"))
+    saved = (sys.modules.get("torch"), aw.log, os.environ.get("ANALYZE_DEVICE"), aw._sleep)
     try:
         sys.modules["torch"] = torch_mod
         aw.log = lambda m: lines.append(m)
+        aw._sleep = lambda s: SLEEPS.append(s)
         reset_device_state()
         if env is None:
             os.environ.pop("ANALYZE_DEVICE", None)
@@ -136,7 +142,7 @@ def resolve(env, torch_mod):
             os.environ["ANALYZE_DEVICE"] = env
         return aw.resolve_device(), lines
     finally:
-        torch_prev, log_prev, env_prev = saved
+        torch_prev, log_prev, env_prev, aw._sleep = saved
         if torch_prev is None:
             sys.modules.pop("torch", None)
         else:
@@ -269,6 +275,8 @@ def main():
 
     # ── One self-test per process, whatever the failure ────────────────────
     test("out of memory: no driver or tag advice, and a restart puts it back on the GPU", oom_warning)
+    test("out of memory at boot that clears within the wait gets cuda", oom_clears)
+    test("no other self-test failure waits", other_failures_do_not_wait)
     for label, err in (("no kernel image", NO_KERNEL), ("out of memory", OOM),
                        ("an init error", INIT), ("a driver error", DRIVER)):
         test(f"{label} at boot stays cpu for every later request, the card never retested",
@@ -289,24 +297,62 @@ INIT = "CUDA error: initialization error"
 DRIVER = "CUDA driver version is insufficient for CUDA runtime version"
 
 
+def oom_attempts():
+    return len(aw.CUDA_OOM_RETRY_DELAYS_S) + 1
+
+
 def oom_warning():
-    torch, _ = fake_torch(name="NVIDIA GeForce RTX 3060", capability=(8, 6), errors=[OOM])
+    torch, calls = fake_torch(name="NVIDIA GeForce RTX 3060", capability=(8, 6),
+                              errors=[OOM] * oom_attempts())
+    SLEEPS.clear()
     device, lines = resolve(None, torch)
     assert device == "cpu", device
+    assert calls["kernel"] == oom_attempts(), calls
+    assert SLEEPS == list(aw.CUDA_OOM_RETRY_DELAYS_S), SLEEPS
+    waited = f"{sum(aw.CUDA_OOM_RETRY_DELAYS_S):g}s"
     warn = next(l for l in lines if "self-test failed" in l)
     assert "out of memory" in warn and "RuntimeError" in warn, warn
     assert "no free memory when the analyzer started" in warn, warn
+    assert f"none came free within {waited}" in warn, warn
     assert "restarting the analyzer" in warn and "back on the GPU" in warn, \
         f"the out-of-memory warning must say a restart recovers the GPU: {warn}"
     for advice in ("driver", "no kernels", "ANALYZER_CUDA_TAG", ":ampere"):
         assert advice not in warn, f"out of memory must not get {advice!r} advice: {warn}"
 
 
+def oom_clears():
+    """The incident shape: another process on the card is still letting go of
+    its memory when the worker boots. Two OOMs, then the card works: the
+    worker waits, logs each retry, and lands on cuda with no fallback warning."""
+    torch, calls = fake_torch(name="NVIDIA GeForce RTX 3060", capability=(8, 6), errors=[OOM, OOM])
+    SLEEPS.clear()
+    device, lines = resolve(None, torch)
+    assert device == "cuda", (device, lines)
+    assert calls["kernel"] == 3, calls
+    assert SLEEPS == list(aw.CUDA_OOM_RETRY_DELAYS_S[:2]), SLEEPS
+    retries = [l for l in lines if "CUDA self-test: CUDA out of memory, retrying in" in l]
+    assert len(retries) == 2, lines
+    assert not any("self-test failed" in l for l in lines), lines
+    assert lines[-1] == "analysis device: cuda (NVIDIA GeForce RTX 3060)", lines
+
+
+def other_failures_do_not_wait():
+    for err in (NO_KERNEL, INIT, DRIVER):
+        torch, calls = fake_torch(name="NVIDIA GeForce RTX 3060", capability=(8, 6), errors=[err, None])
+        SLEEPS.clear()
+        device, lines = resolve(None, torch)
+        assert device == "cpu", (err, device)
+        assert calls["kernel"] == 1 and SLEEPS == [], (err, calls, SLEEPS)
+        assert not any("retrying" in l for l in lines), lines
+
+
 def device_is_final(err):
-    """The self-test fails at boot with `err`, then the card works. Days of
-    requests of every kind later, the worker is still on cpu and the card was
-    tested exactly once: nothing retests it or switches the device."""
-    torch, calls = fake_torch(name="NVIDIA GeForce RTX 3060", capability=(8, 6), errors=[err])
+    """The self-test fails at boot with `err` (out of memory: on every attempt
+    of the bounded wait), then the card works. Days of requests of every kind
+    later, the worker is still on cpu and the card was not tested again:
+    nothing retests it or switches the device."""
+    attempts = oom_attempts() if err == OOM else 1
+    torch, calls = fake_torch(name="NVIDIA GeForce RTX 3060", capability=(8, 6), errors=[err] * attempts)
     clock = [1000.0]
 
     def tick():
@@ -319,7 +365,7 @@ def device_is_final(err):
         seen.append(aw.resolve_device())
         return {}
 
-    names = ("log", "time", "get_embedder", "analyze_facet_request", "analyze", "emit")
+    names = ("log", "time", "_sleep", "get_embedder", "analyze_facet_request", "analyze", "emit")
     saved = {n: getattr(aw, n) for n in names}
     saved_stdin = sys.stdin
     saved_mods = {m: sys.modules.get(m) for m in ("torch", "librosa", "numpy")}
@@ -331,6 +377,7 @@ def device_is_final(err):
         sys.modules["numpy"] = sys.modules.get("numpy") or types.ModuleType("numpy")
         aw.log = lambda _m: None
         aw.time = types.SimpleNamespace(time=tick, sleep=lambda _s: None)
+        aw._sleep = lambda _s: None
         reset_device_state()
         assert aw.resolve_device() == "cpu"
         aw.get_embedder = lambda force=False: uses_device()
@@ -344,7 +391,7 @@ def device_is_final(err):
         aw.main()
         assert seen and all(d == "cpu" for d in seen), f"device moved: {seen}"
         assert aw._DEVICE == "cpu", aw._DEVICE
-        assert calls["kernel"] == 1, f"the card was tested {calls['kernel']} times"
+        assert calls["kernel"] == attempts, f"the card was tested {calls['kernel']} times"
     finally:
         for n, v in saved.items():
             setattr(aw, n, v)

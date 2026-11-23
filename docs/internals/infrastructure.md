@@ -165,7 +165,14 @@ stays until the process exits, whatever the failure. When the card was out of
 memory under a co-resident TTS or LLM, the warning says so: restarting the
 analyzer once that memory is free puts it back on the GPU. The worker never
 moves to cuda mid-process, because a tiny op can pass while the real model
-still does not fit.
+still does not fit. Out of memory alone is waited out first, for a bounded
+time: the self-test and each model load (CLAP, Beat This!, Demucs) retry a
+CUDA out-of-memory on `CUDA_OOM_RETRY_DELAYS_S` (2, 4, 8, 8, 8 s, about 30 s,
+well inside the controller's 120 s analyze request timeout even when the two
+stack), because another process on the card may be handing its memory back
+at that moment. Only a card still full after the wait latches the load
+failure, with the same message as before, or falls back to cpu, its warning
+now saying how long it waited.
 
 | Tag | GPU (compute capability) | For example | Build today |
 | --- | --- | --- | --- |
