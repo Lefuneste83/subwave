@@ -847,14 +847,52 @@ export async function getStructuredLyrics(
 // .test.ts). Loading the blocklist in a walk child would prune every blocked
 // row on the next run.
 export async function* iterateAllSongs({ requireComplete = false, includeBlocked = false } = {}) {
+  for await (const album of iterateAllAlbums({ requireComplete, includeBlocked })) yield* album.songs;
+}
+
+// How many getAlbum calls a walk keeps in flight ahead of the one it is
+// reading (NAVIDROME_WALK_CONCURRENCY, 1-16, default 4). Each answer is still
+// read in listing order, so the walk sees exactly the songs, in exactly the
+// order, and fails on exactly the album a one-at-a-time walk would; only the
+// waiting on Navidrome overlaps (the walk's own row writes, and the next
+// albums' round trips).
+export function walkConcurrency(): number {
+  const n = Number.parseInt(process.env.NAVIDROME_WALK_CONCURRENCY ?? '', 10);
+  return Number.isFinite(n) ? Math.min(16, Math.max(1, n)) : 4;
+}
+
+type AlbumFetch = { ok: true; r: any } | { ok: false; err: any };
+
+// The same walk as iterateAllSongs, one album at a time: { id, songs } with
+// every song of that album, in listing order. The tagger's walk writes each
+// album's rows in one transaction (tag-library/flags.ts walkNavidrome).
+export async function* iterateAllAlbums({
+  requireComplete = false,
+  includeBlocked = false,
+  concurrency = walkConcurrency(),
+}: { requireComplete?: boolean; includeBlocked?: boolean; concurrency?: number } = {}) {
   let offset = 0;
   const BATCH = 500;
+  const ahead = Math.max(1, Math.floor(concurrency));
+  // Settled, never rejected: an answer fetched ahead of a failing album must
+  // not float as an unhandled rejection when the walk stops there.
+  const fetchAlbum = (id: string): Promise<AlbumFetch> =>
+    call('getAlbum', { id }, RETRY_FAST_TRANSPORT).then((r) => ({ ok: true as const, r }), (err) => ({ ok: false as const, err }));
   while (true) {
     const albums = await getAlbumList(offset, BATCH, { requireComplete });
     if (albums.length === 0) break;
+    const pending: Array<Promise<AlbumFetch>> = [];
+    let next = 0;
+    const fill = () => {
+      while (next < albums.length && pending.length < ahead) pending.push(fetchAlbum(albums[next++].id));
+    };
+    fill();
     for (const album of albums) {
+      const got = await pending.shift()!;
+      fill();
       try {
-        const r = await call('getAlbum', { id: album.id }, RETRY_FAST_TRANSPORT);
+        if (!got.ok) throw got.err;
+        const r = got.r;
         if (requireComplete && (!r.album || r.album.id !== album.id || !Array.isArray(r.album.song))) {
           throw new Error('Malformed album response');
         }
@@ -884,8 +922,9 @@ export async function* iterateAllSongs({ requireComplete = false, includeBlocked
               trackArtists: songs.map((s) => s.artist),
             }
           : null;
-        for (const s of songs) {
-          yield {
+        yield {
+          id: album.id as string,
+          songs: songs.map((s) => ({
             ...s,
             // A Child's albumId is optional in the spec; the album being
             // iterated is the authoritative fallback.
@@ -900,8 +939,8 @@ export async function* iterateAllSongs({ requireComplete = false, includeBlocked
             albumEraUntrusted: suspicion.suspect,
             albumEraReason: suspicion.reason,
             albumOwner,
-          };
-        }
+          })),
+        };
       } catch (err) {
         console.error(`[subsonic] getAlbum(${album.id}) failed: ${err.message}`);
         // Counts and discovery may use a best-effort listing. A pruning walk

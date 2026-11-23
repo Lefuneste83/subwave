@@ -55,6 +55,27 @@ export function requireDb(): Database.Database {
   return db;
 }
 
+// Prepared statements kept per connection, for the per-row writers a library
+// walk runs ~75k times: better-sqlite3 parses the SQL on every prepare(), and
+// the walk spent more on parsing its upsert than on running it. Keyed by the
+// connection, so a reopened handle never runs a statement of a closed one.
+// get/run/all only: a statement being iterated cannot be reused meanwhile.
+const statements = new WeakMap<Database.Database, Map<string, Database.Statement>>();
+
+export function cachedStatement(d: Database.Database, sql: string): Database.Statement {
+  let byText = statements.get(d);
+  if (!byText) {
+    byText = new Map();
+    statements.set(d, byText);
+  }
+  let stmt = byText.get(sql);
+  if (!stmt) {
+    stmt = d.prepare(sql);
+    byText.set(sql, stmt);
+  }
+  return stmt;
+}
+
 export function getEmbeddingDim(): number | null {
   return currentEmbeddingDim;
 }

@@ -42,7 +42,7 @@
 // read off analysis_version and would otherwise drift without any write.
 
 import type Database from 'better-sqlite3';
-import { ANALYSIS_VERSION, requireDb } from './handle.js';
+import { ANALYSIS_VERSION, cachedStatement, requireDb } from './handle.js';
 import { MAX_ANALYSIS_FAILURES, analysisFailureExclusion } from '../analyze-capability.js';
 import { YEAR_MAX_ATTEMPTS, yearRetryDue } from '../original-year-policy.js';
 import { eraSuspectSql } from '../era-suspect.js';
@@ -521,17 +521,16 @@ export function syncTrackFacets(id: string, opts: SyncOpts = {}): void {
 }
 
 function syncTrackFacetsOn(d: Database.Database, id: string, opts: SyncOpts): void {
-  const row = d.prepare(`SELECT ${FACET_SOURCE_SELECT} FROM tracks WHERE id = ?`).get(id) as
+  const row = cachedStatement(d, `SELECT ${FACET_SOURCE_SELECT} FROM tracks WHERE id = ?`).get(id) as
     | FacetSourceRow
     | undefined;
   if (!row) {
-    d.prepare('DELETE FROM track_facet_status WHERE track_id = ?').run(id);
+    cachedStatement(d, 'DELETE FROM track_facet_status WHERE track_id = ?').run(id);
     return;
   }
-  const hasClap = !!d.prepare('SELECT 1 FROM track_audio_vectors WHERE id = ? LIMIT 1').get(id);
+  const hasClap = !!cachedStatement(d, 'SELECT 1 FROM track_audio_vectors WHERE id = ? LIMIT 1').get(id);
   const stored = new Map(
-    (d
-      .prepare('SELECT facet, status, version, reason, attempts, source, unmeasurable_reason, at FROM track_facet_status WHERE track_id = ?')
+    (cachedStatement(d, 'SELECT facet, status, version, reason, attempts, source, unmeasurable_reason, at FROM track_facet_status WHERE track_id = ?')
       .all(id) as StoredFacet[]).map(r => [r.facet, r]),
   );
   const unmeasurable: Partial<Record<Facet, string>> = {};
@@ -546,7 +545,8 @@ function syncTrackFacetsOn(d: Database.Database, id: string, opts: SyncOpts): vo
   const fresh = new Set(opts.fresh ?? []);
   const tried = new Set(opts.tried ?? []);
   const now = new Date().toISOString();
-  const upsert = d.prepare(
+  const upsert = cachedStatement(
+    d,
     `INSERT INTO track_facet_status (track_id, facet, version, status, reason, attempts, source, at, unmeasurable_reason)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(track_id, facet) DO UPDATE SET
@@ -595,7 +595,7 @@ function syncTrackFacetsOn(d: Database.Database, id: string, opts: SyncOpts): vo
   }
   // Whatever the columns no longer support (cleared, or a failure wiped by a
   // success) goes: no row = not done.
-  const del = d.prepare('DELETE FROM track_facet_status WHERE track_id = ? AND facet = ?');
+  const del = cachedStatement(d, 'DELETE FROM track_facet_status WHERE track_id = ? AND facet = ?');
   for (const facet of stored.keys()) del.run(id, facet);
 }
 
