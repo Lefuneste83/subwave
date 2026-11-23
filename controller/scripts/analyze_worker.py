@@ -551,9 +551,12 @@ def capability_loss():
 # the worker exits. A failure that can clear (the card out of memory while a
 # co-resident TTS or LLM holds it) is not tested again mid-process: a tiny op
 # can pass while the real model still does not fit, and a model that fails to
-# load is lost for the run, which is worse than cpu. The warning says why the
-# test failed and, for out of memory, that restarting the analyzer once memory
-# is free puts it back on the GPU.
+# load is lost for the run, which is worse than cpu. Out of memory at that one
+# test is waited out for a bounded time first (retry_on_cuda_oom, the same
+# schedule as a model load), because a co-resident process may be giving the
+# card back at that very moment; no other failure waits. The warning says why
+# the test failed and, for out of memory, that restarting the analyzer once
+# memory is free puts it back on the GPU.
 _DEVICE = None
 
 # Compute capability → the CUDA image's architecture tag for that card. The
@@ -663,6 +666,86 @@ def cuda_failure_kind(error, cap, arch_list):
     return "other"
 
 
+# --- A bounded wait on CUDA out of memory at load --------------------------
+# The card is often shared with another process (e.g. an LLM server or a local
+# TTS) that gives its memory back on demand, a second or two after it sees an
+# analyzer worker on the card. A worker that starts loading in that window
+# gets "CUDA out of memory" with the card about to be free, and a load failure
+# is latched for the worker's life (get_embedder & co., and the sidecar keeps
+# the reason across a respawn) so a pass never re-tries per track: one bad
+# second would cost every model facet until the analyzer restarts. So an OOM
+# at load, and at the device self-test, is waited out a little first.
+#
+# The schedule is short and bounded on purpose. It must stay well inside the
+# request that triggered the load: the controller waits
+# ANALYZE_REQUEST_TIMEOUT_MS (120 s default) for an analyze answer and the
+# sidecar adds no deadline of its own, and one request can stack the
+# self-test's wait and one model's wait (resolve_device() runs inside the
+# first model load), 2 x 30 s, leaving most of the budget for the load and the
+# analysis. A card still full after 30 s is not a transient handover, and the
+# old latch (and its message) is the right answer. Each pool worker waits on
+# its own: several waiting at once is fine, since none of them holds the card
+# while it sleeps.
+CUDA_OOM_RETRY_DELAYS_S = (2.0, 4.0, 8.0, 8.0, 8.0)
+
+
+def _sleep(seconds):
+    """time.sleep, named so the tests can inject a recorder."""
+    time.sleep(seconds)
+
+
+def is_cuda_oom(error):
+    """Out of GPU memory, by torch's message or its own exception type: the
+    one failure that can clear on its own while the worker waits."""
+    return cuda_failure_kind(error, None, None) == "oom"
+
+
+def _free_cuda_cache():
+    """Hand back what a failed attempt left: collect its tensors, then empty
+    torch's cache. Torch only when something already imported it, so the
+    librosa-only venv never imports it here."""
+    import gc
+
+    gc.collect()
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001 — freeing is best-effort
+        pass
+
+
+def retry_on_cuda_oom(load, what, delays=None):
+    """Run `load()` (`what` names it in the log, e.g. "CLAP load"); on a CUDA out-of-memory, free the cache, wait the next
+    delay and run it again, up to len(delays) retries. Any other exception,
+    and the last attempt's OOM, propagate as raised, so a caller's latch and
+    its message are what they were without the retry. BaseException
+    (demucs' fatal() SystemExit) is never caught here."""
+    delays = CUDA_OOM_RETRY_DELAYS_S if delays is None else tuple(delays)
+    total = len(delays) + 1
+    waited = 0.0
+    for attempt in range(1, total + 1):
+        try:
+            result = load()
+        except Exception as ex:  # noqa: BLE001 — classified, re-raised below
+            if attempt == total or not is_cuda_oom(ex):
+                raise
+            delay = delays[attempt - 1]
+        else:
+            if attempt > 1:
+                log(f"{what}: succeeded on attempt {attempt}/{total} "
+                    f"after waiting {waited:g}s for GPU memory")
+            return result
+        # Outside the except block, so the exception and the traceback frames
+        # holding the failed attempt's tensors are gone before the collect.
+        _free_cuda_cache()
+        log(f"{what}: CUDA out of memory, retrying in {delay:g}s (attempt {attempt + 1}/{total})")
+        _sleep(delay)
+        waited += delay
+
+
 def _cuda_fallback_warning(probe, error, kind):
     """One warning naming the card, what the wheel was built for, the error,
     and what to do about it."""
@@ -686,7 +769,8 @@ def _cuda_fallback_warning(probe, error, kind):
             )
     elif kind == "oom":
         advice = (
-            "the card had no free memory when the analyzer started, most likely "
+            "the card had no free memory when the analyzer started, and none came "
+            f"free within {sum(CUDA_OOM_RETRY_DELAYS_S):g}s, most likely "
             "held by another process on it (a local TTS or LLM); analysis runs on "
             "cpu for now, and restarting the analyzer once that memory is free "
             "puts it back on the GPU"
@@ -702,6 +786,23 @@ def _cuda_fallback_warning(probe, error, kind):
     )
 
 
+def _cuda_self_test_waiting_out_oom(torch):
+    """cuda_self_test, with an out-of-memory answer waited out on the model
+    load's bounded schedule; None when the card works, else the last error
+    (traceback dropped, as cuda_self_test returns it)."""
+
+    def attempt():
+        err = cuda_self_test(torch)
+        if err is not None:
+            raise err
+
+    try:
+        retry_on_cuda_oom(attempt, "CUDA self-test")
+        return None
+    except Exception as ex:  # noqa: BLE001 — any failure means "not usable"
+        return ex.with_traceback(None)
+
+
 def resolve_device():
     global _DEVICE
     if _DEVICE is not None:
@@ -714,7 +815,7 @@ def resolve_device():
         want = "auto"
     failed = None
     if want != "cpu" and torch.cuda.is_available():
-        failed = cuda_self_test(torch)
+        failed = _cuda_self_test_waiting_out_oom(torch)
         if failed is None:
             _DEVICE = "cuda"
             log(f"analysis device: cuda ({torch.cuda.get_device_name(0)})")
@@ -1754,6 +1855,12 @@ _embed_failed = False
 _embed_error = None
 
 
+def _load_clap():
+    e = ClapEmbedder()
+    e.load()
+    return e
+
+
 def get_embedder(force=False):
     global _embedder, _embed_failed, _embed_error
     # `force` is the per-request opt-in (the controller's admin toggle sends
@@ -1764,9 +1871,7 @@ def get_embedder(force=False):
         return None
     if _embedder is None:
         try:
-            e = ClapEmbedder()
-            e.load()
-            _embedder = e
+            _embedder = retry_on_cuda_oom(_load_clap, "CLAP load")
             _maybe_start_idle_release()
         except Exception as ex:  # noqa: BLE001 — degrade, never crash the worker
             log(f"CLAP load failed ({ex}); audio embeddings disabled for this run")
@@ -1955,6 +2060,12 @@ def grid_capable():
     return u.find_spec("beat_this") is not None and u.find_spec("torch") is not None
 
 
+def _load_gridder():
+    g = BeatGridder()
+    g.load()
+    return g
+
+
 def get_gridder():
     """The loaded Beat This! engine, or None (not installed, or its load failed
     once: one bad model never retries on every track)."""
@@ -1965,9 +2076,7 @@ def get_gridder():
         if not grid_capable():
             return None
         try:
-            g = BeatGridder()
-            g.load()
-            _gridder = g
+            _gridder = retry_on_cuda_oom(_load_gridder, "Beat This! load")
             _maybe_start_idle_release()
         except Exception as ex:  # noqa: BLE001 — degrade, never crash the worker
             log(f"Beat This! load failed ({ex}); the grid facet is disabled for this run")
@@ -2945,15 +3054,22 @@ _vocal_failed = False
 _vocal_error = None
 
 
+def _load_vocal_detector():
+    d = VocalActivityDetector()
+    d.load()
+    return d
+
+
 def get_vocal_detector(force=False):
     global _vocal_detector, _vocal_failed, _vocal_error
     if _vocal_failed or not (VOCAL_ENABLED or force):
         return None
     if _vocal_detector is None:
         try:
-            d = VocalActivityDetector()
-            d.load()
-            _vocal_detector = d
+            # Demucs loads its weights on the cpu today (apply_model moves
+            # them per call), so this wait is for parity: a loader that ever
+            # puts the model on the card gets it for free.
+            _vocal_detector = retry_on_cuda_oom(_load_vocal_detector, "Demucs load")
             _maybe_start_idle_release()
         # BaseException, not Exception: demucs' fatal() raises SystemExit on an
         # unusable model (e.g. a quantised checkpoint named by its signature,
