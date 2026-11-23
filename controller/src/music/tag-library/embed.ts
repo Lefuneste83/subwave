@@ -6,7 +6,9 @@ import * as embeddings from '../embeddings.js';
 import * as settings from '../../settings.js';
 import { resolveEraYear } from '../show-filter.js';
 import { reportProgress } from '../tagger-progress.js';
-import { logEvent } from './log.js';
+import * as runlog from '../run-log.js';
+import * as F from '../run-log-format.js';
+import { embeddingsWhere } from '../run-log-where.js';
 
 // The embedding preflight both CLIs run before they embed (#2313): a provider is
 // configured, and a real probe answers. The probe's measured dimension beats the
@@ -46,15 +48,21 @@ export function indexTextMode(reseed = false): embeddings.IndexTextMode {
 // and best-effort: any failure logs and keeps the marks.
 export async function reembedNewlyMarked(
   before: ReadonlySet<string>,
-  log: (kind: 'info' | 'warning', text: string) => void,
+  step: runlog.Step = runlog.step('refresh', F.STEP_TITLE.refresh),
 ): Promise<string[]> {
   const marked = db.textVectorDirtyIds();
-  if (!marked.some(id => !before.has(id))) return [];
+  if (!marked.some(id => !before.has(id))) {
+    step.skip('no analysed track changed its sound description');
+    return [];
+  }
   const meta = db.getEmbeddingMeta();
-  if (!meta) return [];
-  const modelChanged = () =>
-    log('info', `${marked.length} similarity vectors left for the next tag run: the embedding model ` +
-      `changed since the index was built (${meta.model}, dim=${meta.dim})`);
+  if (!meta) {
+    step.skip('there is no similarity index yet');
+    return [];
+  }
+  const leftFor = (why: string) =>
+    step.skip(`${F.fmtCount(marked.length)} similarity vectors left for the next tag run: ${why}`);
+  const modelChanged = () => leftFor(`the embedding model changed since the index was built (${meta.model}, dim=${meta.dim})`);
   try {
     // The model is compared before the probe, so a run on another model sends
     // nothing, and never has ensureReady() pull a model it would then refuse.
@@ -64,19 +72,19 @@ export async function reembedNewlyMarked(
     }
     const pre = await embeddingPreflight();
     if (!pre.ok) {
-      log('info', `${marked.length} similarity vectors left for the next tag run: ${pre.message}`);
+      leftFor(pre.message);
       return [];
     }
     if (pre.dim !== meta.dim) {
-      log('info', `${marked.length} similarity vectors left for the next tag run: the embedding model ` +
-        `changed since the index was built (${meta.model}, dim=${meta.dim})`);
+      modelChanged();
       return [];
     }
     // The tag run's batch rule (tag-library.ts tagBatchSize).
     const batchSize = Math.max(1, Math.min(50, (settings.get() as any).embedding?.batchSize ?? 25));
-    return await embedIds(marked, batchSize, indexTextMode());
+    return await embedIds(marked, batchSize, indexTextMode(), step, 'marked');
   } catch (err: any) {
-    log('warning', `Re-embedding analysed tracks failed (non-fatal; the next run retries): ${err?.message || err}`);
+    runlog.problem('warning', `Refreshing the analysed tracks' similarity vectors failed (the next run retries): ${F.shortenAnalyzerMessage(String(err?.message || err))}`);
+    step.skip('stopped by an error');
     return [];
   }
 }
@@ -88,6 +96,10 @@ export async function phaseEmbed(
   // The index's task-prefix mode, resolved once in run(): every document this
   // phase writes must match the vectors already in the index.
   textMode: embeddings.IndexTextMode,
+  // The run-log step it reports as: the forward embed, the trailing refresh
+  // of the analysed tracks, or a re-scan's rebuild.
+  step: runlog.Step = runlog.step('embed', `Build similarity vectors with ${embeddings.activeModelLabel()}`),
+  kind: 'new' | 'marked' | 'rebuild' = 'new',
 ): Promise<string[]> {
   // A dirty vector stays searchable until this pass replaces it, so it is
   // included even though hasVector(id) is true.
@@ -102,19 +114,21 @@ export async function phaseEmbed(
   }
   const unique = [...new Set(needsEmbed)];
   if (unique.length === 0) {
-    console.log('[tag] phase-1 nothing to embed');
+    step.skip(kind === 'marked' ? 'no analysed track changed its sound description' : 'every track already has one');
     return [];
   }
-  return embedIds(unique, batchSize, textMode);
+  return embedIds(unique, batchSize, textMode, step, kind);
 }
 
 async function embedIds(
   unique: string[],
   batchSize: number,
   textMode: embeddings.IndexTextMode,
+  step: runlog.Step,
+  kind: 'new' | 'marked' | 'rebuild',
 ): Promise<string[]> {
   const written: string[] = [];
-  logEvent('info', `Building similarity vectors for ${unique.length.toLocaleString('en-GB')} tracks…`);
+  step.start({ runsOn: embeddingsWhere(), scope: F.embedScope({ tracks: unique.length, pool: db.trackCount(), kind }) });
   reportProgress({ phase: 'embed', label: 'Embedding tracks', done: 0, total: unique.length });
 
   const embedBatchSize = Math.max(8, Math.min(64, batchSize * 2));
@@ -141,7 +155,8 @@ async function embedIds(
     try {
       vecs = await embeddings.embedDocTexts(texts, textMode);
     } catch (err: any) {
-      console.error(`[tag] embedding batch failed at offset ${i}: ${err.message}`);
+      runlog.problem('error', F.embeddingFailedProblem(embeddingsWhere(), String(err?.message || err)));
+      step.done({ summary: `stopped after ${F.fmtCount(i)} of ${F.fmtCount(unique.length)}`, outcome: 'failed' });
       throw err;
     }
     for (let j = 0; j < songs.length; j++) {
@@ -149,9 +164,10 @@ async function embedIds(
       written.push(songs[j].id);
     }
     if ((i + batch.length) % 500 === 0 || i + batch.length === unique.length) {
-      console.log(`[tag] embedded ${i + batch.length}/${unique.length}`);
+      if (i + batch.length < unique.length) step.progress(i + batch.length, unique.length);
       reportProgress({ phase: 'embed', label: 'Embedding tracks', done: i + batch.length, total: unique.length });
     }
   }
+  step.done({ summary: `${F.fmtCount(written.length)} vector${written.length === 1 ? '' : 's'} ${kind === 'new' ? 'built' : 'rebuilt'}` });
   return written;
 }

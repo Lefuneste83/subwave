@@ -367,6 +367,7 @@ let _localTextCapable: boolean | null = null;
 // Local twins of _sidecarAudioError / _sidecarVocalError — see there.
 let _localAudioError: string | null = null;
 let _localVocalError: string | null = null;
+let _localGridError: string | null = null;
 
 // A reported failure beats the ready line's find_spec probe, and is applied
 // downward only.
@@ -374,7 +375,10 @@ function noteLocalCapabilityLoss(msg: WorkerMessage): void {
   const lost = msg.capability_loss;
   if (!lost || typeof lost !== 'object') return;
   // A Beat This! load that failed: the grid is gone for this worker's life.
-  if (typeof lost.beat_grid === 'string') _localGridCapable = false;
+  if (typeof lost.beat_grid === 'string') {
+    _localGridCapable = false;
+    _localGridError = lost.beat_grid;
+  }
   if (typeof lost.audio_embedding === 'string') {
     if (_localAudioError !== lost.audio_embedding) {
       console.error(`[analyze] audio embeddings unavailable: ${lost.audio_embedding}`);
@@ -638,6 +642,9 @@ let _sidecarTextCapable: boolean | null = null;
 // across its idle worker respawn, so a second write path could only disagree.
 let _sidecarAudioError: string | null = null;
 let _sidecarVocalError: string | null = null;
+// Beat This! (`analyze_grid_error`): read for the run log, which names the
+// model a skipped beat grid failed to load.
+let _sidecarGridError: string | null = null;
 // Base URL that last reported the 'analyze' engine — what sidecarRequest POSTs
 // to. Set by sidecarReachable; '' until a probe succeeds.
 let _sidecarBase = '';
@@ -665,6 +672,7 @@ async function probeSidecar(url: string): Promise<boolean> {
       analyze_concurrency?: number | null;
       analyze_audio_error?: string | null;
       analyze_vocal_error?: string | null;
+      analyze_grid_error?: string | null;
     };
     const reachable = !!body.ok && Array.isArray(body.engines) && body.engines.includes('analyze');
     if (reachable) {
@@ -687,6 +695,7 @@ async function probeSidecar(url: string): Promise<boolean> {
       _sidecarTextCapable = typeof body.analyze_text_capable === 'boolean' ? body.analyze_text_capable : null;
       _sidecarAudioError = typeof body.analyze_audio_error === 'string' ? body.analyze_audio_error : null;
       _sidecarVocalError = typeof body.analyze_vocal_error === 'string' ? body.analyze_vocal_error : null;
+      _sidecarGridError = typeof body.analyze_grid_error === 'string' ? body.analyze_grid_error : null;
     }
     return reachable;
   } catch {
@@ -839,6 +848,21 @@ export function vocalActivityError(): string | null {
   if (_backend === 'sidecar') return _sidecarVocalError;
   if (_backend === 'local') return _localVocalError;
   return null;
+}
+
+// Beat This! twin of audioEmbeddingError: why the grid capability is false
+// when its model failed to load (null for a lean image, or an analyzer that
+// predates the field).
+export function gridError(): string | null {
+  if (_backend === 'sidecar') return _sidecarGridError;
+  if (_backend === 'local') return _localGridError;
+  return null;
+}
+
+// The sidecar base URL that answered the last probe ('' before one did), for
+// the run log's "Runs on" line.
+export function answeringBase(): string {
+  return _sidecarBase;
 }
 
 // Backends predating the feature never report it, so consumers must treat only

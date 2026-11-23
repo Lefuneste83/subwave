@@ -7,6 +7,7 @@ import { relTime } from '../../lib/format';
 import { Btn, Eyebrow } from './ui';
 import { Input } from '../ui/input';
 import { cn } from '../../lib/cn';
+import { carriesOwnMark, isRunLogHeading } from '../../lib/runLogLine';
 import LibraryTaggingModal from './LibraryTaggingModal';
 import RunHoldsBanner from './library/RunHoldsBanner';
 import SceneVocabSection from './library/SceneVocabSection';
@@ -1353,9 +1354,10 @@ export default function TaggingPanel(p: TaggingPanelProps) {
                 // Structured events render by kind; raw strings fall back.
                 if (typeof line === 'object' && line !== null) {
                   const st = EVENT_STYLE[line.kind] ?? EVENT_STYLE.info;
+                  const own = carriesOwnMark(line.text);
                   return (
-                    <div key={key} className={cn('whitespace-pre-wrap', st.cls)}>
-                      {st.emoji ? `${st.emoji}  ` : ''}
+                    <div key={key} className={cn('whitespace-pre-wrap', own && isRunLogHeading(line.text) ? 'font-semibold text-ink' : st.cls)}>
+                      {!own && st.emoji ? `${st.emoji}  ` : ''}
                       {line.text}
                     </div>
                   );

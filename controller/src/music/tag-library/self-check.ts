@@ -7,7 +7,6 @@
 import * as db from '../library-db.js';
 import type { vote } from '../tag-propagator.js';
 import { summariseEval, formatEvalSummary } from '../propagation-eval.js';
-import { logEvent } from './log.js';
 
 type Vote = ReturnType<typeof vote>;
 
@@ -17,15 +16,18 @@ export const SELF_CHECK_SAMPLE = 150;
 // follow track by track. With `yieldBetweenVotes` the event loop is handed
 // back between votes (each is two brute-force KNN scans, about a quarter
 // second at 75k tracks), so the analysis it runs beside keeps its requests
-// moving. Never throws.
+// moving. Never throws: the result says what the run log prints for the step
+// (tag-library.ts), a summary, a skip, or a failure.
+export type SelfCheckResult = { summary: string } | { skipped: string } | { failed: string };
+
 export async function propagationSelfCheck(
   voteForTrack: (id: string) => Vote,
   confidenceThreshold: number,
   { yieldBetweenVotes }: { yieldBetweenVotes: boolean },
-): Promise<void> {
+): Promise<SelfCheckResult> {
   try {
     const truth = db.trustedTaggedIds();
-    if (truth.length < 20) return;
+    if (truth.length < 20) return { skipped: 'fewer than 20 tracks tagged by the LLM or by hand to check against' };
     // Partial Fisher-Yates — shuffle just the head we sample.
     const pool = [...truth];
     const n = Math.min(SELF_CHECK_SAMPLE, pool.length);
@@ -42,8 +44,8 @@ export async function propagationSelfCheck(
       if (yieldBetweenVotes) await new Promise<void>((r) => setImmediate(r));
       cases.push({ actual: c.actual, result: voteForTrack(c.id) });
     }
-    logEvent('info', formatEvalSummary(summariseEval(cases, confidenceThreshold)));
+    return { summary: formatEvalSummary(summariseEval(cases, confidenceThreshold)) };
   } catch (err: any) {
-    console.log(`[tag] propagation self-check failed: ${err?.message || err}`);
+    return { failed: `propagation self-check failed: ${err?.message || err}` };
   }
 }

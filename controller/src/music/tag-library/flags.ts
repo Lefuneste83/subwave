@@ -10,9 +10,13 @@ import { albumEraKey, applyWalkForcedYear, eraWalkFields, libraryOwnerContext, l
 import { loadSecretsIntoEnv } from '../../setup/secrets.js';
 import { loadNavidromeConfig } from '../../setup/config.js';
 import { reportProgress, reportCatalogueReady } from '../tagger-progress.js';
-import { logEvent } from './log.js';
+import * as runlog from '../run-log.js';
+import * as F from '../run-log-format.js';
+import { navidromeWhere } from '../run-log-where.js';
 import { changedAfterMeasure, decideReplacedClear } from '../replaced-file-policy.js';
 import { backfillOriginalYears, pendingOriginalYearIds } from './enrich.js';
+import { yearSources } from '../original-year.js';
+import * as settings from '../../settings.js';
 
 function parseIntFlag(args: string[], name: string): number | null {
   const idx = args.indexOf(name);
@@ -111,12 +115,16 @@ export function walkFileInfo(
 // replaced at the same path has its analysis cleared and its stems dropped here
 // (replaced-file-policy.ts), unless that is held or the operator accepts it.
 // `replacedHeld` counts the candidates a hold left waiting, 0 without one.
+// Reports as the run's walk step (run-log.ts): its header here, its result
+// line from the caller once the prune has run.
 export async function walkNavidrome(
   {
     confirmReplaced = process.argv.includes('--confirm-replaced'),
     acceptReplaced = process.argv.includes('--accept-replaced'),
-  }: { confirmReplaced?: boolean; acceptReplaced?: boolean } = {},
+    step = runlog.step('walk', F.STEP_TITLE.walk),
+  }: { confirmReplaced?: boolean; acceptReplaced?: boolean; step?: runlog.Step } = {},
 ): Promise<{ walked: number; liveIds: Set<string>; replacedHeld: number }> {
+  step.start({ runsOn: navidromeWhere(), scope: F.walkScope(db.trackCount()) });
   reportProgress({ phase: 'walk', label: 'Scanning Navidrome library', done: 0 });
   let walked = 0;
   const liveIds = new Set<string>();
@@ -195,12 +203,11 @@ export async function walkNavidrome(
     for (const _ of album.songs) {
       walked += 1;
       if (walked % 500 === 0) {
-        console.log(`[tag] walked ${walked} tracks`);
+        step.progressCount(walked, 'tracks read');
         reportProgress({ phase: 'walk', label: 'Scanning Navidrome library', done: walked });
       }
     }
   }
-  logEvent('info', `Scanned ${walked.toLocaleString('en-GB')} tracks`);
   // A repaired file can keep its exact size: Navidrome's own change time
   // catches it (replaced-file-policy.changedAfterMeasure). Navidrome-only and
   // best-effort: null = the size check alone.
@@ -215,50 +222,50 @@ export async function walkNavidrome(
       candidates.set(c.id, null);
     }
   }
-  // One line per walk on the change-time signal, whatever it found.
-  logEvent('info', walked === 0 ? 'Replaced-file check: skipped (empty walk)'
-    : !fileChanges ? 'Replaced-file check: size only (no change times: the server is not Navidrome or did not answer, its API refused or timed out, or the station kept the password back)'
-      : `Replaced-file check: ${fileChanges.changes.length.toLocaleString('en-GB')} change(s) read since `
-        + `${fileChanges.since ?? 'the start'}${fileChanges.complete ? '' : ' (partial: the read stopped before its floor, the mark stays)'}`
-        + (fileChanges.futureDated ? `, ${fileChanges.futureDated} future-dated file(s) skipped (a wrong clock on the files)` : '')
-        + `; ${sizeCandidates} by size, ${candidates.size - sizeCandidates} by change time`);
+  // The signal counts behind the one plain line said below (debug).
+  if (fileChanges) {
+    runlog.debug(F.replacedFilesDebug({
+      read: fileChanges.changes.length, since: fileChanges.since ?? null,
+      bySize: sizeCandidates, byTime: candidates.size - sizeCandidates,
+    }));
+  }
   const decision = decideReplacedClear({
     candidates: candidates.size, knownTracks: walked, confirmed: confirmReplaced, accepted: acceptReplaced,
   });
   const held = !decision.clear && decision.reason === 'held';
-  if (held) logEvent('warning', decision.message, { hold: true });
+  if (held) runlog.problem('warning', decision.message, { hold: true });
   const replaced = decision.clear ? [...candidates.keys()] : [];
   for (const [id, size] of decision.clear ? candidates : []) db.clearTrackAudio(id, size);
+  let stemsDropped: { removed: number; failed: number; offline?: string } | undefined;
   if (replaced.length > 0) {
-    const stems = await import('../stem-cache.js')
+    stemsDropped = await import('../stem-cache.js')
       .then(m => m.forgetStems(replaced))
       .catch((err: unknown) => ({ removed: 0, failed: replaced.length, offline: String((err as Error)?.message ?? err) }));
-    logEvent(
-      'info',
-      `${replaced.length.toLocaleString('en-GB')} file(s) replaced at the same path since they were measured: ` +
-        'their audio analysis is due again' +
-        (stems.removed ? `, ${stems.removed} stem set(s) dropped` : '') +
-        (stems.failed ? `, ${stems.failed} stem dir(s) could not be removed` : '') +
-        (stems.offline ? ` (stem cache offline: ${stems.offline})` : ''),
-    );
   }
+  let accepted: { count: number; resent: number } | undefined;
   if (!decision.clear && decision.reason === 'accepted' && candidates.size > 0) {
     const resent = db.acceptReplacedFiles(candidates, new Map(fileChanges?.changes.map(c => [c.id, c.updatedAt])));
-    logEvent('info', `${candidates.size.toLocaleString('en-GB')} file(s) accepted as changed: their analysis is kept`
-      + (resent ? `; ${resent.toLocaleString('en-GB')} with a new size have their stems separated again` : ''));
+    accepted = { count: candidates.size, resent };
   }
+  // One line per walk, whatever it found.
+  step.note(F.replacedFilesLine({
+    walkedNothing: walked === 0,
+    changeTimes: fileChanges ? { complete: fileChanges.complete, futureDated: fileChanges.futureDated ?? 0 } : null,
+    replaced: replaced.length,
+    stems: stemsDropped,
+    accepted,
+    held: held ? candidates.size : 0,
+  }));
   // Only once acted on: a walk that dies before here, or a held clear, asks
   // again from the old mark.
   if (fileChanges?.complete && !held) await import('../file-changes.js').then(m => m.saveMark(fileChanges.newest)).catch(() => {});
   const suspect = [...eraReasons.values()].reduce((a, b) => a + b, 0);
   if (suspect) {
-    const breakdown = [...eraReasons.entries()]
+    step.note(F.eraSuspectLine(suspect));
+    runlog.debug(`era-suspect albums by reason: ${[...eraReasons.entries()]
       .sort((a, b) => b[1] - a[1])
       .map(([reason, n]) => `${reason} ${n.toLocaleString('en-GB')}`)
-      .join(', ');
-    logEvent('info',
-      `${suspect.toLocaleString('en-GB')} tracks on era-suspect albums (${breakdown})` +
-      ' — their release year is treated as the reissue\'s, and they are queued for an original-year lookup');
+      .join(', ')}`);
   }
   return { walked, liveIds, replacedHeld: held ? candidates.size : 0 };
 }
@@ -277,8 +284,13 @@ export async function walkNavidrome(
 // MB's 1 req/s.
 export async function reconcileOnly() {
   await db.open({ embeddingDim: embeddings.resolveEmbeddingDim(), adoptStoredDim: true });
-  console.log('[tag] reconcile-only: walking Navidrome to prune orphaned rows');
-  const { walked, liveIds, replacedHeld } = await walkNavidrome();
+  const years = pendingYearsWanted();
+  runlog.runLog.plan('Reconcile with the music server', [
+    { id: 'walk', title: F.STEP_TITLE.walk },
+    ...(years ? [{ id: 'years', title: F.STEP_TITLE.years }] : []),
+  ], [navidromeWhere()]);
+  const walkStep = runlog.step('walk', F.STEP_TITLE.walk);
+  const { walked, liveIds, replacedHeld } = await walkNavidrome({ step: walkStep });
   let adopted = 0;
   let pruned = 0;
   let heldMessage = '';
@@ -289,15 +301,24 @@ export async function reconcileOnly() {
     }));
     if (held) {
       heldMessage = held.message;
-      logEvent('warning', held.message, { hold: true });
+      runlog.problem('warning', held.message, { hold: true });
     }
-    console.log(`[tag] reconcile pruned ${pruned} orphaned tracks no longer in Navidrome`);
+    for (const line of F.walkChangeLines({ adopted, pruned })) walkStep.note(line);
+    walkStep.done({ summary: F.walkSummary({ walked }) });
     reportCatalogueReady(walked);
-    const resolved = await backfillOriginalYears(pendingOriginalYearIds(false), false, 4);
-    if (resolved) console.log(`[tag] reconcile resolved ${resolved} original years via MusicBrainz`);
+    const yearStep = runlog.step('years', F.STEP_TITLE.years);
+    const ids = pendingOriginalYearIds(false);
+    if (ids.length === 0) yearStep.skip(years ? 'no original year is due' : 'original-year lookups are off');
+    else {
+      yearStep.start({ runsOn: yearSources(), scope: F.scopeMissing({ missing: ids.length, pool: walked, what: 'an original release year' }) });
+      const stats = await backfillOriginalYears(ids, false, 4);
+      yearStep.done({ summary: F.yearsSummary(stats) });
+    }
   } else {
     // A transient empty Navidrome response must never wipe the DB.
-    console.warn('[tag] reconcile: Navidrome returned 0 tracks — skipping prune');
+    runlog.problem('warning', 'The music server listed no tracks, so nothing was removed. Check that its library is scanned and reachable.');
+    walkStep.done({ summary: '0 tracks read', outcome: 'partial' });
+    runlog.runLog.skipOpen(['years'], 'the walk read nothing');
   }
   const parts = [
     adopted > 0 ? `Re-linked ${adopted} track${adopted === 1 ? '' : 's'} after a Navidrome ID migration` : '',
@@ -310,8 +331,12 @@ export async function reconcileOnly() {
     label: parts.length ? parts.join('; ') : 'Library is in sync with Navidrome',
     done: adopted + pruned,
   });
-  console.log(`[tag] reconcile complete (walked ${walked}, adopted ${adopted}, pruned ${pruned})`);
+  runlog.runLog.finish({ headline: parts.length ? parts.join('; ') : 'the library is in sync with the music server', library: '' });
   process.exit(0);
+}
+
+function pendingYearsWanted(): boolean {
+  return ((settings.get() as any).embedding?.enrichment ?? {}).originalYear !== false;
 }
 
 // Mirrors server.ts boot: cloud API keys from secrets.env, Navidrome creds from

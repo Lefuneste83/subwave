@@ -41,18 +41,19 @@ import * as settings from '../settings.js';
 import * as embeddings from './embeddings.js';
 import { loadSecretsIntoEnv } from '../setup/secrets.js';
 import { loadNavidromeConfig } from '../setup/config.js';
-import { runAnalysisPass } from './analyze.js';
+import { ANALYSIS_STEP, analysisStepDefs, runAnalysisPass } from './analyze.js';
 import { adoptAndPrune } from './id-rotation.js';
 import * as analyzer from './analyzer.js';
-import { reportProgress, makeEventLogger } from './tagger-progress.js';
+import { reportProgress } from './tagger-progress.js';
+import * as runlog from './run-log.js';
+import * as F from './run-log-format.js';
+import { configuredAnalyzerHost, navidromeWhere, plannedAnalyzerWhere } from './run-log-where.js';
 import { readFileSync } from 'node:fs';
 import { analysisPart, formatPlan, parseFacets, parseWhere, planAcoustics, planStateFacets, yearPart, type AcousticsPlan } from './acoustics-plan.js';
-import { runYearLookups } from './original-year.js';
+import { runYearLookups, yearSources } from './original-year.js';
 import { acquireStandaloneLock, installPidfileCleanup } from './tagger-lock.js';
 import { walkFileInfo } from './tag-library/flags.js';
 import { reembedNewlyMarked } from './tag-library/embed.js';
-
-const logEvent = makeEventLogger('analyze');
 
 // TRUNCATE-checkpoint the library DB on every exit path, else this bulk writer
 // leaves a huge WAL sidecar (#786). db.close() is synchronous, so 'exit' is safe.
@@ -112,13 +113,13 @@ async function buildFacetPlan(args: string[], limit: number | undefined): Promis
     const knownSet = new Set(known);
     ids = wanted.filter(id => knownSet.has(id));
     const unknown = wanted.length - ids.length;
-    if (unknown > 0) console.log(`[analyze] ${unknown} of the given ids are not in the library — ignored`);
+    if (unknown > 0) runlog.note(`${unknown} of the given ids are not in the library: ignored`);
   }
   // Probe so capabilities are real; an unreachable analyzer leaves them unknown.
   // A year-only plan never talks to the analyzer, so it is not probed.
   const needsAnalyzer = facets.some(db.isAnalysisFacet);
   const available = needsAnalyzer ? await analyzer.isAvailable().catch(() => false) : false;
-  if (needsAnalyzer && !available) console.log('[analyze] analyzer not reachable — capabilities unknown');
+  if (needsAnalyzer && !available) runlog.problem('warning', F.analyzerUnreachableProblem(configuredAnalyzerHost()));
   const enrichCfg: { originalYear?: boolean } =
     (settings.get() as { embedding?: { enrichment?: { originalYear?: boolean } } }).embedding?.enrichment ?? {};
   return planAcoustics({
@@ -147,7 +148,7 @@ async function main() {
   const facetMode = args.includes('--facets');
   const dryRun = args.includes('--dry-run');
   if (dryRun && !facetMode) {
-    console.error('[analyze] --dry-run needs --facets');
+    console.error(F.problemLine('error', '--dry-run needs --facets'));
     process.exit(1);
   }
 
@@ -159,7 +160,7 @@ async function main() {
     try {
       ownsLock = acquireStandaloneLock('analyze', args);
     } catch (err: any) {
-      console.error(`[analyze] ${err.message}`);
+      console.error(F.problemLine('error', err.message));
       process.exit(1);
     }
   }
@@ -186,35 +187,45 @@ async function main() {
     try {
       plan = await buildFacetPlan(args, limit);
     } catch (err: any) {
-      console.error(`[analyze] ${err.message}`);
+      console.error(F.problemLine('error', err.message));
       process.exit(1);
     }
-    for (const line of formatPlan(plan)) console.log(line);
     if (dryRun) {
+      // The plan itself is the output of a dry run, in its own table.
+      for (const line of formatPlan(plan)) console.log(line);
       analyzer.shutdown();
-      console.log('[analyze] dry run — nothing analysed');
+      console.log('Dry run: nothing analysed.');
       process.exit(0);
     }
+    const audio = analysisPart(plan);
+    const yearIds = yearPart(plan);
+    runlog.runLog.plan('Analysis run', [
+      ...(audio ? [{ id: ANALYSIS_STEP.models, title: F.facetPlanTitle(audio.facets) }] : []),
+      ...(audio && audio.facets.includes('clap') ? [{ id: ANALYSIS_STEP.score, title: F.STEP_TITLE.score }] : []),
+      ...(audio ? [{ id: 'refresh', title: F.STEP_TITLE.refresh }] : []),
+      ...(yearIds.length ? [{ id: 'years', title: F.STEP_TITLE.years }] : []),
+    ], [...(audio ? [plannedAnalyzerWhere()] : []), ...(yearIds.length ? [yearSources()] : [])]);
+    for (const line of formatPlan(plan)) runlog.debug(line);
     if (plan.items.length === 0) {
       analyzer.shutdown();
-      console.log('[analyze] nothing planned');
+      runlog.runLog.finish({ headline: 'nothing planned', library: '' });
       process.exit(0);
     }
     // Audio first, then the MusicBrainz lookups: two independent passes.
-    const audio = analysisPart(plan);
     const dirtyBefore = new Set(db.textVectorDirtyIds());
     const stats = audio ? await runAnalysisPass({ plan: audio }) : null;
     analyzer.shutdown();
-    if (stats) console.log('[analyze] stats:', JSON.stringify(stats));
-    await reembedNewlyMarked(dirtyBefore, logEvent);
-    const yearIds = yearPart(plan);
+    if (stats) runlog.debug(`stats: ${JSON.stringify(stats)}`);
+    if (audio) await reembedNewlyMarked(dirtyBefore);
     if (yearIds.length) {
       // Planned means due: a not-found re-asked by --where unmeasurable/all is
       // asked again, a resolved or manual year never is (the planner skipped it).
-      const years = await runYearLookups(yearIds, { force: true, label: '[analyze]' });
-      logEvent('info', `Original years: ${years.found} found, ${years.notFound} not found, ${years.errors} errors`);
-      console.log('[analyze] year stats:', JSON.stringify(years));
+      const st = runlog.step('years', F.STEP_TITLE.years);
+      st.start({ runsOn: yearSources(), scope: F.scopeMissing({ missing: yearIds.length, pool: db.trackCount(), what: 'an original release year' }) });
+      const years = await runYearLookups(yearIds, { force: true });
+      st.done({ summary: F.yearsSummary(years) });
     }
+    runlog.runLog.finish({ headline: analysisHeadline(stats), library: '' });
     process.exit(0);
   }
 
@@ -222,21 +233,19 @@ async function main() {
   // --skip-walk hard-disables either way.
   const count = db.trackCount();
   const shouldWalk = !skipWalk && (forceWalk || count === 0);
-  if (skipWalk) {
-    console.log('[analyze] --skip-walk: not refreshing track metadata');
-  } else if (shouldWalk) {
-    console.log(
-      forceWalk
-        ? '[analyze] --walk: refreshing track metadata...'
-        : '[analyze] empty catalogue — walking Navidrome...',
-    );
-  } else {
-    console.log(
-      `[analyze] catalogue has ${count} tracks — skipping metadata walk (use --walk to refresh)`,
-    );
+  runlog.runLog.plan('Analysis run', [
+    ...(shouldWalk ? [{ id: 'walk', title: F.STEP_TITLE.walk }] : []),
+    ...analysisStepDefs({ audioBackfill, vocalBackfill }),
+    { id: 'refresh', title: F.STEP_TITLE.refresh },
+  ], [...(shouldWalk ? [navidromeWhere()] : []), plannedAnalyzerWhere()]);
+  if (!shouldWalk) {
+    runlog.debug(skipWalk ? '--skip-walk: track details not refreshed'
+      : `the library holds ${count} tracks: no walk (--walk forces one)`);
   }
 
   if (shouldWalk) {
+    const st = runlog.step('walk', F.STEP_TITLE.walk);
+    st.start({ runsOn: navidromeWhere(), scope: F.walkScope(count) });
     reportProgress({ phase: 'walk', label: 'Scanning Navidrome library', done: 0 });
     let walked = 0;
     const liveIds = new Set<string>();
@@ -267,16 +276,15 @@ async function main() {
         liveIds.add(song.id);
         walked += 1;
         if (walked % 500 === 0) {
-          console.log(`[analyze] walked ${walked} tracks`);
+          st.progressCount(walked, 'tracks read');
           reportProgress({ phase: 'walk', label: 'Scanning Navidrome library', done: walked });
         }
       }
     } catch (err) {
       walkComplete = false;
       const why = err instanceof Error ? err.message : String(err);
-      logEvent('warning', `Library walk incomplete after ${walked.toLocaleString('en-GB')} tracks (${why}); nothing pruned this run`);
+      runlog.problem('warning', F.walkStoppedProblem(walked, why));
     }
-    if (walkComplete) logEvent('info', `Scanned ${walked.toLocaleString('en-GB')} tracks`);
 
     // Reconcile: adopt rows whose id was rotated by Navidrome's canonical-id
     // migration (music/id-rotation.ts — analysis carries over instead of being
@@ -291,27 +299,40 @@ async function main() {
     // the tagger run and Library → Reconcile with Navidrome. Adoption is wired
     // here anyway so the CLI can't be the one path that prunes what the others
     // adopt.
+    let adopted = 0;
+    let pruned = 0;
     if (walkComplete && walked > 0) {
-      const { pruned, held } = await adoptAndPrune(liveIds, { confirmMassPrune: args.includes('--confirm-prune') });
-      if (held) logEvent('warning', held.message, { hold: true });
-      if (pruned > 0) {
-        console.log(`[analyze] pruned ${pruned} orphaned tracks no longer in Navidrome`);
-      }
+      const r = await adoptAndPrune(liveIds, { confirmMassPrune: args.includes('--confirm-prune') });
+      if (r.held) runlog.problem('warning', r.held.message, { hold: true });
+      adopted = r.adopted;
+      pruned = r.pruned;
     }
+    for (const line of F.walkChangeLines({ adopted, pruned })) st.note(line);
+    st.done({ summary: F.walkSummary({ walked }), outcome: walkComplete ? 'ok' : 'partial' });
   }
 
   const dirtyBefore = new Set(db.textVectorDirtyIds());
   const stats = await runAnalysisPass({ limit, reAnalyze, audioBackfill, vocalBackfill });
   analyzer.shutdown();
-  console.log('[analyze] stats:', JSON.stringify(stats));
+  runlog.debug(`stats: ${JSON.stringify(stats)}`);
   // The vectors this pass's measurements marked (#2236) get their Sound: line now,
   // not at the next tag run (#2313). Skipped, with the marks kept, unless the
   // embedding provider answers with the index's own model.
-  await reembedNewlyMarked(dirtyBefore, logEvent);
-  process.exit(stats.available ? 0 : 0);
+  await reembedNewlyMarked(dirtyBefore);
+  runlog.runLog.finish({ headline: analysisHeadline(stats), library: '' });
+  process.exit(0);
+}
+
+// The closing block's headline: what the analysis did, all steps summed.
+function analysisHeadline(stats: Awaited<ReturnType<typeof runAnalysisPass>> | null): string {
+  if (!stats) return '';
+  if (!stats.available) return 'no audio analysis: the analyzer did not answer';
+  const analysed = stats.analyzed + (stats.wholeFile?.analyzed ?? 0) + (stats.beatGrid?.analyzed ?? 0);
+  const failed = stats.failed + (stats.wholeFile?.failed ?? 0) + (stats.beatGrid?.failed ?? 0);
+  return `${F.fmtCount(analysed)} track analyses done, ${F.fmtCount(failed)} failed`;
 }
 
 main().catch((err) => {
-  console.error('[analyze] fatal:', err);
+  console.error(F.problemLine('error', `The analysis run stopped: ${err?.stack || err}`));
   process.exit(1);
 });

@@ -3,6 +3,7 @@
 
 import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { config } from '../config.js';
+import { MANAGED_ENV } from './tagger-progress.js';
 
 export interface PidfileInfo {
   pid: number;
@@ -14,8 +15,8 @@ export interface PidfileInfo {
 // Set on a controller-spawned child's env (broadcast/tagger.ts): the controller
 // already holds the pidfile, so the CLI must not re-check or clear it. Without it
 // the child reads the pidfile naming its own still-live npx ancestor and calls
-// that a conflicting run.
-export const MANAGED_ENV = 'SUBWAVE_TAGGER_MANAGED';
+// that a conflicting run. Defined beside the event channel it also switches.
+export { MANAGED_ENV };
 
 export function pidfilePath(): string {
   return `${config.stateDir}/tagger.pid`;

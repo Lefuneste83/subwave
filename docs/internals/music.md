@@ -1297,6 +1297,30 @@ An `<audio>` element cannot send the console's Basic header, so the controller h
 
 Pinned by `scripts/tag-schedule.test.ts`.
 
+## The run log
+
+A tagging run (`npm run tag-library`, the admin's Start tagging) and an analysis run (`npm run analyze`, Analyze audio) say what they do in one shape, step by step, so an operator can tell which task is running, where, on how many tracks, and what went wrong. The wording lives in one module, `music/run-log-format.ts` (pure, pinned by `scripts/run-log-format.test.ts`); the reporter that numbers steps and keeps their times is `music/run-log.ts`, and the "where" of each step (host and port from the configured URL, never a credential, path or query string) is `music/run-log-where.ts`. **Every phase goes through them: no phase builds its own status string.**
+
+```
+━━ Tagging run · 9 steps            (the banner: every planned step in order, the machines once)
+▶ [3/9] Measure loudness and silence at both ends
+    Runs on : analyzer at analyzer.local:8080 · CPU lane, 12 at a time
+    Scope   : 29 of 74,725 tracks in the library — 29 need loudness, 29 silence at both ends
+  … 25/29 done
+✔ [3/9] Measure loudness and silence at both ends — 29 done, 0 failed · 37 s
+▷ [5/9] Beat grid for Hot Mix (Beat This) — skipped: no show uses Hot Mix
+✖ Stems not saved: the analyzer cannot see the stems share (/var/sub-wave/stems has no .subwave-stems marker). Mount the share on the analyzer host, then run Start tagging again.
+■ Finished in 4 min 11 s — …        (step times by name, the library, every warning again)
+```
+
+- **A step is named by what it produces**, never by an internal facet or phase name. One analyzer request that covers several products (the model lane) names them all, and its scope counts each. A step with several sources (Last.fm tags, Navidrome lyrics, MusicBrainz/Discogs years) is named by the ones switched on, and its "Runs on", scope and result list each source.
+- **Plain words in every line.** A figure that only means something through an internal concept (a relabel after a calibration change, the replaced-file check's per-signal counts, the era detector's reasons) goes to debug; the normal line says what changed for the library ("Replaced files: 9 (same path, new audio) — their analysis is due again"). A detail line under a step opens with its subject ("Replaced files:", "Release years:", "Removed:", "Re-linked:").
+- **A step keeps its number when it is skipped**, with the reason in one line. The result is `✔` done, `⚠` partial (failures, or tracks left for later) or `✖` failed.
+- **A problem is said once, with its cause and its fix** (`runlog.problem`), under the step it belongs to, and repeated in the closing block's warning list. A silent zero is the bug: a stems share the analyzer cannot see (its `unavailable` answer names the marker) is said once and the pass asks for no more stems, which stay due; a model the analyzer failed to load (`/health` `analyze_*_error`) is named at the step that needed it.
+- **Each line is printed once.** A controller-spawned run (`SUBWAVE_TAGGER_MANAGED=1`) prints each status line only as its `[event]` sentinel, which the controller writes to the run log file without a kind prefix (`carriesOwnMark`); from a shell the same line is printed plain. The `[progress]` and `[catalogue]` sentinels are for the controller only and are not printed from a shell; the admin's progress bar reads `[progress]` as before.
+- **Tuning numbers are debug** (`runlog.debug`, shown with `--verbose` or `RUN_LOG_VERBOSE=1`), and the per-call LLM lines are off during a run (`setCallLineMirror`): the step's result sums them.
+- The Library page shows a run-log line without a kind emoji and sets headers apart (`web/lib/runLogLine.ts`, which mirrors `carriesOwnMark`).
+
 ## Sound map projection (#2314)
 
 The Observatory's sound map is a 2D UMAP of the CLAP vectors (`music/map-projection.ts`), run in a child process (`npx tsx src/music/project-map.ts`) because the fit is minutes of synchronous CPU.

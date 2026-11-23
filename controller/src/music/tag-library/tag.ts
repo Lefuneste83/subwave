@@ -5,7 +5,8 @@ import { primaryLeg, fallbackLeg, probeLegReachable } from '../../llm/provider.j
 import { isUnreachable, isQuotaOrAuthError, errReason } from '../../llm/sdk.js';
 import { tagBatch, tagOne, type TagResult } from '../tagger-core.js';
 import { reportProgress } from '../tagger-progress.js';
-import { logEvent } from './log.js';
+import * as runlog from '../run-log.js';
+import { llmWhere, modelName } from '../run-log-where.js';
 import { tagInputFor, recordTagAnswer } from './tag-input.js';
 
 // One LLM worker the batch loop pulls through. `pin` selects the leg (undefined
@@ -29,6 +30,9 @@ interface TagState {
 }
 
 // Stamps the progress channel only: 'seed' = phase 2, 'learn' = phase 4 rounds.
+// Models whose batch degrade was already said this run.
+const degradeSaid = new Set<string>();
+
 interface TagPhaseInfo {
   phase: 'seed' | 'learn';
   round?: number;
@@ -63,15 +67,19 @@ async function processBatch(
     // at warning. Genuine batch errors keep the error line.
     const perTrackDegrade = /batch length mismatch/i.test(err.message || '');
     if (perTrackDegrade) {
-      logEvent(
-        'warning',
-        `${consumer.label} didn't return one entry per track — tagging ` +
-          `${songs.length} tracks individually this batch (expected for some models; just slower)`,
-      );
+      // Said once a run: some models never answer one entry per track.
+      if (!degradeSaid.has(consumer.label)) {
+        degradeSaid.add(consumer.label);
+        runlog.note(
+          `${modelName(consumer.label)} did not return one answer per track, so its batches are tagged ` +
+            'track by track (slower; expected with some models).',
+        );
+      }
+      runlog.debug(`${consumer.label}: batch of ${songs.length} tagged track by track`);
     } else {
-      logEvent(
-        'error',
-        `LLM batch failed (${songs.length} tracks) on ${consumer.label}: ${err.message} — falling back to per-track`,
+      runlog.problem(
+        'warning',
+        `A batch of ${songs.length} tracks failed on ${modelName(consumer.label)} (${errReason(err)}), so it is tagged track by track.`,
       );
     }
     results = [];
@@ -82,7 +90,7 @@ async function processBatch(
       } catch (oneErr: any) {
         // Leg unusable mid-salvage: bail the batch, nothing is upserted yet.
         if (consumer.pin && (isUnreachable(oneErr) || isQuotaOrAuthError(oneErr))) throw oneErr;
-        console.error(`[tag] per-track tag failed on ${consumer.label}: ${oneErr.message}`);
+        runlog.debug(`per-track tag failed on ${consumer.label}: ${oneErr.message}`);
         results.push(null);
       }
     }
@@ -131,17 +139,18 @@ async function runConsumer(
       // misdirects an operator whose provider credits ran out.
       batches.unshift(batch);
       const remaining = onDrop ? onDrop(err) : 0;
-      const reason = isQuotaOrAuthError(err) ? 'quota/credit/auth rejected' : 'host unreachable';
-      logEvent(
+      const reason = isQuotaOrAuthError(err)
+        ? 'the provider refused it: quota, credit or key'
+        : 'its server did not answer';
+      runlog.problem(
         'error',
-        `LLM leg ${consumer.label} dropped — ${reason}: ${errReason(err)} (${remaining} leg(s) left)`,
+        `${modelName(consumer.label)} stopped tagging (${reason}: ${errReason(err)}); ` +
+          `${remaining} LLM${remaining === 1 ? '' : 's'} left to finish the step.`,
       );
       return;
     }
     state.processed += 1;
-    if (state.processed % 4 === 0) {
-      console.log(`[tag] LLM-tagged ${state.tagged}/${total}`);
-    }
+    if (state.processed % 4 === 0) runlog.progress(state.tagged, total);
     reportProgress({
       phase: phaseInfo.phase,
       label: 'Tagging with LLM',
@@ -193,9 +202,9 @@ export async function llmTagInBatches(
     if (batches.length > 0) {
       const abandoned = batches.reduce((n, b) => n + b.length, 0);
       const hint = quotaOrAuthDrop
-        ? ' — a leg was refused for quota/credit/auth; check the provider credit balance, spend cap, or API key'
-        : '';
-      logEvent('warning', `All LLM legs dropped — ${abandoned} tracks left for next run${hint}`);
+        ? ' One was refused for quota, credit or its key: check the provider credit balance, spend cap or API key.'
+        : ' Check that the LLM servers are running and reachable.';
+      runlog.problem('warning', `Every LLM stopped answering: ${abandoned} tracks are left for the next run.${hint}`);
     }
   }
   logUntaggable(state.untaggable);
@@ -208,51 +217,54 @@ export async function llmTagInBatches(
 }
 
 // One line per kind, so "the model couldn't tell" reads apart from "it answered
-// outside the vocabulary", which is a vocabulary or model problem.
+// outside the vocabulary", which is a vocabulary or model problem. The ids are
+// detail (--verbose).
 function logUntaggable(untaggable: TagState['untaggable']): void {
   const list = (ids: string[]) => ids.slice(0, 20).join(', ') + (ids.length > 20 ? `, … ${ids.length - 20} more` : '');
   const cantTell = untaggable.filter(u => !u.offVocab).map(u => u.id);
   const offVocab = untaggable.filter(u => u.offVocab).map(u => u.id);
   if (cantTell.length > 0) {
-    logEvent(
-      'info',
-      `${cantTell.length} untaggable (the model couldn't tell; not re-asked until ` +
-        `the vocabulary, the model or their metadata changes): ${list(cantTell)}`,
+    runlog.note(
+      `${cantTell.length} track${cantTell.length === 1 ? '' : 's'} the model could not tell (not asked again until ` +
+        'the vocabulary, the model or their details change)',
     );
+    runlog.debug(`could not tell: ${list(cantTell)}`);
   }
   if (offVocab.length > 0) {
-    logEvent(
+    runlog.problem(
       'warning',
-      `${offVocab.length} untaggable (every mood was outside the vocabulary; not re-asked until ` +
-        `the vocabulary, the model or their metadata changes): ${list(offVocab)}`,
+      `${offVocab.length} track${offVocab.length === 1 ? '' : 's'} got only moods outside the station's vocabulary, so they stay ` +
+        'untagged (not asked again until the vocabulary, the model or their details change). Check the mood list or the model.',
     );
+    runlog.debug(`outside the vocabulary: ${list(offVocab)}`);
   }
 }
 
 // Dual-LLM mode activates when a fallback is configured, distinct from the
 // primary, and answers a cheap probe; otherwise one failover-capable consumer.
-export async function resolveTagConsumers(): Promise<TagConsumer[]> {
+// `machines` names the LLMs the run uses, for its banner; `notice` says why a
+// configured fallback sits this run out, for the mood-tagging step.
+export async function resolveTagConsumers(): Promise<{ consumers: TagConsumer[]; machines: string[]; notice: string | null }> {
   const primary = primaryLeg();
   const fb = fallbackLeg();
-  if (!fb) return [{ label: primary.label }];
+  const single = (notice: string | null) => ({ consumers: [{ label: primary.label }], machines: [llmWhere(primary)], notice });
+  if (!fb) return single(null);
 
   const sameHost =
     (primary.cfg.ollamaUrl || '') === (fb.cfg.ollamaUrl || '') &&
     (primary.cfg.baseUrl || '') === (fb.cfg.baseUrl || '');
-  if (fb.label === primary.label && sameHost) {
-    logEvent('info', 'Fallback LLM identical to primary — single-LLM mode');
-    return [{ label: primary.label }];
-  }
+  if (fb.label === primary.label && sameHost) return single(null);
 
   if (!(await probeLegReachable(fb))) {
-    logEvent('info', `Fallback LLM (${fb.label}) unreachable — single-LLM mode`);
-    return [{ label: primary.label }];
+    return single(`The fallback ${llmWhere(fb)} did not answer, so mood tagging uses the primary LLM alone this run.`);
   }
 
-  logEvent('info', `Dual-LLM mode active: primary=${primary.label} + fallback=${fb.label}`);
-  return [
-    { pin: 'primary', label: primary.label },
-    { pin: 'fallback', label: fb.label },
-  ];
+  return {
+    consumers: [
+      { pin: 'primary', label: primary.label },
+      { pin: 'fallback', label: fb.label },
+    ],
+    machines: [`${llmWhere(primary)} (primary)`, `${llmWhere(fb)} (fallback, sharing the work)`],
+    notice: null,
+  };
 }
-

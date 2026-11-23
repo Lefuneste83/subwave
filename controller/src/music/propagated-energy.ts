@@ -15,13 +15,11 @@
 //    threshold) and says otherwise.
 // An operator's energy ('manual') is never touched by any step, and every
 // write is the `energy` column alone. Moods are not corrected the same way: a
-// mood is editorial.
+// mood is editorial. The pass reports through its result; the run log words
+// it (run-log-format.ts energySummary) in the step that ran it.
 
 import * as db from './library-db.js';
 import { audioEnergy, audioEnergyFill, audioEnergyOverrule, computeBaselines, prunedBaselines } from './audio-calibration.js';
-import { makeEventLogger } from './tagger-progress.js';
-
-const logEvent = makeEventLogger('audio-energy');
 
 export interface AudioEnergyOptions {
   fillEmpty: boolean;
@@ -52,8 +50,6 @@ export interface AudioEnergyStats {
   skipped: string | null;
 }
 
-const fmt = (n: number) => n.toLocaleString('en-GB');
-
 // The fields of the switches that are on, from what each step did.
 function switchStats(
   opts: AudioEnergyOptions,
@@ -66,28 +62,6 @@ function switchStats(
     ...(opts.fillEmpty ? { fillScope, filled } : {}),
     ...(opts.overruleLlm ? { overruleScope, overruled } : {}),
   };
-}
-
-// One log part per switch that is on, nothing for one that is off.
-function switchLogParts(stats: Partial<AudioEnergyStats>): string[] {
-  const parts: string[] = [];
-  if (stats.filled && stats.fillScope !== undefined) {
-    const f = stats.filled;
-    parts.push(
-      stats.fillScope === 0
-        ? 'no empty energies to fill'
-        : `${fmt(f.high + f.medium + f.low)} of ${fmt(stats.fillScope)} empty energies filled from the audio ` +
-            `(${fmt(f.high)} high, ${fmt(f.medium)} medium, ${fmt(f.low)} low)`,
-    );
-  }
-  if (stats.overruled !== undefined && stats.overruleScope !== undefined) {
-    parts.push(
-      stats.overruleScope === 0
-        ? 'no LLM energies with audio scores to check'
-        : `${fmt(stats.overruled)} of ${fmt(stats.overruleScope)} LLM energies overruled by strongly decisive audio`,
-    );
-  }
-  return parts;
 }
 
 // No default: every run over stored energies states its switches, so a
@@ -107,7 +81,6 @@ export function runAudioEnergyPass(opts: AudioEnergyOptions): AudioEnergyStats {
   if (rows.length === 0 && emptyRows.length === 0 && overruleRows.length === 0) {
     if (!anySwitch) return { ...empty, skipped: 'no propagated tracks with audio scores' };
     const idle = switchStats(opts, 0, { ...none }, 0, 0);
-    logEvent('info', `Audio-derived energy: nothing to do — ${['no propagated tracks with audio scores', ...switchLogParts(idle)].join('; ')}`);
     return { ...empty, ...idle, skipped: 'no tracks with audio scores for this pass' };
   }
 
@@ -172,20 +145,6 @@ export function runAudioEnergyPass(opts: AudioEnergyOptions): AudioEnergyStats {
   }
 
   const switched = switchStats(opts, fillRows.length, filled, overruleRows.length, overruled);
-  const parts = switchLogParts(switched);
-  // The correction's sentence is the one an upgraded station logged before the
-  // switches; with no propagated rows (only reached with a switch on) it says
-  // nothing, so it is left out.
-  if (rows.length > 0) {
-    parts.unshift(
-      `Audio-derived energy over ${fmt(rows.length)} propagated tracks — ` +
-        `${fmt(updates.length)} corrected, ${fmt(agreed)} confirmed, ` +
-        `${fmt(undecided)} left as-is (audio not decisive)`,
-    );
-  } else {
-    parts.unshift('Audio-derived energy: no propagated tracks with audio scores');
-  }
-  logEvent('success', parts.join('; '));
 
   return {
     scope: rows.length,

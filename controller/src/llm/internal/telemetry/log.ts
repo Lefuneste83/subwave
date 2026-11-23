@@ -20,8 +20,15 @@ export function lifetimeTokenCount() {
   return lifetimeTokens;
 }
 
+// The per-call console line. A tagging run turns it off (tag-library.ts): its
+// run log sums the calls up, and one line per call buried it.
+let callLineMirror = true;
+export function setCallLineMirror(enabled: boolean): void {
+  callLineMirror = enabled;
+}
+
 function logSuccess(call: any) {
-  if (!call.ok) return;
+  if (!call.ok || !callLineMirror) return;
   const usage = Number.isFinite(call.usage?.input) && Number.isFinite(call.usage?.output)
     ? `${call.usage.input}/${call.usage.output} tokens`
     : 'token usage unavailable';

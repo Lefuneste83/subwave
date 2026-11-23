@@ -237,8 +237,8 @@ test('a whole-file loudness answer missing a figure is a failure, never a partia
 
 test('the backfill says whether the analyzer lacks the facets or has not said', async () => {
   // Known to lack them: rebuild. Not said: an old image, or not ready yet.
-  assert.match(wholeFileSkipNotice(false), /reports it cannot run it .*rebuild the analyzer/);
-  assert.match(wholeFileSkipNotice(null), /has not said whether it can run it/);
+  assert.match(wholeFileSkipNotice(false), /reports it cannot measure it .*rebuild the analyzer/);
+  assert.match(wholeFileSkipNotice(null), /has not said whether it can measure it/);
   assert.doesNotMatch(wholeFileSkipNotice(null), /reports it cannot/);
   // A capability that turned up after the first probe is read before planning.
   setWholeFile(true);

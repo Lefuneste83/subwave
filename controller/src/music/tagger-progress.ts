@@ -32,7 +32,10 @@ export interface TaggerProgress {
   updatedAt: string;
 }
 
+// Only for the controller (eventsAreRelayed): from a shell the run log's own
+// progress lines say the same, and a JSON line every few tracks buried them.
 export function reportProgress(p: Omit<TaggerProgress, 'updatedAt'>): void {
+  if (!eventsAreRelayed()) return;
   console.log(PROGRESS_PREFIX + JSON.stringify({ ...p, updatedAt: new Date().toISOString() }));
 }
 
@@ -79,33 +82,37 @@ export function reportRotation(r: Omit<TaggerRotation, 'at'>): void {
 export const CATALOGUE_PREFIX = '[catalogue] ';
 
 export function reportCatalogueReady(walked: number): void {
+  if (!eventsAreRelayed()) return; // only the controller reads it
   console.log(CATALOGUE_PREFIX + JSON.stringify({ walked }));
 }
 
-// Bind an event logger to a module's console tag ('tag' / 'analyze'). Each call
-// emits BOTH the terse `[tag] …` line (docker logs stay greppable) AND the event
-// sentinel, so call sites stay one line. Both go to stdout back-to-back so the
-// capture side can drop the plain echo and keep only the structured entry.
-export function makeEventLogger(prefix: string) {
-  return (kind: TaggerEventKind, text: string, opts: { hold?: boolean } = {}): void => {
-    // Collapse newlines: a multi-line echo defeats the controller's de-dup.
-    const line = text.replace(/\s*\n\s*/g, ' ');
-    console.log(`[${prefix}] ${line}`);
-    reportEvent({ kind, text: line, ...opts });
-  };
+// Set on a controller-spawned child's env (broadcast/tagger.ts): the controller
+// reads this child's stdout and relays the sentinels. Re-exported by
+// tagger-lock.ts, which reads it for the pidfile.
+export const MANAGED_ENV = 'SUBWAVE_TAGGER_MANAGED';
+
+// Whether this process's stdout is read by the controller. Each status line is
+// then emitted ONCE, as the event sentinel the panel and the run's log file
+// render; run from a shell (`npm run tag-library` / `npm run analyze`), once,
+// as the plain line the operator reads. Never both: a plain echo before each
+// sentinel was the source of every doubled line in the run log, whenever the
+// capture side failed to pair the two (any prefix it did not know).
+export function eventsAreRelayed(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[MANAGED_ENV] === '1';
 }
 
-// Slowest-first, zero-duration phases dropped. Shared by the CLI breakdown line
-// and the 'done' event's `timings` so the two can't drift.
+// A run-log line (music/run-log-format.ts) carries its own mark or its own
+// indentation: the panel and the log file add no kind prefix to it.
+// MIRROR: web/lib/runLogLine.ts `carriesOwnMark`.
+const OWN_MARK_RE = /^(?:\s|━━|[▶▷✔⚠✖…■])/;
+export function carriesOwnMark(text: string): boolean {
+  return OWN_MARK_RE.test(text);
+}
+
+// Slowest-first, zero-duration phases dropped: the 'done' event's `timings`,
+// which the admin panel's "time per phase" reads.
 export function sortedPhaseTimings(timings: Record<string, number>): Array<[string, number]> {
   return Object.entries(timings)
     .filter(([, ms]) => ms > 0)
     .sort((a, b) => b[1] - a[1]);
-}
-
-// e.g. "seed 480s · learn 360s · embed 120s"; '' when nothing was timed.
-export function formatPhaseBreakdown(timings: Record<string, number>): string {
-  return sortedPhaseTimings(timings)
-    .map(([p, ms]) => `${p} ${Math.round(ms / 1000)}s`)
-    .join(' · ');
 }

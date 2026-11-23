@@ -1,8 +1,8 @@
 // Unit tests for the library tagger's performance helpers:
 //   - mapPool / memoizeByKey (src/util/async-pool.ts) — the bounded-concurrency
 //     pool + per-artist promise dedup behind Phase-0 enrichment.
-//   - sortedPhaseTimings / formatPhaseBreakdown (src/music/tagger-progress.ts) —
-//     the per-phase breakdown shown in the CLI + admin panel.
+//   - sortedPhaseTimings (src/music/tagger-progress.ts) — the per-phase
+//     breakdown the admin panel shows (the run log names its steps instead).
 // These are the testable cores extracted from tag-library.ts (which can't be
 // imported directly — it runs main() on import). Pinned so the enrichment
 // parallelism (each item once, cap honoured, one call per artist) and the
@@ -12,7 +12,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mapPool, memoizeByKey } from '../src/util/async-pool.js';
-import { sortedPhaseTimings, formatPhaseBreakdown } from '../src/music/tagger-progress.js';
+import { sortedPhaseTimings } from '../src/music/tagger-progress.js';
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
@@ -94,17 +94,4 @@ await test('sorts slowest-first and drops zero-duration phases', () => {
 await test('empty / all-zero timings → []', () => {
   assert.deepEqual(sortedPhaseTimings({}), []);
   assert.deepEqual(sortedPhaseTimings({ walk: 0, setup: 0 }), []);
-});
-
-await test('formats slowest-first with rounded seconds', () => {
-  assert.equal(
-    formatPhaseBreakdown({ embed: 120000, seed: 480000, learn: 60000 }),
-    'seed 480s · embed 120s · learn 60s',
-  );
-});
-
-await test('rounds sub-second-resolution values and empties cleanly', () => {
-  assert.equal(formatPhaseBreakdown({ a: 1500 }), 'a 2s'); // Math.round(1.5) = 2
-  assert.equal(formatPhaseBreakdown({}), '');
-  assert.equal(formatPhaseBreakdown({ a: 0 }), '');
 });

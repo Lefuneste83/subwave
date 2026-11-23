@@ -3,7 +3,7 @@
 // backend or failed request logs and skips.
 
 import * as db from './library-db.js';
-import { makeEventLogger } from './tagger-progress.js';
+import { stepDetail } from './run-log.js';
 import {
   audioDescriptorVocabHash,
   DESCRIPTOR_CALIBRATION_VERSION,
@@ -14,7 +14,7 @@ import { runZeroShotPass, type ZeroShotSpec, type ZeroShotStats } from './audio-
 
 const DESCRIPTOR_PASS: ZeroShotSpec = {
   tag: 'audio-descriptors',
-  logEvent: makeEventLogger('audio-descriptors'),
+  logEvent: stepDetail,
   version: DESCRIPTOR_CALIBRATION_VERSION,
   vocabHash: () => audioDescriptorVocabHash(),
   vocab: () => ({
