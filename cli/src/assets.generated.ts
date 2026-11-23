@@ -383,6 +383,9 @@ services:
       # Whole-file facets (loudness v2, edges): their own lane width on this host.
       - ANALYZE_WHOLE_FILE_CONCURRENCY=\${ANALYZE_WHOLE_FILE_CONCURRENCY:-}
       - ANALYZE_WHOLE_FILE_TIMEOUT_S=\${ANALYZE_WHOLE_FILE_TIMEOUT_S:-}
+      # Disk a run may use to keep a track's whole file for its later
+      # whole-file reads (GB, default 4, 0 = off; .env.example).
+      - ANALYZE_STAGE_MAX_GB=\${ANALYZE_STAGE_MAX_GB:-}
       - ANALYZE_CLAP_WINDOWS=\${ANALYZE_CLAP_WINDOWS:-}
       - ANALYZE_OUTRO_SECONDS=\${ANALYZE_OUTRO_SECONDS:-}
       # CLAP isn't gated, but anonymous HF downloads are rate-limited. Same var
@@ -746,6 +749,9 @@ services:
       # Whole-file facets (loudness v2, edges): their own lane width on this host.
       - ANALYZE_WHOLE_FILE_CONCURRENCY=\${ANALYZE_WHOLE_FILE_CONCURRENCY:-}
       - ANALYZE_WHOLE_FILE_TIMEOUT_S=\${ANALYZE_WHOLE_FILE_TIMEOUT_S:-}
+      # Disk a run may use to keep a track's whole file for its later
+      # whole-file reads (GB, default 4, 0 = off; .env.example).
+      - ANALYZE_STAGE_MAX_GB=\${ANALYZE_STAGE_MAX_GB:-}
       - ANALYZE_CLAP_WINDOWS=\${ANALYZE_CLAP_WINDOWS:-}
       - ANALYZE_OUTRO_SECONDS=\${ANALYZE_OUTRO_SECONDS:-}
       # Anonymous HF downloads are rate-limited; same var as tts-heavy.
@@ -1046,6 +1052,9 @@ services:
       # Whole-file facets (loudness v2, edges): their own lane width on this host.
       - ANALYZE_WHOLE_FILE_CONCURRENCY=\${ANALYZE_WHOLE_FILE_CONCURRENCY:-}
       - ANALYZE_WHOLE_FILE_TIMEOUT_S=\${ANALYZE_WHOLE_FILE_TIMEOUT_S:-}
+      # Disk a run may use to keep a track's whole file for its later
+      # whole-file reads (GB, default 4, 0 = off; .env.example).
+      - ANALYZE_STAGE_MAX_GB=\${ANALYZE_STAGE_MAX_GB:-}
       - ANALYZE_CLAP_WINDOWS=\${ANALYZE_CLAP_WINDOWS:-}
       - ANALYZE_OUTRO_SECONDS=\${ANALYZE_OUTRO_SECONDS:-}
       # Anonymous HF downloads are rate-limited; same var as tts-heavy.
@@ -1468,6 +1477,14 @@ SITE_URL=
 #                        # waits for that answer (90000-7260000). Keep it 60 s
 #                        # above the analyzer's limit, so the analyzer reports
 #                        # its own timeout first.
+# ANALYZE_STAGE_MAX_GB=4  # analyzer host: disk a tagging run may use to keep
+#                        # a new track's whole file between its loudness +
+#                        # edges read and its beat grid / structure reads, so
+#                        # the track is streamed once per run, not three times
+#                        # (0-1024; 0 = off). Only while a show has Hot Mix
+#                        # on; a copy that does not fit is not kept (that
+#                        # track streams as before), at least 1 GB is always
+#                        # left free, and copies go at the end of the run.
 # ANALYZE_PROBE_MS=60000  # how long "no analyzer at all" is cached before the
 #                         # /health probe runs again. A backend that ANSWERED is
 #                         # remembered until restart; only the miss is timed, so

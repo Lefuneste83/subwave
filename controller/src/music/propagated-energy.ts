@@ -90,9 +90,10 @@ function switchLogParts(stats: Partial<AudioEnergyStats>): string[] {
   return parts;
 }
 
-export function runAudioEnergyPass(
-  opts: AudioEnergyOptions = { fillEmpty: false, overruleLlm: false },
-): AudioEnergyStats {
+// No default: every run over stored energies states its switches, so a
+// call site that should honour the operator's (audioEnergyOptions) cannot
+// silently run the correction alone. Off is written out where it is meant.
+export function runAudioEnergyPass(opts: AudioEnergyOptions): AudioEnergyStats {
   const none: Counts = { high: 0, medium: 0, low: 0 };
   const empty = { scope: 0, corrected: 0, agreed: 0, undecided: 0 };
   const anySwitch = opts.fillEmpty || opts.overruleLlm;

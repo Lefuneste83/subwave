@@ -135,6 +135,8 @@ function seedCorrectionFixtures(): void {
   db.setTrackAudioMoodScoresBulk([{ id: 'untagged', scores: LOUD }]);
 }
 
+const OFF = { fillEmpty: false, overruleLlm: false };
+
 let stats: ReturnType<typeof runAudioEnergyPass>;
 
 test('the correction scope is propagated rows carrying audio scores', () => {
@@ -238,7 +240,7 @@ test('with both options off (the default) the pass only corrects propagated rows
   db.upsertTrackMeta('offBlank', { title: 'offBlank', artist: 'N', album: 'O', duration: 300 });
   db.upsertTrackTags('offBlank', { moods: ['night'], energy: null, source: 'llm', confidence: 0.8 });
   db.setTrackAudioMoodScoresBulk([{ id: 'offBlank', scores: LOUD }]);
-  const off = runAudioEnergyPass();
+  const off = runAudioEnergyPass(OFF);
   assert.equal(db.getTrack('offBlank')!.energy, null, 'no fill unless the operator opted in');
   assert.equal(db.getTrack('judged')!.energy, 'low', 'no overrule unless the operator opted in');
   assert.deepEqual(
@@ -280,7 +282,7 @@ test('the overrule write loses to an energy changed between the read and the wri
 });
 
 test('re-running is idempotent — nothing left to correct', () => {
-  const again = runAudioEnergyPass();
+  const again = runAudioEnergyPass(OFF);
   assert.equal(again.corrected, 0, 'the second pass changes nothing');
   assert.equal(again.agreed, 2, 'both decisive rows now agree with the audio');
   assert.deepEqual(
@@ -322,13 +324,13 @@ function withNoScores<T>(fn: () => T): T {
 
 test('with both switches off, an empty library skips exactly as before the switches', () => {
   let res!: ReturnType<typeof runAudioEnergyPass>;
-  const logs = logsOf(() => { res = withNoScores(() => runAudioEnergyPass()); });
+  const logs = logsOf(() => { res = withNoScores(() => runAudioEnergyPass(OFF)); });
   assert.deepEqual(res, { scope: 0, corrected: 0, agreed: 0, undecided: 0, skipped: 'no propagated tracks with audio scores' });
   assert.deepEqual(logs, [], 'and logs nothing, as before');
 });
 
 test('with both switches off, the log line is the correction sentence alone', () => {
-  const logs = logsOf(() => runAudioEnergyPass());
+  const logs = logsOf(() => runAudioEnergyPass(OFF));
   assert.equal(logs.length, 1);
   assert.match(logs[0], /^Audio-derived energy over \d+ propagated tracks — \d+ corrected, \d+ confirmed, \d+ left as-is \(audio not decisive\)$/);
 });
@@ -352,7 +354,7 @@ test('a switch that is on says so even with nothing to do', () => {
     sql.exec("UPDATE tracks SET audio_mood_scores_json = NULL WHERE id = 'offBlank'");
     const on = logsOf(() => runAudioEnergyPass({ fillEmpty: true, overruleLlm: false }));
     assert.match(on.join('\n'), /; no empty energies to fill$/);
-    const off = logsOf(() => runAudioEnergyPass());
+    const off = logsOf(() => runAudioEnergyPass(OFF));
     assert.doesNotMatch(off.join('\n'), /empty energ/);
   } finally {
     sql.exec('ROLLBACK TO no_blank');
@@ -370,7 +372,7 @@ test('an empty propagated energy the correction leaves undecided is filled, and 
     db.setTrackAudioMoodScoresBulk([{ id: 'propBlankMid', scores: MIDDLING }]);
     // offBlank is still empty here; hide it so this run's fill is this row alone.
     sql.exec("UPDATE tracks SET audio_mood_scores_json = NULL WHERE id = 'offBlank'");
-    runAudioEnergyPass();
+    runAudioEnergyPass(OFF);
     assert.equal(db.getTrack('propBlankMid')!.energy, null, 'switch off: the correction alone leaves it empty');
     const on = runAudioEnergyPass({ fillEmpty: true, overruleLlm: false });
     const t = db.getTrack('propBlankMid')!;

@@ -1,7 +1,7 @@
 // Per-track reads and writes: metadata, tags, enrichment, analysis and vectors.
 // The write path every ingest pass (tagger, analyzer, enricher) goes through.
 
-import { ANALYSIS_VERSION, AUDIO_EMBEDDING_DIM, SQL_HAS_MOODS, SQL_TAIL_VOCAL_RANGES, TAGGER_VERSION, getEmbeddingDim, requireDb } from './handle.js';
+import { ANALYSIS_VERSION, AUDIO_EMBEDDING_DIM, SQL_HAS_MOODS, SQL_TAIL_VOCAL_RANGES, TAGGER_VERSION, cachedStatement, getEmbeddingDim, requireDb } from './handle.js';
 import {
   FACETS, FACET_VERSIONS, SQL_WHOLE_FILE_LOUDNESS, WHOLE_FILE_LOUDNESS_EXTRAS, clearFacetFailures, clearFacetRows,
   PLACED_TAIL_STAMP, SQL_PLACED_TAIL_STAMP, isPlacedTailStamp, isWholeFileLoudnessVersion, placedTailMovedBy,
@@ -165,8 +165,7 @@ interface StoredEra {
 }
 
 function storedEra(id: string): StoredEra | null {
-  return (requireDb()
-    .prepare(`SELECT year, original_year, is_compilation, era_untrusted FROM tracks WHERE id = ?`)
+  return (cachedStatement(requireDb(), `SELECT year, original_year, is_compilation, era_untrusted FROM tracks WHERE id = ?`)
     .get(id) as StoredEra | undefined) ?? null;
 }
 
@@ -192,12 +191,11 @@ function syncYearIfEraChanged(id: string, before: StoredEra | null): void {
 }
 
 function markTextVectorDirty(id: string): boolean {
-  return requireDb()
-    .prepare(
-      `UPDATE tracks SET text_vector_dirty = 1
+  return cachedStatement(
+    requireDb(),
+    `UPDATE tracks SET text_vector_dirty = 1
         WHERE id = ? AND EXISTS (SELECT 1 FROM track_vectors WHERE id = tracks.id)`,
-    )
-    .run(id).changes > 0;
+  ).run(id).changes > 0;
 }
 
 function markTextVectorDirtyIfEraChanged(id: string, before: StoredEra | null): void {
@@ -533,10 +531,10 @@ export function upsertTrackMeta(id: string, meta: TrackMeta): boolean {
   const file = cleanFileInfo(meta);
   const walkedSize = file.fileSize;
   const storedSize = walkedSize == null ? null
-    : (requireDb().prepare('SELECT file_size AS s FROM tracks WHERE id = ?').get(id) as { s: number | null } | undefined)?.s ?? null;
+    : (cachedStatement(requireDb(), 'SELECT file_size AS s FROM tracks WHERE id = ?').get(id) as { s: number | null } | undefined)?.s ?? null;
   const replaced = fileReplaced(storedSize, walkedSize);
-  requireDb()
-    .prepare(
+  cachedStatement(
+      requireDb(),
       `
       INSERT INTO tracks (id, title, artist, album, album_id, artist_id, year, original_year, original_year_source, is_compilation, era_untrusted, era_reason, album_kind, album_artist, genres, duration_sec,
                           file_path, file_suffix, file_size, bit_rate, explicit_status, album_artist_id)
@@ -599,8 +597,7 @@ export function upsertTrackMeta(id: string, meta: TrackMeta): boolean {
         -- and every other writer (undefined) must leave the walked value alone.
         explicit_status = CASE WHEN ? = 1 THEN excluded.explicit_status ELSE tracks.explicit_status END
     `,
-    )
-    .run(
+    ).run(
       id,
       meta.title ?? null,
       meta.artist ?? null,
@@ -850,8 +847,7 @@ function rekeyForcedFrom(id: string, raw: string, albumKey: string): void {
  *  record, the record has no key (written before #2319), or it cannot be read;
  *  the whole answer is null for an unknown id. */
 export function decisionRecordKeys(id: string): { heldBy: string | null; current: string } | null {
-  const row = requireDb()
-    .prepare(`SELECT era_forced_from AS f, ${ERA_ALBUM_KEY_SQL} AS k FROM tracks WHERE id = ?`)
+  const row = cachedStatement(requireDb(), `SELECT era_forced_from AS f, ${ERA_ALBUM_KEY_SQL} AS k FROM tracks WHERE id = ?`)
     .get(id) as { f: string | null; k: string } | undefined;
   if (!row) return null;
   return { heldBy: readForcedFrom(row.f)?.albumKey ?? null, current: row.k };

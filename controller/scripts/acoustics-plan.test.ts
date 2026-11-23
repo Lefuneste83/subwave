@@ -27,7 +27,7 @@
 
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -321,6 +321,34 @@ test('a stems plan on an unmounted stems share sends no stems_dir', async () => 
     assert.deepEqual(left, [], 'the plan wrote into the unmounted share');
   } finally {
     sql().prepare(`UPDATE tracks SET stems_at = NULL WHERE id = 'a'`).run();
+    vocalCapable = false;
+    analyzer._resetBackendCacheForTests();
+  }
+});
+
+// A stems plan looks up only its own tracks' stem dirs: with the cache's size
+// already stored, a small plan never lists the cache root (a dir per cached
+// track; 45k on a network share for a hundred-track import).
+test('a small stems plan checks its own tracks\' stem dirs, never the whole cache root', async () => {
+  const stemCacheStore = await import('../src/music/stem-cache.js');
+  vocalCapable = true;
+  analyzer._resetBackendCacheForTests();
+  try {
+    const root = stemCacheStore.stemsRoot();
+    mkdirSync(join(root, 'other-track'), { recursive: true });
+    writeFileSync(join(root, stemCacheStore.STEMS_MARKER), '{}');
+    await stemCacheStore.usage(); // the stored size the budget reads
+    db.upsertTrackMeta('t10', { title: 't10', artist: 'A', album: 'B', duration: 214 });
+    const p = P.planAcoustics({ ids: ['t10'], facets: ['stems'], where: { kind: 'all' },
+      state: db.loadFacetState(['stems']), capabilities: { clap: true, demucs: true, tailVocal: true } });
+    assert.ok(p.items[0]?.request.stems, 'a stems plan asks for stems');
+    requests.length = 0;
+    const before = stemCacheStore._cacheWalksForTests();
+    await runAnalysisPass({ plan: p });
+    assert.equal(requests.length, 1);
+    assert.ok(requests[0].stems_dir, JSON.stringify(requests[0]));
+    assert.equal(stemCacheStore._cacheWalksForTests(), before, 'the plan listed the whole stem cache');
+  } finally {
     vocalCapable = false;
     analyzer._resetBackendCacheForTests();
   }

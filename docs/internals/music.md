@@ -109,6 +109,66 @@ for the early refresh and retries it if needed before recipe sync; a full tag
 run still rebuilds at exit because its later phases change the pool's moods.
 Failed or deferred state migration keeps automatic recovery retryable.
 
+**What a tagging run repeats, and what it no longer does.** A new-track import
+(Start tagging) walks the whole library, tags the new tracks and measures them;
+the work it did once per track or once per run, rather than once per step, is
+deliberate, and each piece below says what it saves and why the stored result
+is unchanged. Measured on the production import of 89 tracks into 74,732 (602 s:
+walk 135 s, self-check 38 s, analysis 373 s).
+- **The walk** stays complete and ordered (adoption, the prune and the
+  replaced-file check trust it). Its cost was its row writes, not Navidrome:
+  each album's rows are written in one transaction (`walkNavidrome`
+  `writeAlbum`, the same statements in the same order, never held across a
+  Navidrome round trip), the per-row statements are prepared once per
+  connection (`library-db/handle.ts` `cachedStatement`), and
+  `subsonic.iterateAllAlbums` keeps up to `NAVIDROME_WALK_CONCURRENCY` (1-16,
+  default 4) `getAlbum` calls in flight ahead of the album it reads, read in
+  listing order, so a complete walk still stops on the same failing album with
+  the same songs before it. On a fake Navidrome at 10 ms a call, 77,000 songs:
+  142 s on develop, 29 s now. Pinned by `scripts/walk-concurrency.test.ts`.
+- **The propagation self-check** (one log line, 150 held-out votes, each two
+  brute-force KNN scans) runs alongside the acoustic analysis when that is the
+  next phase, handing the event loop back between votes, and is awaited before
+  the re-vote rewrites tags (`tag-library/self-check.ts`). It reads its sample
+  and that sample's truth when it starts; its votes may see this run's CLAP
+  vectors and an audio-corrected energy land, which moves only its line. Pinned
+  by `scripts/tag-self-check.test.ts`.
+- **The closing audio scoring** (audio moods, descriptors, the library-wide
+  energy check) runs once per regular run, after the model lane, the one step
+  that writes vectors: the whole-file slices pass `scoreAudio: false` like the
+  grid and structure steps. The check is idempotent over unchanged inputs and
+  nothing between the dropped passes and the kept one writes a vector, a score
+  or a tag. The tagger's own check after propagation and the one after the
+  re-vote stay: each follows a step that rewrote energies, and the re-vote reads
+  the energies the model lane's check corrected. Every check runs with the
+  operator's fill/overrule switches (`runAudioEnergyPass` has no default), so a
+  re-voted row left without an energy is filled in the same run. Pinned in
+  `scripts/beat-grid-regular-run.test.ts`.
+- **A track's whole file is streamed once per run.** While a show has Hot Mix
+  on, a new track's loudness + edges, grid and structure each read the whole
+  file; the three passes moved at the same ~70 MB/s whatever their width or
+  compute, so the reads set their pace. The sidecar keeps a run-scoped copy for
+  a request naming one (`stage_key`, `docker/analyzer/server.py` `StageCache`,
+  `music/stage-policy.ts` for who keeps it): the lead read of a track whose grid
+  is due fetches it, the grid keeps it for a structure, the structure only
+  reuses it, and the run releases its copies after the structure step. The copy
+  is the stream's own bytes (equal figures pinned in
+  `scripts/analyzer_stage_cache_test.py`); the budget (`ANALYZE_STAGE_MAX_GB`,
+  infrastructure.md) admits and never evicts, so a track that does not fit
+  streams as before. The model lane keeps its own capped copy and tail read:
+  handing it the whole file would change its source and its tail's read path.
+- **A stems plan checks only its own tracks' stem dirs**
+  (`stem-cache.cachedTrackIdsAmong`): one lookup per planned name up to 2,000,
+  instead of listing the cache root (a dir per cached track).
+- **Kept as they are**, each for a reason: the first embedding (the seed
+  selector's k-means and the propagation vote need vectors before anything is
+  measured) and the trailing one (it adds the measured `Sound:` line, only for
+  the rows marked dirty); the lead whole-file slice before the model lane (the
+  tail is placed from those edges); the grid and structure after the model lane
+  (the structure is planned on the grid stored, so it waits for the grid
+  step's writes); the self-check's sample size (its figure is compared run over
+  run).
+
 - **Subsonic**: keep using `getAnnotatedUri` for anything going to Liquidsoap — raw URLs lose metadata until ID3 arrives, and the `on_metadata` hook needs `subsonic_id` for `/cover/:id` artwork.
 - **Genres are multi-value**: `subsonic.songGenres(song)` is the single ingest normaliser (OpenSubsonic `genres: [{name}]` array → `string[]`, legacy scalar fallback). library.db stores `genres` as a JSON array; the scalar `genre` column is GENERATED (genres[0], indexable) — write `genres`, never `genre`. Matching is any-of via `show-filter.ts trackGenres/genreMatches`; LLM-facing shapes carry all tags comma-joined in the `genre` field. **Genre matching is one-directional**: a track's tag may REFINE the show's genre (a "Punk" show admits a `Punk Rock` track) but never broaden it (a "Pop Punk" show rejects a plain `Pop` track), and containment is word-boundary aligned so a "Rap" show doesn't pull `Trap`. The reverse direction is what let strict shows leak broad tags — don't reintroduce it. Note the resolver `subsonic.resolveGenreName` is still deliberately loose both ways: it maps free text to a real library tag for listener requests and server-side fetches, so a show whose genre isn't a library tag can still broaden there (see issue for the fetch-hint/match-target split).
 - **Scene vocabulary (#1577)**: "scene" is what the Observatory calls a genre tag and the word the operator asked in terms of, so the consolidation tool uses it; the storage is `tracks.genres`. After a full pass a real catalogue carries near-duplicate spellings that each hold a handful of tracks, and the Tagging panel's **Scene vocabulary** section lists every distinct value with its count (`library-db/scenes.ts sceneVocabulary`, a `json_each` walk over the mirror — uncached and NOT scoped to tagged rows, since an untagged track's genre is as noisy as a tagged one's) and merges a ticked set into one survivor. **A merge is two halves and both are required**: the REWRITE (`db.mergeScenes`, one transaction over just the rows carrying a retired value — the dedupe and the order-preserving rewrite are done row-at-a-time in JS so they state the same rules `songGenres` applies at ingest, once, rather than twice in two languages; the scalar `genre` column is GENERATED so it follows, and a rewritten row with a text vector is marked `text_vector_dirty` because the genre line is in the embed text) and the durable RULE (`music/scene-vocab.ts`, `state/scene-aliases.json`, applied by `subsonic.songGenres`). **Without the rule the feature is a no-op within one cycle**: the mirror is rebuilt from Navidrome on every walk and `upsertTrackMeta` writes the walked genres over the stored ones, so a merge with no memory is undone by the next tag pass — which is the pass that produced the noise. `library.consolidateScenes` is where the two are paired, and it records the rule FIRST so a rolled-back rewrite still leaves the fold in place. The alias map is kept FLAT (a target that is itself retired resolves through; existing rules pointing at a source are repointed) so the lookup is one hop and a cycle cannot be stored — **except on a REVERSAL**, where the target resolves back onto a value this same merge is retiring: resolving through there cancels the merge against itself, every source drops out as a self-merge, and the operator gets a 200 naming the spelling they were trying to replace (#1580 review), so the typed target stands and the old rule is repointed instead. A rule's `from` is a fold KEY and its `to` a stored spelling, so **the two sides may look identical and still do work** ("rock" → "Rock" canonicalises every case and spacing variant); neither `planAliases` nor the file loader may drop a rule for reading like an identity, because that is exactly what a pure case merge is and dropping it let the next walk write the retired spelling straight back. For the same reason a source counts as "already the target" only when it matches VERBATIM — the case-insensitive test rewrote nothing on a case-only merge while reporting success. At the cap the OLDEST rule goes, never the one just recorded: a head slice discarded the new rule while its row rewrite still committed, which is a merge that unwinds at the next walk. The fold is case- and whitespace-insensitive but **never punctuation-insensitive** — "Hip Hop" and "Hip-Hop" are different labels and which survives is the operator's call, and folding them in the listing would hide the thing they came to fix. Sources match the EXACT stored value the operator ticked, so a rule can still be broader than the rewrite that came with it (an untickled case variant folds at the next walk rather than now) — that gap is the design, not a bug. The trim-and-dedupe both halves apply is `scene-vocab.dedupeScenes`, stated once and shared by `applyAliases` (ingest) and `mergeScenes` (rewrite). Loading is lazy and SYNCHRONOUS because `songGenres` runs in two processes (controller + tagger child) and a boot hook one of them forgets is a silently inert feature. This is post-hoc curation and touches nothing the tagger asks for, so `TAGGER_CONTRACT_VERSION` stays put. Forgetting a rule stops future folds and leaves the rewritten rows alone — several spellings became one, and which row had which is exactly what the merge discarded. Pinned by `scripts/scene-vocab.test.ts` (real SQLite: the generated column, the dedupe, the dirty-vector marking and the walk round trip would all pass a pure test while broken).
@@ -988,7 +1048,9 @@ its `regular run: <facet> N planned of M due` line and is non-fatal; the stats
 carry them as `beatGrid`. Neither writes a CLAP vector, so neither repeats the
 closing zero-shot scoring (audio moods, descriptors, the library-wide
 audio-energy check: `scoreAudio: false`), which the model lane already ran over
-this run's vectors. Each needs the analyzer's positive answer
+this run's vectors. On a sidecar that keeps copies, a track's grid and
+structure read the whole-file copy its loudness + edges read kept, instead of
+two more streams (*What a tagging run repeats*, above). Each needs the analyzer's positive answer
 (`music/beat-grid-run-policy.ts`): one that says it cannot, or has not said,
 gets nothing planned for that facet and one warning per run, and the structure
 still runs on stored grids when only the grid is missing. Without a Hot Mix

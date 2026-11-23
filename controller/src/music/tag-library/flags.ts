@@ -138,7 +138,8 @@ export async function walkNavidrome(
   // cleared together after the walk behind a mass hold. id -> the walked size
   // (the size signal) or null (the change-time signal).
   const candidates = new Map<string, number | null>();
-  for await (const song of subsonic.iterateAllSongs({ requireComplete: true })) {
+  // One song's row, as the walk writes it.
+  const writeSong = (song: any): void => {
     const eraFields = eraWalkFields(song, eraOverrides, ownerCtx);
     const fileInfo = walkFileInfo(song);
     const fileReplaced = db.upsertTrackMeta(song.id, {
@@ -182,10 +183,21 @@ export async function walkNavidrome(
     if (song.albumEraUntrusted && song.albumEraReason) {
       eraReasons.set(song.albumEraReason, (eraReasons.get(song.albumEraReason) ?? 0) + 1);
     }
-    walked += 1;
-    if (walked % 500 === 0) {
-      console.log(`[tag] walked ${walked} tracks`);
-      reportProgress({ phase: 'walk', label: 'Scanning Navidrome library', done: walked });
+  };
+  // An album's rows are written in one transaction: the same statements in the
+  // same order, without a commit per song (most of a 75k-track walk's time was
+  // those commits and the statements around them). Synchronous, so the write
+  // lock is never held across a Navidrome round trip.
+  const writeAlbum = rawDb ? rawDb.transaction((songs: any[]) => { for (const s of songs) writeSong(s); })
+    : (songs: any[]) => { for (const s of songs) writeSong(s); };
+  for await (const album of subsonic.iterateAllAlbums({ requireComplete: true })) {
+    writeAlbum(album.songs);
+    for (const _ of album.songs) {
+      walked += 1;
+      if (walked % 500 === 0) {
+        console.log(`[tag] walked ${walked} tracks`);
+        reportProgress({ phase: 'walk', label: 'Scanning Navidrome library', done: walked });
+      }
     }
   }
   logEvent('info', `Scanned ${walked.toLocaleString('en-GB')} tracks`);

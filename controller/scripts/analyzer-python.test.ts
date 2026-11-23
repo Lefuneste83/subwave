@@ -40,6 +40,7 @@ const SUITES = [
   'analyzer_device_test.py', // cuda self-test + cpu fallback (#2280)
   'analyzer_oom_retry_test.py', // a CUDA OOM at model load is waited out (bounded) before the latch
   'analyzer_stem_provenance_test.py', // a stem window rewrite never leaves another recording's window (#2238)
+  'analyzer_stage_cache_test.py', // run-scoped whole-file copies: one download per key, budget admits, copy decodes as the stream
 ];
 
 const probe = spawnSync('python3', ['--version'], { stdio: 'ignore' });

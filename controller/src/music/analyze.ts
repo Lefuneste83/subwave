@@ -2,6 +2,7 @@
 // lack them, resumably. Shared by the `npm run tag` phase and `npm run analyze`.
 // The DSP lives in music/analyzer.ts; with no backend this is a clean no-op.
 
+import { randomUUID } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
 import * as db from './library-db.js';
 import * as analyzer from './analyzer.js';
@@ -29,6 +30,7 @@ import { sweepKeepLastFromDisk } from '../broadcast/pick-stems.js';
 import { planAcoustics, planStateFacets, type AcousticsPlan, type WorkRequest } from './acoustics-plan.js';
 import { hotMixStretchWanted } from '../settings/liquidsoap.js';
 import { beatGridRunDecision, newTracksFirst } from './beat-grid-run-policy.js';
+import { stageKeep, stageKey, type StageStep } from './stage-policy.js';
 
 // An opt-in facet (the beat grid, the structure) failed and nothing else was
 // asked of the track: a failure for the pass's systemic guard like any other,
@@ -43,7 +45,7 @@ class OptInFailure extends Error {
     ].join('; '));
   }
 }
-import { leadIds, planRegularRun, regularRunFacets } from './regular-run-plan.js';
+import { leadIds, planRegularRun, regularRunFacets, type RegularRunWants } from './regular-run-plan.js';
 
 // Status events for the panel, mirrored to the `[analyze] …` console line.
 const logEvent = makeEventLogger('analyze');
@@ -69,6 +71,18 @@ export interface AnalyzeOptions {
   // (the beat grid, the structure), where it would only repeat the model
   // lane's own pass over the same vectors.
   scoreAudio?: boolean;
+  // A planned regular run's whole-file steps: the run's copy of each track on
+  // the sidecar (stage-policy.ts), so a track is streamed once per run. Set
+  // by runPlannedRegularPass only.
+  stage?: StageRun;
+}
+
+interface StageRun {
+  token: string;
+  step: StageStep;
+  // The lead tracks whose grid this run will measure.
+  gridDue: ReadonlySet<string>;
+  structureCapable: boolean;
 }
 
 // Env wins ON, never off; else the admin toggle (settings.audio.embeddings).
@@ -379,8 +393,46 @@ async function runPlannedRegularPass(opts: AnalyzeOptions): Promise<AnalyzeStats
   const wants = { clap: audio.widen, vocal: vocal.widen, stems };
 
   const ids = db.allTrackIdsOrdered();
+  const leading = leadIds(ids, db.loadFacetState(['head', 'tail']));
+  // The run's copies on the sidecar (stage-policy.ts): a lead track whose
+  // grid is due keeps its loudness + edges read for the grid and structure
+  // after the model lane. Released after the structure step, and again here
+  // whatever happens (a release is idempotent).
+  const stage = stageRunFor(leading);
+  try {
+    return await plannedRegularSteps(opts, ids, leading, stage, wants);
+  } finally {
+    if (stage) await analyzer.releaseStage(stage.token);
+  }
+}
+
+// The run's copies, when there is a later whole-file read to serve: the
+// analyzer keeps copies and the run measures grids (Hot Mix on, analyzer
+// able). `gridDue` is the lead tracks' grid plan, read before the lead slice,
+// so the loudness + edges read of a track whose grid is due keeps its copy.
+// null otherwise: every whole-file read streams, as before.
+function stageRunFor(leading: readonly string[]): StageRun | null {
+  if (analyzer.stageAvailable() !== true || !beatGridWanted() || analyzer.gridAvailable() !== true) return null;
+  const due = leading.length === 0 ? [] : planAcoustics({
+    ids: leading,
+    facets: ['grid'],
+    where: { kind: 'needs' },
+    state: db.loadFacetState(planStateFacets(['grid'])),
+    capabilities: { clap: null, demucs: null, tailVocal: null, grid: true },
+  }).items.map(i => i.id);
+  return { token: randomUUID(), step: 'lead', gridDue: new Set(due), structureCapable: analyzer.structureAvailable() === true };
+}
+
+async function plannedRegularSteps(
+  opts: AnalyzeOptions,
+  ids: readonly string[],
+  leading: readonly string[],
+  stage: StageRun | null,
+  wants: RegularRunWants,
+): Promise<AnalyzeStats> {
   const lead = await runWholeFileBackfill({
-    limit: opts.limit, ids: leadIds(ids, db.loadFacetState(['head', 'tail'])), label: 'for the tracks about to be analysed', noticeSkip: false,
+    limit: opts.limit, ids: leading, label: 'for the tracks about to be analysed', noticeSkip: false,
+    stage: stage ?? undefined,
   });
 
   // Read after lane 1: the tails it just made placeable are planned now.
@@ -393,10 +445,10 @@ async function runPlannedRegularPass(opts: AnalyzeOptions): Promise<AnalyzeStats
   };
   // Stems-only work is ordered and budgeted (stem-priority.ts); sizing the
   // budget walks the cache, so the planner loads it only when there is such work.
-  const plan = await planRegularRun({ ids, state, wants, capabilities, limit: opts.limit }, async () => ({
+  const plan = await planRegularRun({ ids, state, wants, capabilities, limit: opts.limit }, async (planned) => ({
     priority: db.needsStemsIds(undefined, stemCacheStore.likeSignals()),
     headroom: await stemCacheStore.headroomTracks(),
-    existing: await stemCacheStore.cachedTrackIdSet(),
+    existing: await stemCacheStore.cachedTrackIdsAmong(planned),
   }));
   logRegularPlan(plan);
   const stats = await runAnalysisPassOnce({ ...opts, plan });
@@ -404,7 +456,10 @@ async function runPlannedRegularPass(opts: AnalyzeOptions): Promise<AnalyzeStats
   // whole-file figures (the lead slice), and what is left there is the
   // library's backlog (hours when the lane is first switched on), which must
   // not hold back the grid a Hot Mix show plays new tracks on.
-  const beatGrid = stats.available ? await runBeatGridSteps(opts.limit, ids, plan.items.map(i => i.id)) : null;
+  const beatGrid = stats.available ? await runBeatGridSteps(opts.limit, ids, plan.items.map(i => i.id), stage) : null;
+  // The grid and structure were the copies' last readers: free them before
+  // the backlog, which only streams.
+  if (stage) await analyzer.releaseStage(stage.token);
   const rest = stats.available
     ? await runWholeFileBackfill({ limit: opts.limit, ids: undefined, label: '', noticeSkip: true })
     : null;
@@ -438,6 +493,7 @@ async function runBeatGridSteps(
   limit: number | undefined,
   ids: readonly string[],
   analysed: readonly string[],
+  stage: StageRun | null = null,
 ): Promise<AnalyzeStats['beatGrid'] | null> {
   if (!beatGridWanted()) return null;
   // An unknown answer can be a probe that reached the sidecar while its pool
@@ -468,8 +524,9 @@ async function runBeatGridSteps(
       logRegularPlan(plan);
       if (plan.items.length === 0) continue;
       logEvent('info', `${label} for Hot Mix: ${plan.items.length.toLocaleString('en-GB')} tracks to measure`);
-      // No vector written: the model lane already scored this run's.
-      const s = await runAnalysisPassOnce({ plan, scoreAudio: false });
+      // No vector written: the model lane already scored this run's. The
+      // grid may keep the run's copy for the structure; the structure reuses.
+      const s = await runAnalysisPassOnce({ plan, scoreAudio: false, ...(stage ? { stage: { ...stage, step: facet } } : {}) });
       total.analyzed += s.analyzed;
       total.failed += s.failed;
       total.scope += s.scope;
@@ -485,11 +542,12 @@ async function runBeatGridSteps(
 // (undefined: every track that needs the facets); `label` names the slice in
 // the log line; `noticeSkip` says the analyzer-cannot-measure notice, once per
 // run.
-async function runWholeFileBackfill({ limit, ids, label: what, noticeSkip }: {
+async function runWholeFileBackfill({ limit, ids, label: what, noticeSkip, stage }: {
   limit: number | undefined;
   ids: readonly string[] | undefined;
   label: string;
   noticeSkip: boolean;
+  stage?: StageRun;
 }): Promise<AnalyzeStats['wholeFile'] | null> {
   if (!config.analyzer.wholeFile) return null;
   if (ids && ids.length === 0) return null;
@@ -505,7 +563,13 @@ async function runWholeFileBackfill({ limit, ids, label: what, noticeSkip }: {
     }
     if (plan.items.length === 0) return null;
     logEvent('info', `Whole-file loudness + edges${what ? ` ${what}` : ''}: ${plan.items.length.toLocaleString('en-GB')} tracks to measure`);
-    const whole = await runAnalysisPassOnce({ plan });
+    // No closing scoring: a whole-file slice writes no CLAP vector and no
+    // mood score, so the zero-shot passes and the library-wide energy check
+    // would rerun over inputs it left exactly as they were. They run once,
+    // after the model lane (the step that writes vectors), as before; the
+    // energy check, idempotent over unchanged inputs, ran here before the
+    // model lane and again after the rest of the library for nothing.
+    const whole = await runAnalysisPassOnce({ plan, scoreAudio: false, ...(stage ? { stage } : {}) });
     return { analyzed: whole.analyzed, failed: whole.failed, scope: whole.scope };
   } catch (err) {
     logEvent('warning', `Whole-file loudness + edges failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
@@ -721,8 +785,10 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
         if (root.message) logEvent('warning', root.message);
         // The only place a plan sizes the budget (the widening above skips plans),
         // whether or not the settings toggle is on: an explicit stems plan needs it.
+        // Only the plan's own tracks are ever looked up in the dir set
+        // (allocateStems), so only they are checked.
         stemSlotsLeft = await stemCacheStore.headroomTracks();
-        existingStemDirs = await stemCacheStore.cachedTrackIdSet();
+        existingStemDirs = await stemCacheStore.cachedTrackIdsAmong(plan.items.filter(i => i.request.stems).map(i => i.id));
       }
     }
   }
@@ -900,11 +966,19 @@ async function runAnalysisPassOnce(opts: AnalyzeOptions = {}): Promise<AnalyzeSt
     const structureGrid = facets.includes('structure') ? db.structureGridOf(db.getGrid(id)) : null;
     const requestedFacets = facets.filter(f =>
       !(f === 'vocal' && lyricVocal) && !(f === 'stems' && !stems_dir) && !(f === 'structure' && !structureGrid));
+    // The run's copy of a track read whole (stage-policy.ts): only a request
+    // that streams the whole file and nothing else names one.
+    const stage = opts.stage && streamsWholeOnly(id)
+      ? {
+          key: stageKey(opts.stage.token, id),
+          keep: stageKeep(opts.stage.step, { gridDue: opts.stage.gridDue.has(id), structureCapable: opts.stage.structureCapable }),
+        }
+      : null;
     const res = requestedFacets.length ? await analyzer.analyzeFacets(
       id,
       {
         facets: requestedFacets, ranged, tailVocals: tailVocals && !lyricVocal, stems_dir, complete: localComplete,
-        tailWindow, structureGrid,
+        tailWindow, structureGrid, stage,
       },
       ranged ? undefined : (localPath ?? undefined),
     ) : null;
