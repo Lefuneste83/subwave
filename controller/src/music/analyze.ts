@@ -505,7 +505,13 @@ async function runWholeFileBackfill({ limit, ids, label: what, noticeSkip }: {
     }
     if (plan.items.length === 0) return null;
     logEvent('info', `Whole-file loudness + edges${what ? ` ${what}` : ''}: ${plan.items.length.toLocaleString('en-GB')} tracks to measure`);
-    const whole = await runAnalysisPassOnce({ plan });
+    // No closing scoring: a whole-file slice writes no CLAP vector and no
+    // mood score, so the zero-shot passes and the library-wide energy check
+    // would rerun over inputs it left exactly as they were. They run once,
+    // after the model lane (the step that writes vectors), as before; the
+    // energy check, idempotent over unchanged inputs, ran here before the
+    // model lane and again after the rest of the library for nothing.
+    const whole = await runAnalysisPassOnce({ plan, scoreAudio: false });
     return { analyzed: whole.analyzed, failed: whole.failed, scope: whole.scope };
   } catch (err) {
     logEvent('warning', `Whole-file loudness + edges failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);

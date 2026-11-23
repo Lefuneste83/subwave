@@ -263,3 +263,18 @@ test('a grid the analyzer fails on is counted as a failure, never fatal to the r
     gridCrash = false;
   }
 });
+
+// The whole-file slices write no vector and no mood score, so the closing
+// scoring runs once per regular run, after the model lane: before, the lead
+// slice ran the library-wide energy check over inputs nothing had changed.
+test('a regular run scores once, after the model lane, never after a whole-file slice', async () => {
+  await hotMix(false);
+  fresh('once1');
+  const { lines } = await regularRun();
+  const loud = at('once1', 'loudness');
+  assert.ok(loud >= 0 && loud < at('once1', 'head'), 'the lead whole-file slice ran first');
+  assert.equal(lines.filter(isEnergyLine).length, 1, lines.join('\n'));
+  const scored = lines.findIndex(isEnergyLine);
+  const modelLane = lines.findIndex((l) => /regular run: head \d+ planned/.test(l));
+  assert.ok(modelLane >= 0 && scored > modelLane, lines.join('\n'));
+});
