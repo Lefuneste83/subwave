@@ -2,10 +2,12 @@
 // library (he prepares live DJ sets from it, on another computer), through the
 // browser. Two routes, the same shape as the preview player (preview.ts):
 //
-// - `POST /library/download` (admin) names a selection, either the ticked
-//   rows (`ids`) or the Browse list's own filter (`filter`: every page of the
-//   list on screen, read with the list's own query, library-db browse.ts
-//   `filterAll`). The selection is resolved to track ids now and kept in memory
+// - `POST /library/download` (admin) names a selection: the ticked rows
+//   (`ids`), the Browse list's own filter (`filter`: every page of the list on
+//   screen, read with the list's own query, library-db browse.ts `filterAll`),
+//   or the Tracks tab's Liked list (`liked`: every liked track, in the view's
+//   order for its sort, read by the view's own `likedRows`). The selection is
+//   resolved to track ids now and kept in memory
 //   under a random token; the answer is a short-lived signed link to it, plus
 //   the count and the estimated size (the walk's `file_size`) for the confirm.
 // - `GET /library/download/:token?exp=&sig=` streams it. The browser navigates
@@ -19,7 +21,11 @@
 // (audio is already compressed), built as it streams (util/zip-stream.ts),
 // fetching the tracks one at a time. Each track's upstream answer is opened
 // before its entry header is written: a track the server cannot serve is
-// skipped and listed in a `_missing.txt` at the end of the archive. A failure
+// skipped and listed in a `_missing.txt` at the end of the archive. That
+// includes a heart left on an id a re-import retired: the likes store keeps
+// it, the mirror and the music server do not, so its name comes from the
+// heart's own snapshot. A selection of one such track is answered 404 before
+// any link is minted, since a browser navigating to a bare 404 shows nothing. A failure
 // after a track's first byte cannot be finished into a valid archive, so the
 // connection is dropped and the browser shows the download as failed. When the
 // browser goes away, the current upstream request is aborted and no further
@@ -35,16 +41,18 @@ import { Readable } from 'node:stream';
 import { requireAdmin } from '../../middleware/auth.js';
 import { validateBody } from '../../middleware/validate.js';
 import * as library from '../../music/library.js';
+import * as likes from '../../broadcast/likes.js';
 import * as db from '../../music/library-db.js';
 import * as subsonic from '../../music/subsonic.js';
 import { recordHttpAttempt } from '../../music/subsonic-log.js';
 import {
   MISSING_LIST_NAME, attachmentDisposition, missingListText, trackFileName, uniqueName, zipFileName,
+  type NameParts,
 } from '../../music/download-names.js';
 import { libraryDownloadSchema, type LibraryDownloadBody } from '../../schemas/library-download.js';
 import { signedLinkValid, signedQuery } from '../../util/signed-link.js';
 import { StoreZipWriter } from '../../util/zip-stream.js';
-import { browseFilterFromQuery } from './browse.js';
+import { browseFilterFromQuery, likedRows, likedViewFromQuery } from './browse.js';
 
 export const router = express.Router();
 
@@ -56,17 +64,19 @@ export const DOWNLOAD_SELECTIONS_MAX = 16;
 const UPSTREAM_HEADERS_TIMEOUT_MS = 15_000;
 const TOKEN_RE = /^[\w-]{16,64}$/;
 
-interface Selection { ids: string[]; name: string; expMs: number }
+// `hints`: names for ids the mirror does not hold (a liked id a re-import
+// retired), from the likes store's snapshot.
+interface Selection { ids: string[]; name: string; hints: Map<string, NameParts>; expMs: number }
 const selections = new Map<string, Selection>();
 
-function remember(ids: string[], name: string, nowMs = Date.now()): string {
+function remember(ids: string[], name: string, hints: Map<string, NameParts>, nowMs = Date.now()): string {
   for (const [token, sel] of selections) if (sel.expMs <= nowMs) selections.delete(token);
   while (selections.size >= DOWNLOAD_SELECTIONS_MAX) {
     const oldest = selections.keys().next().value as string;
     selections.delete(oldest);
   }
   const token = randomBytes(16).toString('base64url');
-  selections.set(token, { ids, name, expMs: nowMs + DOWNLOAD_TTL_SEC * 1000 });
+  selections.set(token, { ids, name, hints, expMs: nowMs + DOWNLOAD_TTL_SEC * 1000 });
   return token;
 }
 
@@ -79,6 +89,10 @@ function resolveSelection(body: LibraryDownloadBody): { ids: string[]; reindexin
     const ids = body.ids.filter(id => (seen.has(id) ? false : (seen.add(id), true)));
     return { ids, reindexing: false };
   }
+  if (body.liked) {
+    // The view's own rows and order; it hides the station archive itself.
+    return { ids: likedRows(likedViewFromQuery(body.liked)).map(r => r.id), reindexing: false };
+  }
   const { opts } = browseFilterFromQuery(body.filter ?? {});
   const { rows, reindexing } = db.filterAll(opts);
   // The list hides station-archive rows an old tagger wrote (#273); so does this.
@@ -86,23 +100,52 @@ function resolveSelection(body: LibraryDownloadBody): { ids: string[]; reindexin
   return { ids, reindexing: !!reindexing };
 }
 
+// Names for the ids the mirror does not hold, from the likes store's snapshot
+// (a heart keeps the artist and title it was given). Needs the store loaded.
+function nameHints(ids: readonly string[], rows: Map<string, unknown>): Map<string, NameParts> {
+  const out = new Map<string, NameParts>();
+  const absent = new Set(ids.filter(id => !rows.has(id)));
+  if (absent.size === 0) return out;
+  for (const entry of likes.likedSongs()) {
+    if (!absent.has(entry.songId)) continue;
+    out.set(entry.songId, { id: entry.songId, artist: entry.track.artist ?? null, title: entry.track.title ?? null });
+  }
+  return out;
+}
+
+// True only when the music server itself says the id is unknown (Subsonic
+// code 70). Anything else, an outage included, mints the link as before and
+// leaves the answer to the download itself.
+async function goneFromServer(id: string): Promise<boolean> {
+  try {
+    return !(await subsonic.getSong(id));
+  } catch (err) {
+    return (err as { subsonicCode?: number }).subsonicCode === 70;
+  }
+}
+
 router.post('/library/download', requireAdmin, validateBody(libraryDownloadSchema), async (req, res) => {
   try {
     await library.load();
+    await likes.load();
     const { ids, reindexing } = resolveSelection(req.body as LibraryDownloadBody);
     if (ids.length === 0) return res.status(400).json({ error: 'no tracks to download' });
     let bytes = 0;
     let unsized = 0;
     const rows = db.downloadRowsByIds(ids);
+    const hints = nameHints(ids, rows);
+    if (ids.length === 1 && !rows.has(ids[0]) && await goneFromServer(ids[0])) {
+      return res.status(404).json({ error: 'this track is no longer in the library', missing: ids });
+    }
     for (const id of ids) {
       const size = rows.get(id)?.fileSize;
       if (typeof size === 'number' && size > 0) bytes += size; else unsized++;
     }
     const single = ids.length === 1;
     const name = single
-      ? trackFileName({ id: ids[0], ...rows.get(ids[0]) })
+      ? trackFileName({ id: ids[0], ...(rows.get(ids[0]) ?? hints.get(ids[0])) })
       : zipFileName(ids.length);
-    const token = remember(ids, name);
+    const token = remember(ids, name, hints);
     res.json({
       path: `/library/download/${token}?${signedQuery('download', token, DOWNLOAD_TTL_SEC)}`,
       count: ids.length,
@@ -224,7 +267,7 @@ router.get('/library/download/:token', async (req, res) => {
       const v = r.headers.get(h);
       if (v) res.setHeader(h, v);
     }
-    const name = trackFileName({ id, ...db.downloadRowsByIds([id]).get(id) }, {
+    const name = trackFileName({ id, ...(db.downloadRowsByIds([id]).get(id) ?? sel.hints.get(id)) }, {
       contentType: r.headers.get('content-type'), disposition: r.headers.get('content-disposition'),
     });
     res.setHeader('Content-Disposition', attachmentDisposition(name));
@@ -260,11 +303,11 @@ router.get('/library/download/:token', async (req, res) => {
           return;
         }
         if (!opened.ok) {
-          missing.push({ id, name: trackFileName({ id, ...meta.get(id) }), reason: opened.reason });
+          missing.push({ id, name: trackFileName({ id, ...(meta.get(id) ?? sel.hints.get(id)) }), reason: opened.reason });
           continue;
         }
         const r = opened.r;
-        const name = uniqueName(trackFileName({ id, ...meta.get(id) }, {
+        const name = uniqueName(trackFileName({ id, ...(meta.get(id) ?? sel.hints.get(id)) }, {
           contentType: r.headers.get('content-type'), disposition: r.headers.get('content-disposition'),
         }), used);
         const len = Number(r.headers.get('content-length'));

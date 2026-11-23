@@ -114,7 +114,7 @@ export default function BrowseTab({
         readsAs={browse?.searched === q.trim() ? browse.readsAs ?? '' : ''}
         reindexing={browse?.searched === q.trim() && !!browse.reindexing}
         sort={sort} setSort={setSort}
-        actions={<DownloadButton filter={listFilter} listTotal={browse ? browse.total : null} />}
+        actions={<DownloadButton source={{ kind: 'browse', filter: listFilter }} listTotal={browse ? browse.total : null} />}
       />
 
       {filtersActive && (
