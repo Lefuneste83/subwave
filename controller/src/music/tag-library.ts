@@ -36,7 +36,6 @@ import * as embeddings from './embeddings.js';
 import { selectSeeds } from './seed-selector.js';
 import { selectEnrichIds } from './enrich-scope.js';
 import { vote, fuseNeighbours } from './tag-propagator.js';
-import { summariseEval, formatEvalSummary } from './propagation-eval.js';
 import { activeModelLabel } from '../llm/provider.js';
 import { setRawDebugStderrMirror } from '../llm/log.js';
 import { runAnalysisPass } from './analyze.js';
@@ -55,6 +54,7 @@ import {
   walkNavidrome,
 } from './tag-library/flags.js';
 import { llmTagInBatches, resolveTagConsumers } from './tag-library/tag.js';
+import { propagationSelfCheck } from './tag-library/self-check.js';
 import { rememberedUntaggable, tagPromptStamp } from './tag-library/tag-input.js';
 import { audioEnergyOptions, runAudioEnergyPass } from './propagated-energy.js';
 
@@ -341,6 +341,9 @@ async function main() {
   // The rows phases 3-4 propagated in this run, for the re-vote after the
   // trailing re-embed below.
   const propagatedThisRun = new Set<string>();
+  // The propagation self-check, when it runs alongside the analysis (it reads
+  // only; awaited before the re-vote rewrites tags).
+  let selfCheck: Promise<void> = Promise.resolve();
   if (plan.forwardTag) {
     await phaseEmbed(targetUntagged, tagBatchSize, textMode);
     lap('embed');
@@ -494,27 +497,21 @@ async function main() {
     // Self-check: re-run the vote on a sample of directly-decided tracks (KNN
     // excludes self) and score against the stored truth. A relative signal for
     // judging knob changes run-over-run, not a benchmark (see
-    // propagation-eval.ts). Best-effort: never fails the run.
-    try {
-      const truth = db.trustedTaggedIds();
-      if (truth.length >= 20) {
-        const SAMPLE = 150;
-        // Partial Fisher-Yates — shuffle just the head we sample.
-        const pool = [...truth];
-        const n = Math.min(SAMPLE, pool.length);
-        for (let i = 0; i < n; i++) {
-          const j = i + Math.floor(Math.random() * (pool.length - i));
-          [pool[i], pool[j]] = [pool[j], pool[i]];
-        }
-        const cases = pool.slice(0, n).map((id) => {
-          const t = db.getTrack(id)!;
-          return { actual: { moods: t.moods, energy: t.energy }, result: voteForTrack(id) };
-        });
-        logEvent('info', formatEvalSummary(summariseEval(cases, confidenceThreshold)));
-      }
-    } catch (err: any) {
-      console.log(`[tag] propagation self-check failed: ${err?.message || err}`);
-    }
+    // propagation-eval.ts). Best-effort: never fails the run, and it writes
+    // nothing. Each vote is two brute-force KNN scans over the whole index
+    // (about a quarter second on a 75k-track library), so the check costs
+    // half a minute of this process's CPU; when the acoustic analysis follows,
+    // it runs alongside it (selfCheck below), which spends that time waiting
+    // on the analyzer, instead of before it. Its sample and that sample's
+    // truth are read now, as before; its votes may then see what the energy
+    // check and the analysis change meanwhile (an audio-corrected energy, the
+    // CLAP vectors of this run's tracks), which moves only its log line.
+    // Alongside only when the analysis is the next thing to run: a re-embed
+    // or a re-decide in between would rebuild the vectors or rewrite the
+    // moods it votes over.
+    const overlap = plan.analyze && !plan.reEmbed && !plan.reDecide;
+    selfCheck = propagationSelfCheck(voteForTrack, confidenceThreshold, { yieldBetweenVotes: overlap });
+    if (!overlap) await selfCheck;
     lap('eval');
 
     // Audio-derived energy over the rows phases 3-4 propagated: decisive stored
@@ -584,6 +581,10 @@ async function main() {
       logEvent('warning', `Acoustic analysis phase failed (non-fatal): ${err?.message || err}`);
     }
   }
+  // The analysis writes measurements, CLAP vectors and audio-corrected
+  // energies, never moods; the re-vote below rewrites propagated tags, so it
+  // waits for the self-check.
+  await selfCheck;
   lap('analyze');
 
   // Phase 5 measures the tracks phase 1 just embedded, so their Sound: words
