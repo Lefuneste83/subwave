@@ -6,8 +6,8 @@
 //
 // The rules pinned here: off is unchanged; the tools are HARD on the window; the
 // pool never starves, it takes the nearest tempos; every tempo is the Hot Mix
-// resolver's (the beat grid's, never the quick head estimate), and the model
-// reads only that; a show with a curve anchors on the curve's tempo, not on the
+// resolver's (the applied beat grid's, never the quick head estimate nor a
+// grid held on a metrical disagreement), and the model reads only that; a show with a curve anchors on the curve's tempo, not on the
 // track before; requests close by default and the toggle opens them.
 // Run: `npm test -- hot-mix-pick-paths`.
 
@@ -275,10 +275,16 @@ test('pool: with nothing inside the window it never starves, it takes the neares
 
 // The reproduction: a Hot Mix show with a curve opens after a show that ended
 // at 96 BPM. Its picks must sit on the curve's 122, not crawl up from 96, and a
-// track must pass on its grid's tempo, never on the quick head estimate.
+// track must pass on its applied grid's tempo, never on the quick head estimate
+// nor on a grid the write decision held.
 const CURVED = { hotMix: { enabled: true, maxStepPct: 3, curve: [{ at: 0, bpm: 122 }, { at: 50, bpm: 124 }, { at: 75, bpm: 123 }, { at: 90, bpm: 122 }] } };
-// Stored 99.4 by the head estimate, 125 on a steady grid held by its coverage.
+// Stored 99.4 by the head estimate, 125 on a steady grid held by its coverage:
+// a metrical disagreement, so neither tempo is trusted and the track is out.
 const GRID_HELD = song('grid-held', 99.38);
+// Stored 123.05 by the head estimate, 124 on a steady grid under the same
+// coverage: a refinement of the head's tempo, so the grid is applied and 124
+// is the tempo Hot Mix reads.
+const REFINED = song('refined', 123.05);
 // Stored 123.05 by the head estimate, never gridded.
 const NO_GRID = song('no-grid', 123.05);
 // Stored 99.4, its grid 125 but steady on only 40 % of the track.
@@ -287,15 +293,22 @@ const UNSTEADY = song('unsteady', 99.38);
 const NEAR_PREDECESSOR = song('near-predecessor', 98);
 seeds.push(() => {
   measure('grid-held', { stored: 99.38, grid: 125, coverage: 0.786, steady: 0.917 });
+  measure('refined', { stored: 123.05, grid: 124, coverage: 0.786, steady: 0.917 });
   measure('no-grid', { stored: 123.05 });
   measure('unsteady', { stored: 99.38, grid: 125, coverage: 0.786, steady: 0.4 });
   measure('near-predecessor', { stored: 98, grid: 98 });
   measure('beyond-curve', { stored: 131, grid: 131 });
 });
 
+test('the fixture: the refinement is applied by the write path, the disagreement held', () => {
+  assert.equal(db.getGrid('refined')?.applied, 1);
+  assert.equal(db.getGrid('grid-held')?.applied, 0);
+  assert.equal(db.getGrid('unsteady')?.applied, 0);
+});
+
 test('curve: the agent\'s window is the step around the curve\'s tempo, whatever the previous show ended on', async () => {
   await onAir(CURVED);
-  random = [GRID_HELD, NO_GRID, UNSTEADY, NEAR_PREDECESSOR, UNKNOWN];
+  random = [GRID_HELD, REFINED, NO_GRID, UNSTEADY, NEAR_PREDECESSOR, UNKNOWN];
   const { q } = stubQueue(96);
   const { scope } = await livePickerScope(q);
   const w = scope.tempoWindow!;
@@ -305,25 +318,27 @@ test('curve: the agent\'s window is the step around the curve\'s tempo, whatever
   assert.equal(w.maxStepPct, 3);
   const { tools, seen } = buildPickerTools(scope) as any;
   await tools.randomSongs.execute({}, {});
-  assert.deepEqual([...seen.keys()], ['grid-held']);
-  // The model reads the grid's tempo, never the stored 99.4.
-  assert.equal(seen.get('grid-held').bpm, 125);
+  // The grid held on a metrical disagreement (125 against a stored 99.4) is
+  // out: only the applied grid's track is in, at the grid's own tempo.
+  assert.deepEqual([...seen.keys()], ['refined']);
+  assert.equal(seen.get('refined').bpm, 124);
 });
 
 test('curve: the pool offers the same window and shows the model the resolved tempos', async () => {
   const show = await onAir(CURVED);
-  random = [GRID_HELD, NO_GRID, UNSTEADY, NEAR_PREDECESSOR, UNKNOWN];
+  random = [GRID_HELD, REFINED, NO_GRID, UNSTEADY, NEAR_PREDECESSOR, UNKNOWN];
   const { q, logs } = stubQueue(96);
   assert.ok(await pool(q, show));
-  assert.deepEqual(offered[0].map((c: any) => [c.id, c.bpm]), [['grid-held', 125]]);
+  assert.deepEqual(offered[0].map((c: any) => [c.id, c.bpm]), [['refined', 124]]);
   assert.ok(logs.some((l) => /tempo window 118-126 BPM around 122 \(±3%, the curve's tempo\)/.test(l)), logs.join('\n'));
 });
 
 test('curve: with nothing inside, the pool keeps the known tempos nearest the target', async () => {
   const show = await onAir(CURVED);
   // 98 sits a step from the predecessor (96) but 20 % from the curve; 131 is 7 %
-  // from it; the stored-only and unsteady tracks have no tempo Hot Mix trusts.
-  random = [NEAR_PREDECESSOR, song('beyond-curve', 131), NO_GRID, UNSTEADY];
+  // from it; the stored-only, unsteady and held tracks have no tempo Hot Mix
+  // trusts (the held grid's 125 would sit inside the window).
+  random = [NEAR_PREDECESSOR, GRID_HELD, song('beyond-curve', 131), NO_GRID, UNSTEADY];
   const { q, logs } = stubQueue(96);
   await pool(q, show);
   assert.deepEqual(offered[0].map((c: any) => [c.id, c.bpm]), [['beyond-curve', 131]]);
@@ -332,11 +347,11 @@ test('curve: with nothing inside, the pool keeps the known tempos nearest the ta
 
 test('curve: with no known tempo at all the pool still plays, and shows the model no tempo', async () => {
   const show = await onAir(CURVED);
-  random = [NO_GRID, UNSTEADY];
+  random = [GRID_HELD, NO_GRID, UNSTEADY];
   const { q } = stubQueue(96);
   const picked = await pool(q, show);
   assert.ok(picked);
-  assert.deepEqual(offered[0].map((c: any) => c.id).sort(), ['no-grid', 'unsteady']);
+  assert.deepEqual(offered[0].map((c: any) => c.id).sort(), ['grid-held', 'no-grid', 'unsteady']);
   assert.ok(offered[0].every((c: any) => c.bpm === undefined), JSON.stringify(offered[0]));
 });
 
@@ -350,9 +365,13 @@ test('a show without Hot Mix is untouched: every track offered, each with its st
 });
 
 test('the predecessor the model reads carries the resolved tempo in a Hot Mix pick, the stored one otherwise', () => {
-  const anchor = { id: 'grid-held', title: 'G', artist: 'A', bpm: 99.38 };
-  assert.equal(predecessorContext(anchor, { hotMix: true })?.bpm, 125);
-  assert.equal(predecessorContext(anchor)?.bpm, 99.38);
+  const anchor = { id: 'refined', title: 'R', artist: 'A', bpm: 123.05 };
+  assert.equal(predecessorContext(anchor, { hotMix: true })?.bpm, 124);
+  // A grid held on a metrical disagreement: no tempo shown in a Hot Mix pick,
+  // the stored one otherwise.
+  const held = { id: 'grid-held', title: 'G', artist: 'A', bpm: 99.38 };
+  assert.equal(predecessorContext(held, { hotMix: true })?.bpm, undefined);
+  assert.equal(predecessorContext(held)?.bpm, 99.38);
   // No tempo Hot Mix trusts: none shown (the key still is).
   const stored = predecessorContext({ id: 'no-grid', title: 'N', artist: 'A', bpm: 123.05 }, { hotMix: true });
   assert.equal(stored?.bpm, undefined);
@@ -360,10 +379,10 @@ test('the predecessor the model reads carries the resolved tempo in a Hot Mix pi
 });
 
 test('the show editor counts what Hot Mix can judge, and what reaches the curve', () => {
-  const rows = ['grid-held', 'no-grid', 'unsteady', 'near-predecessor', 'beyond-curve'].map((id) => ({ id }));
+  const rows = ['grid-held', 'refined', 'no-grid', 'unsteady', 'near-predecessor', 'beyond-curve'].map((id) => ({ id }));
   assert.equal(hotMixTempoNote(CURVED, rows),
-    'Hot Mix judges tempo on the measured beat grid only: 3 of 5 library tracks have a tempo it trusts, and the rest are left out of its picks. 1 of them sit within ±3% of the curve (122-124 BPM).');
-  assert.match(hotMixTempoNote(MIX, rows)!, /3 of 5 library tracks have a tempo it trusts, and the rest are left out of its picks\.$/);
+    'Hot Mix judges tempo on the applied beat grid only: 3 of 6 library tracks have a tempo it trusts, and the rest are left out of its picks. 1 of them sit within ±3% of the curve (122-124 BPM).');
+  assert.match(hotMixTempoNote(MIX, rows)!, /3 of 6 library tracks have a tempo it trusts, and the rest are left out of its picks\.$/);
   assert.equal(hotMixTempoNote({}, rows), null);
 });
 

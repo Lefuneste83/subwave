@@ -199,8 +199,9 @@ export function bpmKeyFor(track: any): { bpm: number | null; key: string | null;
 }
 
 // The tempo a DJ Hot Mix judgement may use (music/hot-mix-policy.ts
-// mixTempoOf): the beat grid's, never the quick head estimate or a file tag.
-// Null for a track with no library row, no id, or no trusted grid tempo.
+// mixTempoOf): the applied beat grid's, never the quick head estimate, a held
+// grid or a file tag. Null for a track with no library row, no id, or no
+// applied grid.
 export function mixTempoFor(track: any): number | null {
   if (!loaded || !track?.id) return null;
   return mixTempoOf(db.mixTempoFacts(track.id));
@@ -214,7 +215,7 @@ export function pickAnalysisFor(track: any, hotMix: boolean): ReturnType<typeof 
   return hotMix ? { ...a, bpm: mixTempoFor(track) } : a;
 }
 
-// Ids → their Hot Mix tempo, for the show editor's count: every measured grid
+// Ids → their Hot Mix tempo, for the show editor's count: every applied grid
 // in one pass (a track missing from the map has none).
 export function mixTempoById(): Map<string, number> {
   const out = new Map<string, number>();
