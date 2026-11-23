@@ -15,6 +15,7 @@ import HistoryTabContainer from './library/tabs/HistoryTabContainer';
 import BlockedTabContainer from './library/tabs/BlockedTabContainer';
 import { Tabs } from './library/Tabs';
 import { AddToPlaylistBar } from './library/AddToPlaylistBar';
+import { SelectionDownload } from './library/DownloadButton';
 
 export default function LibraryPanel() {
   return <LibraryPanelInner />;
@@ -169,6 +170,7 @@ function LibraryBody() {
           busy={plBusy}
           onAdd={addSelectedToPlaylist}
           onClear={clearSelection}
+          download={<SelectionDownload ids={Array.from(selected)} />}
         />
       )}
 

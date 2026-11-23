@@ -7,7 +7,7 @@ import { Card, Btn } from '../../ui';
 import { num } from '../../LibraryTaggingPanel';
 import type { LibraryStatsLite } from '../../LibraryTaggingPanel';
 import { BrowseFilters } from '../BrowseFilters';
-import { DownloadButton } from '../DownloadButton';
+import { ListDownload } from '../DownloadButton';
 import { browseFilterParams, type BrowseFilterState } from '../download-policy';
 import { RowsTable } from '../RowsTable';
 import { useLibrary } from '../LibraryContext';
@@ -114,7 +114,6 @@ export default function BrowseTab({
         readsAs={browse?.searched === q.trim() ? browse.readsAs ?? '' : ''}
         reindexing={browse?.searched === q.trim() && !!browse.reindexing}
         sort={sort} setSort={setSort}
-        actions={<DownloadButton source={{ kind: 'browse', filter: listFilter }} listTotal={browse ? browse.total : null} />}
       />
 
       {filtersActive && (
@@ -149,6 +148,8 @@ export default function BrowseTab({
       <Card
         title="Tracks"
         sub={browse ? `${num(browse.total)} match${browse.total === 1 ? '' : 'es'}` : ''}
+        // The whole list, once narrowed and under the cap; else why not.
+        right={<ListDownload source={{ kind: 'browse', filter: listFilter }} total={browse ? browse.total : null} />}
         bodyClass="!p-0"
       >
         {/* isFetching includes cached pages being revalidated. */}

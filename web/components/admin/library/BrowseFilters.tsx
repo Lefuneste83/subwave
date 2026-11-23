@@ -43,8 +43,6 @@ interface BrowseFiltersProps {
   readsAs: string;
   reindexing: boolean;
   sort: Sort; setSort: (s: Sort) => void;
-  // The box's own action (the Library download), at the end of its last row.
-  actions?: ReactNode;
 }
 
 // Under the search box: what the query was read as, why text ran as plain
@@ -277,8 +275,6 @@ export function BrowseFilters(p: BrowseFiltersProps) {
             </Select>
           </Field>
         </div>
-
-        {p.actions && <div className="flex w-full sm:ml-auto sm:w-auto">{p.actions}</div>}
       </div>
     </section>
   );

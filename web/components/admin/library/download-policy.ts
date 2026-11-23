@@ -1,11 +1,18 @@
-// The Library download button's rules (DownloadButton.tsx), pure so they are
-// tested without a browser. The button sits in two places, each its own
-// source: the Browse filter box (the whole list on screen, every page of the
-// active filters and search) and the Tracks tab's Liked mode (every liked
-// track, all pages, in the view's sort). In both, ticked rows win. The
-// controller side is controller/src/routes/library/download.ts.
+// The Library download's rules (DownloadButton.tsx), pure so they are tested
+// without a browser. One button look, two places, and never the whole library
+// by accident:
+// - ticked rows download from the shared selection bar, on every tab
+//   (AddToPlaylistBar), as `ids`;
+// - a whole list downloads from its card header (ListDownload): the Liked list,
+//   and a Browse list only once narrowed (a search or a filter), both up to
+//   LIBRARY_DOWNLOAD_LIST_MAX tracks. Otherwise the header shows a short hint.
+// The controller refuses the same cases (controller/src/music/download-policy.ts),
+// with the same number, read here from the schema mirror.
 
+import { LIBRARY_DOWNLOAD_LIST_MAX } from '../../../lib/schemas.generated';
 import type { Energy, LikedSort, Sort, Vocal } from './types';
+
+export { LIBRARY_DOWNLOAD_LIST_MAX };
 
 export interface BrowseFilterState {
   moods: string[]; energy: Energy; vocal: Vocal; genre: string;
@@ -29,8 +36,13 @@ export function browseFilterParams(f: BrowseFilterState): Record<string, string>
   return p;
 }
 
-// What "everything" means for the button where it sits.
-export type DownloadSource =
+// Narrowed: the list's request filters on something; the sort alone does not.
+export function browseNarrowed(f: BrowseFilterState): boolean {
+  return Object.keys(browseFilterParams(f)).some(k => k !== 'sort');
+}
+
+// A whole list, where its header offers it.
+export type ListSource =
   | { kind: 'browse'; filter: BrowseFilterState }
   | { kind: 'liked'; sort: LikedSort };
 
@@ -39,31 +51,54 @@ export type DownloadBody =
   | { filter: Record<string, string> }
   | { liked: { sort: LikedSort } };
 
-export function downloadBody(selected: readonly string[], source: DownloadSource): DownloadBody {
-  if (selected.length > 0) return { ids: [...selected] };
+export function selectionBody(selected: readonly string[]): DownloadBody {
+  return { ids: [...selected] };
+}
+
+export function listBody(source: ListSource): DownloadBody {
   return source.kind === 'liked'
     ? { liked: { sort: source.sort } }
     : { filter: browseFilterParams(source.filter) };
 }
 
-// How many tracks a press takes: the ticked ones, else the list's total, all
-// pages (null until the list has answered).
-export function downloadCount(selectedCount: number, listTotal: number | null): number | null {
-  return selectedCount > 0 ? selectedCount : listTotal;
+// What a list's header shows: the button with the list's count, a hint saying
+// why there is none, or nothing (the list has not answered, or is empty).
+export type ListOffer =
+  | { kind: 'button'; count: number }
+  | { kind: 'hint'; text: string }
+  | { kind: 'none' };
+
+const n = (v: number) => v.toLocaleString('en-US');
+
+export function listOffer(source: ListSource, total: number | null, cap = LIBRARY_DOWNLOAD_LIST_MAX): ListOffer {
+  if (source.kind === 'browse' && !browseNarrowed(source.filter)) {
+    return { kind: 'hint', text: 'Filter the list or tick tracks to download' };
+  }
+  if (!total) return { kind: 'none' };
+  if (total > cap) {
+    return {
+      kind: 'hint',
+      text: source.kind === 'browse'
+        ? `Narrow the list to ${n(cap)} tracks or fewer to download it`
+        : `Over ${n(cap)} liked tracks: tick tracks to download`,
+    };
+  }
+  return { kind: 'button', count: total };
 }
 
 export function downloadLabel(count: number | null, pending: boolean): string {
   if (pending) return 'Preparing…';
   if (!count) return 'Download';
-  return `Download ${count.toLocaleString('en-US')} track${count === 1 ? '' : 's'}`;
+  return `Download ${n(count)} track${count === 1 ? '' : 's'}`;
 }
 
-export function downloadTitle(selectedCount: number, source: DownloadSource['kind'] = 'browse'): string {
-  if (selectedCount > 0) {
-    return `Download the ${selectedCount} ticked track${selectedCount === 1 ? '' : 's'} (several come as one zip)`;
-  }
-  const what = source === 'liked' ? 'every liked track' : 'every track in this list';
-  return `Download ${what}, all pages (several come as one zip); tick rows to take only those`;
+export function listTitle(kind: ListSource['kind']): string {
+  const what = kind === 'liked' ? 'every liked track' : 'every track in this list';
+  return `Download ${what}, all pages (several come as one zip)`;
+}
+
+export function selectionTitle(count: number): string {
+  return `Download the ${count} ticked track${count === 1 ? '' : 's'} (several come as one zip)`;
 }
 
 // What POST /library/download answers.
@@ -86,11 +121,11 @@ export function needsConfirm(link: Pick<DownloadLink, 'count' | 'bytes'>): boole
   return link.count > CONFIRM_TRACKS || link.bytes > CONFIRM_BYTES;
 }
 
-export function fmtBytes(n: number): string {
-  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`;
-  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(0)} MB`;
-  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
-  return `${n} B`;
+export function fmtBytes(v: number): string {
+  if (v >= 1024 ** 3) return `${(v / 1024 ** 3).toFixed(1)} GB`;
+  if (v >= 1024 ** 2) return `${(v / 1024 ** 2).toFixed(0)} MB`;
+  if (v >= 1024) return `${(v / 1024).toFixed(0)} KB`;
+  return `${v} B`;
 }
 
 // The size the library walk recorded: an estimate, and some tracks have none.
