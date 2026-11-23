@@ -17,12 +17,16 @@ Endpoints:
 """
 
 import asyncio
+import hashlib
 import json
 import re
 import logging
 import math
 import os
+import shutil
+import threading
 import time
+import urllib.request
 from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable
 
@@ -96,6 +100,23 @@ WHOLE_FILE_LANE_FACETS = WHOLE_FILE_FACETS + ("structure",)
 # Facets that load a model (CLAP, Demucs, Beat This!): the residency tracking
 # counts a request that names one as model use.
 MODEL_FACETS = ("clap", "vocal", "stems", "grid")
+
+# Run-scoped staged copies (StageCache below). A tagging run reads a new
+# track's whole file up to three times (loudness + edges before the model
+# lane, then the beat grid and the structure after it), each a full stream
+# from the music server; asked to, this host keeps the first read on its own
+# disk and serves the later ones from it. 0 turns it off. The copy is the
+# stream's own bytes, so every decode of it is the decode of the stream.
+STAGE_MAX_BYTES = int(_bounded_float_env("ANALYZE_STAGE_MAX_GB", 4.0, 0.0, 1024.0) * 1024 ** 3)
+# In the container's own writable layer: the copies are this host's scratch,
+# never the shared state mount.
+STAGE_DIR = "/tmp/subwave-stage"
+# A copy no request has read for this long is deleted (the controller
+# releases its run's copies after the structure step; this catches a run that
+# died first).
+STAGE_TTL_S = 3600.0
+# Never fill the disk: a copy is admitted only with this much left after it.
+STAGE_MIN_FREE_BYTES = 1024 ** 3
 
 # Idle worker recycle (#1204 follow-up). The worker's own idle release drops
 # the CLAP/Demucs singletons, but ~1GB of librosa/numba/torch scratch stays
@@ -693,6 +714,215 @@ async def run_whole_file_once(payload: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": f"whole-file worker gave no result: {tail or 'no output'}"}
 
 
+class StageRefused(Exception):
+    """The copy is not kept (over budget, no length, not audio, short read):
+    the request reads the stream itself, exactly as without staging."""
+
+
+def _download_whole(url: str, dest: str, admit: Callable[[int], bool], timeout_s: float) -> int:
+    """The whole response body of `url` into `dest`, or StageRefused. Only a
+    200 with an audio body whose Content-Length is known, admitted by
+    `admit(length)`, and read to exactly that length is kept."""
+    req = urllib.request.Request(url, headers={"User-Agent": "subwave-analyzer-stage/1"})
+    with urllib.request.urlopen(req, timeout=timeout_s) as res:  # noqa: S310 — the controller's own stream URL
+        if res.status != 200:
+            raise StageRefused(f"status {res.status}")
+        ctype = (res.headers.get("Content-Type") or "").lower()
+        if "json" in ctype or "xml" in ctype or ctype.startswith("text/"):
+            raise StageRefused("not audio")
+        try:
+            length = int(res.headers.get("Content-Length") or "")
+        except ValueError:
+            raise StageRefused("no length") from None
+        if length <= 0:
+            raise StageRefused("no length")
+        if not admit(length):
+            raise StageRefused("over budget")
+        read = 0
+        part = dest + ".part"
+        try:
+            with open(part, "wb") as out:
+                while True:
+                    chunk = res.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    read += len(chunk)
+                    if read > length:
+                        raise StageRefused("longer than its length")
+                    out.write(chunk)
+            if read != length:
+                raise StageRefused(f"short read ({read} of {length} bytes)")
+            os.replace(part, dest)
+        except BaseException:
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+            raise
+        return length
+
+
+class StageCache:
+    """Whole-file copies kept on this host for the run that asked for them.
+
+    A request names its copy with `stage_key` (the controller's run token and
+    the track id). `keep` fetches the stream into the cache when the key is not
+    there yet; without it the request only reuses a copy already there. Two
+    requests for one key share one download. Anything that cannot be proven
+    whole (no Content-Length, a short read, a non-audio answer) or does not fit
+    (ANALYZE_STAGE_MAX_GB, or less than STAGE_MIN_FREE_BYTES left on the disk)
+    is refused, and that request streams the URL as it always did. A copy in
+    use is never deleted; idle ones go on release (the end of the run) or
+    after STAGE_TTL_S."""
+
+    def __init__(self, root: str, max_bytes: int, ttl_s: float, *, timeout_s: float = 900.0,
+                 download: Callable[[str, str, Callable[[int], bool], float], int] = _download_whole,
+                 clock: Callable[[], float] = time.monotonic, min_free: int = STAGE_MIN_FREE_BYTES):
+        self.root = root
+        self.max_bytes = max_bytes
+        self.ttl_s = ttl_s
+        self.timeout_s = timeout_s
+        self.download = download
+        self.clock = clock
+        self.min_free = min_free
+        self.entries: dict[str, dict[str, Any]] = {}
+        self.pending: dict[str, asyncio.Future] = {}
+        # Counted bytes: kept copies plus downloads admitted and running.
+        # Touched from the download threads (admit), hence the lock.
+        self._lock = threading.Lock()
+        self.used_bytes = 0
+        self.cleared = False
+
+    @property
+    def enabled(self) -> bool:
+        return self.max_bytes > 0
+
+    def _path(self, key: str) -> str:
+        return os.path.join(self.root, hashlib.sha1(key.encode("utf-8")).hexdigest() + ".audio")
+
+    # Only names this cache writes (40 hex + .audio, or its .part) are ever
+    # deleted from the folder, whatever else ANALYZE_STAGE_DIR holds.
+    OWN_NAME = re.compile(r"^[0-9a-f]{40}\.audio(\.part)?$")
+
+    def _clear_root(self) -> None:
+        # Copies left by an earlier container are nobody's: start empty.
+        if self.cleared:
+            return
+        self.cleared = True
+        os.makedirs(self.root, exist_ok=True)
+        for name in os.listdir(self.root):
+            if self.OWN_NAME.match(name):
+                try:
+                    os.remove(os.path.join(self.root, name))
+                except OSError:
+                    pass
+
+    def _admit(self, length: int) -> bool:
+        with self._lock:
+            if self.used_bytes + length > self.max_bytes:
+                return False
+            try:
+                free = shutil.disk_usage(self.root).free
+            except OSError:
+                return False
+            if free - length < self.min_free:
+                return False
+            self.used_bytes += length
+            return True
+
+    def _forget(self, key: str) -> None:
+        e = self.entries.pop(key, None)
+        if not e:
+            return
+        try:
+            os.remove(e["path"])
+        except OSError:
+            pass
+        with self._lock:
+            self.used_bytes -= e["bytes"]
+
+    def sweep(self) -> int:
+        now = self.clock()
+        idle = [k for k, e in self.entries.items() if e["readers"] == 0 and now - e["used"] > self.ttl_s]
+        for k in idle:
+            self._forget(k)
+        return len(idle)
+
+    async def acquire(self, key: str, url: str, keep: bool) -> str | None:
+        """A reader's path to the copy for `key` (call release_reader after),
+        or None: read the stream."""
+        if not self.enabled or not key:
+            return None
+        self.sweep()
+        e = self.entries.get(key)
+        if e is None and key in self.pending:
+            await asyncio.shield(self.pending[key])
+            e = self.entries.get(key)
+        if e is None and keep:
+            fut = asyncio.get_running_loop().create_future()
+            self.pending[key] = fut
+            try:
+                self._clear_root()
+                path = self._path(key)
+                admitted = 0
+
+                def admit(n: int) -> bool:
+                    nonlocal admitted
+                    ok = self._admit(n)
+                    if ok:
+                        admitted = n
+                    return ok
+
+                try:
+                    size = await asyncio.to_thread(self.download, url, path, admit, self.timeout_s)
+                    self.entries[key] = {"path": path, "bytes": size, "used": self.clock(), "readers": 0, "doomed": False}
+                except StageRefused as err:
+                    log.info(f"stage: not kept ({err}); the request reads the stream")
+                    if admitted:
+                        with self._lock:
+                            self.used_bytes -= admitted
+                except Exception as err:  # noqa: BLE001 — the stream read is the fallback
+                    log.warning(f"stage: download failed ({type(err).__name__}); the request reads the stream")
+                    if admitted:
+                        with self._lock:
+                            self.used_bytes -= admitted
+            finally:
+                self.pending.pop(key, None)
+                fut.set_result(None)
+            e = self.entries.get(key)
+        if e is None or e["doomed"] or not os.path.isfile(e["path"]):
+            return None
+        e["readers"] += 1
+        e["used"] = self.clock()
+        return e["path"]
+
+    def release_reader(self, key: str) -> None:
+        e = self.entries.get(key)
+        if not e:
+            return
+        e["readers"] = max(0, e["readers"] - 1)
+        e["used"] = self.clock()
+        if e["readers"] == 0 and e["doomed"]:
+            self._forget(key)
+
+    def release_prefix(self, prefix: str) -> int:
+        """Drop every copy whose key starts with `prefix` (a run's token); one
+        still being read goes when its reader is done."""
+        if not prefix:
+            return 0
+        n = 0
+        for k in [k for k in self.entries if k.startswith(prefix)]:
+            n += 1
+            if self.entries[k]["readers"] > 0:
+                self.entries[k]["doomed"] = True
+            else:
+                self._forget(k)
+        return n
+
+
+stage_cache = StageCache(STAGE_DIR, STAGE_MAX_BYTES, STAGE_TTL_S, timeout_s=WHOLE_FILE_TIMEOUT_S)
+
+
 @app.get("/health")
 async def health():
     # `engines` lists engines *currently ready*, not the static set — the
@@ -768,6 +998,11 @@ async def health():
         ),
         # How many whole-file requests this host runs at once (its own lane).
         "analyze_whole_file_concurrency": WHOLE_FILE_CONCURRENCY,
+        # This host keeps a run's whole-file copies for the requests that
+        # name one (`stage_key`), so a track is streamed once per run
+        # (StageCache). False with ANALYZE_STAGE_MAX_GB=0; absent on older
+        # images, which ignore the field.
+        "analyze_stage_capable": stage_cache.enabled,
         # How many analysis workers this pool holds (ANALYZE_CONCURRENCY). The
         # controller's blend render reads it to tell whether a spare member can
         # serve it while a pick-time separation holds one (#2253), and uses the
@@ -854,6 +1089,25 @@ class AnalyzeRequest(BaseModel):
     # bars on ({beats_per_bar, decoded_ms, segments}), from the controller's
     # library (the worker never reads it). Untyped: the worker judges it.
     structure_grid: Any = None
+    # Facet requests by URL that read the whole file (loudness, edges, grid,
+    # structure): the run-scoped copy to read instead (StageCache), and
+    # whether this request may fetch it (`stage_keep`) or only reuse it.
+    stage_key: str | None = None
+    stage_keep: bool | None = None
+
+
+class StageReleaseRequest(BaseModel):
+    # A run token: every copy whose key starts with it.
+    prefix: str
+
+
+@app.post("/stage/release")
+async def stage_release(req: StageReleaseRequest):
+    return {"ok": True, "released": stage_cache.release_prefix(req.prefix)}
+
+
+def _reads_whole_file_only(facets: Any) -> bool:
+    return bool(facets) and isinstance(facets, list) and all(f in WHOLE_FILE_LANE_FACETS or f == "grid" for f in facets)
 
 
 @app.post("/analyze")
@@ -876,6 +1130,25 @@ async def analyze(req: AnalyzeRequest):
         payload = {"id": "1", "url": req.url}
     else:
         raise HTTPException(400, "missing 'url' or 'path'")
+    # A whole-file request by URL that names its run's copy reads the copy
+    # (the stream's own bytes, complete), and the URL rides along as the
+    # stream_url the worker would fall back to. Refused or absent: the URL.
+    staged_key: str | None = None
+    stage_key = getattr(req, "stage_key", None)
+    if req.url and not req.path and isinstance(stage_key, str) and 0 < len(stage_key) <= 512 \
+            and _reads_whole_file_only(getattr(req, "facets", None)):
+        staged = await stage_cache.acquire(stage_key, req.url, keep=getattr(req, "stage_keep", None) is True)
+        if staged:
+            staged_key = stage_key
+            payload = {"id": "1", "path": staged, "complete": True, "stream_url": req.url}
+    try:
+        return await _analyze_payload(req, payload)
+    finally:
+        if staged_key:
+            stage_cache.release_reader(staged_key)
+
+
+async def _analyze_payload(req: AnalyzeRequest, payload: dict[str, Any]):
     if req.embed is not None:
         payload["embed"] = req.embed
     if req.vocal is not None:

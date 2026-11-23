@@ -31,6 +31,9 @@ let gridCapable: boolean | undefined = true;
 let structureCapable: boolean | undefined = true;
 // The grid answer fails at the transport level (a sidecar 500).
 let gridCrash = false;
+// What /health reports for keeping a run's whole-file copies (undefined: the
+// key is absent, as on an older sidecar).
+let stageCapable: boolean | undefined;
 
 const GOOD_GRID = {
   grid_version: 1, engine: 'beat_this', model: 'final0', bpm: 124.0, beats_per_bar: 4,
@@ -60,7 +63,18 @@ function handler(req: IncomingMessage, res: ServerResponse) {
       analyze_facets_capable: true, analyze_whole_file_capable: true, analyze_tail_loudness_curve_capable: true,
       ...(gridCapable === undefined ? {} : { analyze_grid_capable: gridCapable }),
       ...(structureCapable === undefined ? {} : { analyze_structure_capable: structureCapable }),
+      ...(stageCapable === undefined ? {} : { analyze_stage_capable: stageCapable }),
     }));
+    return;
+  }
+  if (req.url?.startsWith('/stage/release')) {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      requests.push({ release: JSON.parse(body).prefix });
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ ok: true, released: 1 }));
+    });
     return;
   }
   if (req.url?.startsWith('/analyze')) {
@@ -277,4 +291,51 @@ test('a regular run scores once, after the model lane, never after a whole-file 
   const scored = lines.findIndex(isEnergyLine);
   const modelLane = lines.findIndex((l) => /regular run: head \d+ planned/.test(l));
   assert.ok(modelLane >= 0 && scored > modelLane, lines.join('\n'));
+});
+
+// A new track's three whole-file reads (loudness + edges, grid, structure)
+// name one copy on the sidecar, kept by the reads a later one follows, so the
+// track is streamed once per run (stage-policy.ts); the run then releases it.
+test('with Hot Mix on and an analyzer that keeps copies, a track\'s whole-file reads share one copy', async () => {
+  await hotMix(true);
+  gridCapable = true;
+  structureCapable = true;
+  stageCapable = true;
+  try {
+    fresh('stg1');
+    await regularRun();
+    const loud = requests[at('stg1', 'loudness')];
+    const grid = requests[at('stg1', 'grid')];
+    const structure = requests[at('stg1', 'structure')];
+    const head = requests[at('stg1', 'head')];
+    const key = loud.stage_key as string;
+    assert.match(key, /^[0-9a-f-]{36}\/stg1$/, JSON.stringify(loud));
+    assert.equal(loud.stage_keep, true, 'the grid reads it later');
+    assert.ok(loud.url && !loud.path, 'by URL: the sidecar fetches the copy');
+    assert.equal(grid.stage_key, key);
+    assert.equal(grid.stage_keep, true, 'the structure may read it later');
+    assert.equal(structure.stage_key, key);
+    assert.equal(structure.stage_keep, undefined, 'the last read only reuses');
+    assert.equal(head.stage_key, undefined, 'the model lane reads its own capped copy, as before');
+    const release = requests.findIndex((q) => q.release === `${key.split('/')[0]}/`);
+    assert.ok(release > at('stg1', 'structure'), 'released after the structure step');
+  } finally {
+    stageCapable = undefined;
+  }
+});
+
+test('no copy is named without Hot Mix, or by an analyzer that keeps none', async () => {
+  for (const [hm, cap] of [[false, true], [true, false], [true, undefined]] as const) {
+    await hotMix(hm);
+    gridCapable = true;
+    structureCapable = true;
+    stageCapable = cap;
+    try {
+      fresh(`nostage-${hm}-${cap}`);
+      await regularRun();
+      assert.ok(!requests.some((q) => 'stage_key' in q || 'release' in q), `hotMix ${hm}, capable ${cap}: ${JSON.stringify(requests)}`);
+    } finally {
+      stageCapable = undefined;
+    }
+  }
 });

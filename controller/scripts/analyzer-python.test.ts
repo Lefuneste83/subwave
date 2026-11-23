@@ -39,6 +39,7 @@ const SUITES = [
   'analyzer_shared_modes_test.py', // shared stems/transitions written 777/666 whatever the umask
   'analyzer_device_test.py', // cuda self-test + cpu fallback (#2280)
   'analyzer_stem_provenance_test.py', // a stem window rewrite never leaves another recording's window (#2238)
+  'analyzer_stage_cache_test.py', // run-scoped whole-file copies: one download per key, budget admits, copy decodes as the stream
 ];
 
 const probe = spawnSync('python3', ['--version'], { stdio: 'ignore' });

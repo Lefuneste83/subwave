@@ -624,6 +624,9 @@ let _sidecarLoudnessCurveCapable: boolean | null = null;
 let _sidecarGridCapable: boolean | null = null;
 let _sidecarStructureCapable: boolean | null = null;
 let _sidecarTailCurveCapable: boolean | null = null;
+// Keeps a run's whole-file copies (`stage_key`, docker/analyzer/server.py
+// StageCache); null on a sidecar that predates it.
+let _sidecarStageCapable: boolean | null = null;
 let _sidecarWholeFileConcurrency: number | null = null;
 // The sidecar's analysis pool size (ANALYZE_CONCURRENCY); null on a sidecar
 // that predates the field.
@@ -657,6 +660,7 @@ async function probeSidecar(url: string): Promise<boolean> {
       analyze_grid_capable?: boolean | null;
       analyze_structure_capable?: boolean | null;
       analyze_tail_loudness_curve_capable?: boolean | null;
+      analyze_stage_capable?: boolean | null;
       analyze_whole_file_concurrency?: number | null;
       analyze_concurrency?: number | null;
       analyze_audio_error?: string | null;
@@ -675,6 +679,7 @@ async function probeSidecar(url: string): Promise<boolean> {
       _sidecarGridCapable = typeof body.analyze_grid_capable === 'boolean' ? body.analyze_grid_capable : null;
       _sidecarStructureCapable = typeof body.analyze_structure_capable === 'boolean' ? body.analyze_structure_capable : null;
       _sidecarTailCurveCapable = typeof body.analyze_tail_loudness_curve_capable === 'boolean' ? body.analyze_tail_loudness_curve_capable : null;
+      _sidecarStageCapable = typeof body.analyze_stage_capable === 'boolean' ? body.analyze_stage_capable : null;
       _sidecarWholeFileConcurrency = Number.isInteger(body.analyze_whole_file_concurrency) && (body.analyze_whole_file_concurrency as number) > 0
         ? (body.analyze_whole_file_concurrency as number) : null;
       _sidecarConcurrency = Number.isInteger(body.analyze_concurrency) && (body.analyze_concurrency as number) > 0
@@ -871,6 +876,28 @@ export function structureAvailable(): boolean | null {
   if (_backend === 'sidecar') return _sidecarStructureCapable;
   if (_backend === 'local') return _localStructureCapable;
   return null;
+}
+
+// The sidecar keeps a run's whole-file copies on its own disk when a request
+// names one (`stage_key`), so a track's later whole-file reads in the run
+// (grid, structure) come from that copy, not another stream (analyze.ts
+// stageFor). Only a sidecar says so; the local worker reads the URL itself.
+export function stageAvailable(): boolean | null {
+  return _backend === 'sidecar' ? _sidecarStageCapable : null;
+}
+
+// End of a run: the sidecar drops the copies kept under its token.
+// Best-effort; the sidecar also expires idle copies on its own.
+export async function releaseStage(token: string): Promise<void> {
+  if (_backend !== 'sidecar' || _sidecarStageCapable !== true || !_sidecarBase || !token) return;
+  try {
+    await fetchWithTimeout(`${_sidecarBase}/stage/release`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefix: `${token}/` }),
+      timeoutMs: 10_000,
+    });
+  } catch { /* the sidecar's idle expiry removes them */ }
 }
 
 // Tail answers carry the tail's short-term loudness curve (tail v3,
@@ -1417,6 +1444,11 @@ export interface FacetRequestOpts {
   // Structure facet: the trusted-bars grid the bars are measured on
   // (library-db/structure.ts structureGridOf). The worker never reads the DB.
   structureGrid?: StructureGrid | null;
+  // A whole-file request by URL: the run's copy of this track on the sidecar
+  // (key = run token + track id), and whether this request may fetch it
+  // (another whole-file read of the track follows in the run) or only reuse
+  // one already there. Sent only to a sidecar that keeps copies.
+  stage?: { key: string; keep: boolean } | null;
   // The request's deadline. Omitted, the pass's ANALYZE_REQUEST_TIMEOUT_MS. A
   // pick-time separation passes its own longer one (pick-stems-policy.ts).
   timeoutMs?: number;
@@ -1591,6 +1623,10 @@ export async function analyzeFacets(
     : {};
   const url = subsonic.getRawStreamUrl(songId);
   const timeoutMs = opts.timeoutMs; // undefined: facetRequest's default
+  if (opts.stage && !opts.ranged && !localPath && stageAvailable() === true) {
+    body.stage_key = opts.stage.key;
+    if (opts.stage.keep) body.stage_keep = true;
+  }
   if (opts.ranged || !localPath) return facetRequest({ url, ...body, ...stems }, timeoutMs);
   try {
     return await facetRequest({

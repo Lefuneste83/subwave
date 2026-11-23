@@ -282,6 +282,9 @@ services:
       # Whole-file facets (loudness v2, edges): their own lane width on this host.
       - ANALYZE_WHOLE_FILE_CONCURRENCY=${ANALYZE_WHOLE_FILE_CONCURRENCY:-}
       - ANALYZE_WHOLE_FILE_TIMEOUT_S=${ANALYZE_WHOLE_FILE_TIMEOUT_S:-}
+      # Disk a run may use to keep a track's whole file for its later
+      # whole-file reads (GB, default 4, 0 = off; .env.example).
+      - ANALYZE_STAGE_MAX_GB=${ANALYZE_STAGE_MAX_GB:-}
       - ANALYZE_CLAP_WINDOWS=${ANALYZE_CLAP_WINDOWS:-}
       - ANALYZE_OUTRO_SECONDS=${ANALYZE_OUTRO_SECONDS:-}
       # Anonymous HF downloads are rate-limited; same var as tts-heavy.
