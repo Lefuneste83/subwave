@@ -623,8 +623,10 @@ async function main() {
           changed += 1;
         }
         console.log(`[tag] re-voted ${changed}/${revote.length} propagated tracks over their analysed vectors`);
-        // The vote rewrote their energy, so the audio correction runs over it again.
-        if (changed > 0) runAudioEnergyPass();
+        // The vote rewrote their energy, so the audio pass runs over it again,
+        // with the operator's switches: a re-vote that leaves a row without an
+        // energy gets it filled now, not at the next run.
+        if (changed > 0) runAudioEnergyPass(audioEnergyOptions(settings.get()));
       } catch (err: any) {
         logEvent('warning', `Re-voting analysed tracks failed (non-fatal): ${err?.message || err}`);
       }

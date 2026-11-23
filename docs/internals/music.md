@@ -140,7 +140,9 @@ walk 135 s, self-check 38 s, analysis 373 s).
   nothing between the dropped passes and the kept one writes a vector, a score
   or a tag. The tagger's own check after propagation and the one after the
   re-vote stay: each follows a step that rewrote energies, and the re-vote reads
-  the energies the model lane's check corrected. Pinned in
+  the energies the model lane's check corrected. Every check runs with the
+  operator's fill/overrule switches (`runAudioEnergyPass` has no default), so a
+  re-voted row left without an energy is filled in the same run. Pinned in
   `scripts/beat-grid-regular-run.test.ts`.
 - **A track's whole file is streamed once per run.** While a show has Hot Mix
   on, a new track's loudness + edges, grid and structure each read the whole
