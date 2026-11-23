@@ -53,11 +53,14 @@ export interface PickerScope {
   // request path keeps, because a listener's ask must not air what the operator
   // ruled out. HARD here, like the excluded playlists.
   excludeExplicit: boolean;
-  // DJ Hot Mix (music/hot-mix-policy.ts): the tempo window around the track this
-  // pick follows. HARD in every tool's results, unknown tempos included, with
-  // the show curve's side offered first; the pool picker behind the agent keeps
-  // the nearest tempos instead of starving. NOT gated on filtersStrict, and not
-  // set on the request path. null = not a Hot Mix pick.
+  // DJ Hot Mix (music/hot-mix-policy.ts): the tempo window around the show
+  // curve's tempo at this pick's air time, or around the track this pick
+  // follows when the show has no curve. HARD in every tool's results, judged on
+  // the Hot Mix resolver's tempo (unknown tempos out), the tempos on the curve's
+  // target offered first; the pool picker behind the agent keeps the nearest
+  // tempos instead of starving. Each result's `bpm` is that same tempo. NOT
+  // gated on filtersStrict, and not set on the request path. null = not a Hot
+  // Mix pick.
   tempoWindow: TempoWindow | null;
   // Union of a strict playlist-anchored show's pinned Navidrome playlists; every
   // tool's candidates are intersected with it, HARD with no never-starve to
@@ -242,7 +245,9 @@ export function buildPickerContext(scope: PickerScope): PickerContext {
     // Hot Mix: hard, after every other lock so the window judges only what could
     // air. Its own order (the curve's side first) comes before the energy
     // preference below, which reorders within it.
-    if (tempoWindow) pool = withinTempoWindow(pool, tempoWindow, (s: any) => library.bpmKeyFor(s).bpm);
+    // Each tempo through the Hot Mix resolver (library.mixTempoFor): a quick
+    // head estimate is unknown here, so out.
+    if (tempoWindow) pool = withinTempoWindow(pool, tempoWindow, (s: any) => library.mixTempoFor(s));
     // A mood's energy request is a preference: matches first, then the same
     // mood fills remaining slots. Explicit locks above still exclude bands.
     // One collector preserves the per-artist cap across both groups.
@@ -269,7 +274,7 @@ export function buildPickerContext(scope: PickerScope): PickerContext {
       const similarity = opts.similarity && typeof score === 'number' && Number.isFinite(score)
         && score >= -1 && score <= 1
         ? { ...opts.similarity, score: Math.round(score * 10000) / 10000 } : null;
-      const slimmed = slim({ ...s, ...(similarity ? { similarity } : {}) });
+      const slimmed = slim({ ...s, ...(similarity ? { similarity } : {}) }, { hotMix: !!tempoWindow });
       seen.set(s.id, slimmed);
       out.push(slimmed);
     }

@@ -19,7 +19,7 @@ import { withTrace, logEvent, timePhase } from '../observability/events.js';
 import { artistRootKey, recencyWindowsForLibrary, type CandidateLike } from '../music/recency.js';
 import { hardRecentFor, showNoRepeatGuard, strictShowLibraryPoolSliced } from '../music/show-recency.js';
 import { excludesExplicit } from '../music/explicit-policy.js';
-import { describeTempoWindow, hotMixOf, tempoWindowFor } from '../music/hot-mix-policy.js';
+import { describeTempoWindow, hotMixOf, hotMixRankTarget, tempoWindowFor } from '../music/hot-mix-policy.js';
 import { showRunPosition } from './show-boundary.js';
 import { isInOrderShow } from '../music/playlist-order.js';
 import { commitInOrderPick, resolveInOrderNext } from '../music/playlist-order-next.js';
@@ -410,15 +410,16 @@ export async function livePickerScope(queue: any, { audioWaypoint = null, showAt
     queue.log('picker', `show "${activeShow.name}" pins ${activeShow.playlistIds.length} playlist(s) but none resolved to tracks — anchor ignored${activeShow.playlistStrict ? ' (STRICT toggle has no effect)' : ''}. Stale playlist id (deleted/recreated in Navidrome?) or a Navidrome error; re-select the playlists in the show editor.`);
   }
 
-  // DJ Hot Mix: the tempo window around the track this pick follows, steered by
-  // the show's curve at the pick's own air time. The position scan runs only
-  // for a show that draws a curve.
+  // DJ Hot Mix: the tempo window around the show curve's tempo at the pick's
+  // own air time, or, for a show without a curve, around the track this pick
+  // follows (its tempo through the Hot Mix resolver, library.mixTempoFor). The
+  // position scan runs only for a show that draws a curve.
   const hotMix = hotMixOf(activeShow);
   const anchorTrack = pickAnchor !== undefined ? pickAnchor : (queue.current?.track ?? null);
   const tempoWindow = hotMix
     ? tempoWindowFor(
       activeShow,
-      anchorTrack ? library.bpmKeyFor(anchorTrack).bpm : null,
+      anchorTrack ? library.mixTempoFor(anchorTrack) : null,
       hotMix.curve.length ? showRunPosition((showAt ?? new Date()).getTime()) : null,
     )
     : null;
@@ -531,7 +532,10 @@ export function selectionContextForPick(queue: any, ctx: any, { scope, wantLink 
   // The show's genres, soft or strict — the same list buildShortlist plans from.
   showGenres?: readonly string[] | null;
 }): ShortlistSelectionContext {
-  const anchorAnalysis = timePhase('pick.anchorAnalysis', () => (pickAnchor ? library.bpmKeyFor(pickAnchor) : null));
+  // A Hot Mix pick reads the anchor's tempo through the Hot Mix resolver, and
+  // never falls back to a tempo it calls unknown.
+  const hotMix = !!scope.tempoWindow;
+  const anchorAnalysis = timePhase('pick.anchorAnalysis', () => (pickAnchor ? library.pickAnalysisFor(pickAnchor, hotMix) : null));
   const anchorRecord = timePhase('pick.anchorRecord', () => (pickAnchor?.id ? library.get(pickAnchor.id) : null));
   const recentTransitions = settings.effectsActive()
     ? (typeof queue.recentTransitionChoices === 'function' ? queue.recentTransitionChoices() : [])
@@ -542,7 +546,7 @@ export function selectionContextForPick(queue: any, ctx: any, { scope, wantLink 
       title: pickAnchor.title ?? null,
       artist: pickAnchor.artist ?? null,
       album: pickAnchor.album ?? null,
-      bpm: anchorAnalysis?.bpm ?? predecessor?.bpm ?? undefined,
+      bpm: anchorAnalysis?.bpm ?? (hotMix ? undefined : predecessor?.bpm) ?? undefined,
       // The transition leaves the predecessor at its ending, so prefer the
       // measured ending key over its dominant key when boundary analysis exists.
       key: anchorAnalysis?.keyEnd ?? anchorAnalysis?.key ?? predecessor?.key ?? undefined,
@@ -605,7 +609,7 @@ async function pickViaSelectionRoute(queue, ctx, { wantLink, audioWaypoint = nul
   // prepared copy, not the raw one this function was handed.
   if (pickContext) ctx = pickContext;
   const useShortlist = settings.get().llm?.trackSelection === 'shortlist';
-  const anchorAnalysis = pickAnchor ? library.bpmKeyFor(pickAnchor) : null;
+  const anchorAnalysis = pickAnchor ? library.pickAnalysisFor(pickAnchor, !!scope.tempoWindow) : null;
   const selectionContext = selectionContextForPick(queue, ctx, {
     scope, wantLink, audioWaypoint, pickAnchor, predecessor, rankTarget, explore, useShortlist,
     showGenres: activeShow?.genres ?? scope.genreLock,
@@ -654,8 +658,9 @@ async function pickViaSelectionRoute(queue, ctx, { wantLink, audioWaypoint = nul
       // produce the same plan.
       rotationSeed: Math.floor(Math.random() * 0x100000000),
       // Same target the pool's soft re-rank uses: the run's, else the
-      // predecessor's own measured tempo and ending key.
-      transitionTarget: rankTarget ?? anchorAnalysis,
+      // predecessor's own measured tempo and ending key; in a Hot Mix pick the
+      // window's anchor tempo (the curve's, with one) and the predecessor's key.
+      transitionTarget: rankTarget ?? hotMixRankTarget(scope.tempoWindow, anchorAnalysis),
     });
     steps = shortlist.sourceRuns.length;
     toolCalls = shortlist.sourceRuns;
@@ -1598,7 +1603,9 @@ export async function runTrackEvent(queue, ctx, { wantLink, showAt = null, pickA
     pickAnchor = pickAnchor ?? queue.current?.track ?? null;
     const anchorPriorTrack = explicitPickAnchor ? (anchorPrior ?? null) : (queue.history[0]?.track ?? null);
     await library.load();
-    const predecessor = predecessorContext(pickAnchor);
+    // A Hot Mix pick shows the predecessor's tempo through the Hot Mix
+    // resolver, on the same show snapshot livePickerScope reads.
+    const predecessor = predecessorContext(pickAnchor, { hotMix: hotMixOf(settings.resolvePickShow(showAt ?? new Date())) != null });
     const eventText = explicitPickAnchor
       ? `Pick-cycle anchor: "${pickAnchor?.title}" by ${pickAnchor?.artist}`
         + (anchorPriorTrack ? ` (after "${anchorPriorTrack.title}" by ${anchorPriorTrack.artist})` : '')

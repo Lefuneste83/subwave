@@ -22,7 +22,7 @@ import { applyTrackFloor } from './track-floor.js';
 import { AIRING_RANK_WEIGHT, freshness, freshnessBiasedOrder, lastAiredMsOf, unairedFlag, type AiredIndex } from './airing.js';
 import { normGenre, genreMatches, genreResolutionWarningOnce, preferGenre, preferEra, inYearRange, preferEnergy, preferEnergyStrict, preferMood, preferVocals, applyStrictLocks, hasEraBound, eraSpan, type YearRange, type VocalMode } from './show-filter.js';
 import { explicitGate } from './explicit-policy.js';
-import { describeTempoWindow, hotMixOf, nearestTempoFallback, tempoWindowFor, type TempoWindow } from './hot-mix-policy.js';
+import { describeTempoWindow, hotMixOf, hotMixRankTarget, nearestTempoFallback, tempoWindowFor, type TempoWindow } from './hot-mix-policy.js';
 import { showRunPosition } from '../broadcast/show-boundary.js';
 import { resolveShowPlaylistPool, resolveExcludedPlaylistIds, type PlaylistPool } from './show-playlist.js';
 import { allowsMoodPlaylistDiscovery } from './discovery-policy.js';
@@ -146,21 +146,22 @@ function recordOffered(ids: Array<string | undefined>) {
 }
 
 // Prefers the analyzer's numbers over the candidate's own ID3-derived fields
-// (#862), and carries the boundary keys (keyStart/keyEnd).
-function analysisFor(t: Candidate): { bpm: number | null; key: string | null; keyStart?: string | null; keyEnd?: string | null } {
-  return library.bpmKeyFor(t);
+// (#862), and carries the boundary keys (keyStart/keyEnd). In a DJ Hot Mix pick
+// (`hotMix`) the tempo is the Hot Mix resolver's (library.mixTempoFor).
+function analysisFor(t: Candidate, hotMix = false): { bpm: number | null; key: string | null; keyStart?: string | null; keyEnd?: string | null } {
+  return library.pickAnalysisFor(t, hotMix);
 }
 
 // Soft re-rank, never a filter: random base nudged up for tempo/harmonic
 // compatibility and freshness. Key compares the pair the transition meets.
-function softRankByCompat(pool: Candidate[], current: { bpm: number | null; key: string | null; keyEnd?: string | null }, aired: AiredIndex): Candidate[] {
+function softRankByCompat(pool: Candidate[], current: { bpm: number | null; key: string | null; keyEnd?: string | null }, aired: AiredIndex, hotMix = false): Candidate[] {
   const now = Date.now();
   const hasAnchor = current.bpm != null || current.key != null;
   return pool
     .map((t) => {
       const compat = hasAnchor
         ? (() => {
-            const a = analysisFor(t);
+            const a = analysisFor(t, hotMix);
             return 0.4 * bpmCompat(current.bpm, a.bpm) + 0.3 * keyCompat(current.keyEnd ?? current.key, a.keyStart ?? a.key);
           })()
         : 0;
@@ -564,28 +565,33 @@ async function buildCandidates(mood: string | null | undefined, recentIds: Set<s
   // Cap per artist; a strict playlist anchor is intentionally single-artist.
   const MAX_PER_ARTIST = episodeSource || strictPlaylist ? Infinity : 3;
   const perArtist = new Map<string, number>();
-  // Soft re-rank runs BEFORE the cap so compatible tracks survive the slice.
+  // Soft re-rank runs BEFORE the cap so compatible tracks survive the slice. In
+  // a Hot Mix pick it aims at the window's anchor tempo (the curve's, with one)
+  // and the predecessor's key, every tempo through the Hot Mix resolver.
+  const tempoWindow = showFilter?.tempoWindow ?? null;
+  const hotMix = !!tempoWindow;
+  const predecessorAnalysis = currentTrack?.id ? analysisFor(currentTrack, hotMix) : null;
   const curAnalysis = rankTarget
-    || (currentTrack?.id ? analysisFor(currentTrack) : { bpm: null, key: null });
+    || hotMixRankTarget(tempoWindow, predecessorAnalysis)
+    || { bpm: null, key: null };
   // Minimum track length (#1573) — a SELECTION filter, unlike the max cap's
   // cue_out cut. never-starve here: the wider scope behind the agent's hard floor.
   const longEnough = applyTrackFloor(applyKnownTrackCeiling(selectionPool, maxTrackSec), minTrackSec, { starve: false });
   // Hot Mix: the window, or never-starve to the nearest tempos (compatible key
   // first among near-equals). This is the wider scope behind the agent's hard
   // window, so it keeps the music going rather than leaving the slot empty.
-  const tempoWindow = showFilter?.tempoWindow ?? null;
   let mixable = longEnough;
   let tempoRelaxed = false;
   if (tempoWindow) {
-    const anchorKey = currentTrack?.id ? (analysisFor(currentTrack).keyEnd ?? analysisFor(currentTrack).key) : null;
+    const anchorKey = predecessorAnalysis ? (predecessorAnalysis.keyEnd ?? predecessorAnalysis.key) : null;
     const fit = nearestTempoFallback(longEnough, tempoWindow, (t) => {
-      const a = analysisFor(t);
+      const a = analysisFor(t, true);
       return { bpm: a.bpm, key: a.keyStart ?? a.key };
     }, anchorKey);
     mixable = fit.tracks;
     tempoRelaxed = fit.relaxed && longEnough.length > 0;
   }
-  const final = filterPickerCandidates(softRankByCompat(mixable, curAnalysis, library.lastAiredInfo()), {
+  const final = filterPickerCandidates(softRankByCompat(mixable, curAnalysis, library.lastAiredInfo(), hotMix), {
     recentIds,
     recentKeys,
     recentArtistRoots,
@@ -659,14 +665,16 @@ function slimAlbum(album: string | null | undefined, title: string | null | unde
 // Build a candidate pool, ask the LLM to choose one; null when it can't.
 // Guard-rescue artist exclusions (#1187) hold through the whole starvation
 // cascade. Preserve the anchor as well as the rejected credit.
-// The Hot Mix window for a pool pick, or null when the show is not mixed. The
-// position scan runs only for a show that draws a curve.
+// The Hot Mix window for a pool pick, or null when the show is not mixed: the
+// curve's tempo at the pick's air time, else the predecessor's tempo through
+// the Hot Mix resolver. The position scan runs only for a show that draws a
+// curve.
 function hotMixWindow(show: any, anchor: any, at: Date): TempoWindow | null {
   const hm = hotMixOf(show);
   if (!hm) return null;
   return tempoWindowFor(
     show,
-    anchor?.id || anchor?.bpm ? analysisFor(anchor).bpm : null,
+    anchor ? library.mixTempoFor(anchor) : null,
     hm.curve.length ? showRunPosition(at.getTime()) : null,
   );
 }
@@ -718,8 +726,8 @@ export async function pickViaPool(queue, ctx, rankTarget: { bpm: number | null; 
         vocals: (activeShow.vocals ?? '') as VocalMode,
         strict: activeShow.filtersStrict,
         excludeExplicit: activeShow.excludeExplicit,
-        // Hot Mix: measured from the predecessor this pick follows, steered by
-        // the curve at the pick's air time (music/hot-mix-policy.ts).
+        // Hot Mix: around the curve's tempo at the pick's air time, or the
+        // predecessor's without a curve (music/hot-mix-policy.ts).
         tempoWindow: hotMixWindow(activeShow, currentTrack, pickAt),
       }
     : null;
@@ -831,6 +839,8 @@ export async function pickViaPool(queue, ctx, rankTarget: { bpm: number | null; 
   if (!preview) recordOffered(candidates.map((c) => c.id));
 
   const airedNow = library.lastAiredInfo();
+  // A DJ Hot Mix pick: every tempo the model reads is the Hot Mix resolver's.
+  const mixPick = !!showFilter?.tempoWindow;
 
   const recentPlays = summariseRecent(queue);
   // Guarded: picker-test.mjs uses a stub queue with no such method.
@@ -858,7 +868,8 @@ export async function pickViaPool(queue, ctx, rankTarget: { bpm: number | null; 
           }
         : null,
       candidates: candidates.map(c => {
-        const a = analysisFor(c);
+        // A Hot Mix pick shows the Hot Mix resolver's tempo, or none.
+        const a = analysisFor(c, mixPick);
         // Omitted, not false, when unaired can't be proven.
         const neverAired = unairedFlag(c, airedNow);
         // Join tags/analysis from the library store: Subsonic-sourced candidates
@@ -897,7 +908,7 @@ export async function pickViaPool(queue, ctx, rankTarget: { bpm: number | null; 
       context: ctx,
       // The expected predecessor: the criteria judge the transition from it.
       current: currentTrack ? (() => {
-        const ca = analysisFor(currentTrack);
+        const ca = analysisFor(currentTrack, mixPick);
         const crec = currentTrack.id ? library.get(currentTrack.id) : null;
         return {
           title: currentTrack.title,

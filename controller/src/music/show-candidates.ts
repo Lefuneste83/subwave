@@ -7,6 +7,7 @@ import type { VocalEvidence } from './lyric-vocal.js';
 import { applyKnownTrackCeiling } from './track-duration.js';
 import { applyTrackFloor } from './track-floor.js';
 import { resolveExcludedPlaylistIds, resolveShowPlaylistPool } from './show-playlist.js';
+import { hotMixOf, withinCurveReach } from './hot-mix-policy.js';
 
 export type Candidate = { id?: string; title?: string | null; artist?: string | null; year?: number | null; originalYear?: number | null; isCompilation?: boolean | null; yearUntrusted?: boolean | null; genres?: string[] | null; genre?: string | null; moods?: string[] | null; audioMoods?: string[] | null; energy?: string | null; duration?: number | null; durationSec?: number | null; explicitStatus?: string | null } & VocalEvidence;
 type Locks = { genres: string[]; eras: Array<{ fromYear?: number | null; toYear?: number | null }>; moods: string[]; energies: string[]; vocals: VocalMode | null };
@@ -96,5 +97,29 @@ export async function diagnoseShowCandidates(show: any): Promise<ShowCandidateDi
       ? `${tagged} library track${tagged === 1 ? ' is' : 's are'} tagged explicit and held back from the counts below. Untagged tracks still count.`
       : 'No library track is tagged explicit yet, so most tracks will pass. Tags are only read when you run Reconcile with Navidrome on the Library page: it does not run by itself.');
   }
+  const mixNote = hotMixTempoNote(show, libraryRows);
+  if (mixNote) warnings.push(mixNote);
   return buildShowCandidateDiagnostic({ show, libraryRows, playlistRows: playlistPool?.tracks ?? null, excludedIds, locks, minTrackSec, maxTrackSec, warnings });
+}
+
+// A DJ Hot Mix show judges tempo only through the Hot Mix resolver (music/
+// hot-mix-policy.ts mixTempoOf): how much of the library it can judge, and,
+// with a curve, how much of that ever fits its windows. Null for any other show.
+export function hotMixTempoNote(show: any, libraryRows: readonly Candidate[], tempos: Map<string, number> = library.mixTempoById()): string | null {
+  const hm = hotMixOf(show);
+  if (!hm) return null;
+  let known = 0;
+  let reach = 0;
+  for (const row of libraryRows) {
+    const bpm = row.id ? tempos.get(row.id) : undefined;
+    if (bpm == null) continue;
+    known++;
+    if (withinCurveReach(bpm, hm)) reach++;
+  }
+  const head = `Hot Mix judges tempo on the measured beat grid only: ${known} of ${libraryRows.length} library tracks have a tempo it trusts, and the rest are left out of its picks.`;
+  if (!hm.curve.length) return head;
+  const lo = Math.min(...hm.curve.map((p) => p.bpm));
+  const hi = Math.max(...hm.curve.map((p) => p.bpm));
+  const span = lo === hi ? `${lo} BPM` : `${lo}-${hi} BPM`;
+  return `${head} ${reach} of them sit within ±${hm.maxStepPct}% of the curve (${span}).`;
 }

@@ -185,7 +185,7 @@ test('the captured predecessor fans out to candidates and the model payload', ()
   for (const field of ['title', 'artist', 'paceMean']) {
     assert.match(picker, new RegExp(`\\bcurrentTrack\\.${field}\\b`));
   }
-  assert.match(picker, /analysisFor\(currentTrack\)/);
+  assert.match(picker, /analysisFor\(currentTrack, mixPick\)/);
   assert.match(picker, /library\.get\(currentTrack\.id\)/);
 });
 
@@ -195,11 +195,12 @@ test('candidate discovery and default ranking consume the captured predecessor',
   assert.match(picker, /getSonicSimilarTracks\(currentTrack\.id/);
   assert.match(picker, /tracksLikeThisAudio\(currentTrack\.id/);
   assert.match(picker, /searchArtists\(currentTrack\.artist/);
-  assert.match(picker, /rankTarget\s*\|\|\s*\(currentTrack\?\.id\s*\?\s*analysisFor\(currentTrack\)/);
+  assert.match(picker, /const predecessorAnalysis = currentTrack\?\.id\s*\?\s*analysisFor\(currentTrack, hotMix\)/);
+  assert.match(picker, /rankTarget\s*\|\|\s*hotMixRankTarget\(tempoWindow, predecessorAnalysis\)/);
 });
 
 test('explicit audio and rank targets still override predecessor-derived defaults', () => {
   assert.match(picker, /if\s*\(audioWaypoint\s*&&\s*audioWaypoint\.length\)[\s\S]*?tracksByAudioVector\(audioWaypoint/);
   assert.match(picker, /}\s*else if\s*\(currentTrack\?\.id\)[\s\S]*?tracksLikeThisAudio\(currentTrack\.id/);
-  assert.match(picker, /const curAnalysis = rankTarget\s*\|\|\s*\(currentTrack\?\.id/);
+  assert.match(picker, /const curAnalysis = rankTarget\s*\|\|\s*hotMixRankTarget\(/);
 });

@@ -3,28 +3,53 @@
 // the switch makes; the pick paths, the request route and the show editor only
 // ask it.
 //
-// The step limit. A pick may move at most `maxStepPct` away from the tempo of
-// the track it follows, octave-safe: 64 BPM reads as 128, so a half-time
-// breakdown track is not "far" from a 128 groove. The default (±3 %) is the gap
-// a DJ closes by syncing the incoming track alone, leaving the outgoing one
-// untouched; past it a mix splits the difference between both, and past about
-// twice it no beat mix sounds smooth (mix-design.md, the operator's rule). The
-// station never stretches a whole track.
+// The tempo a mix can trust (`mixTempoOf`). The stored `tracks.bpm` of a track
+// whose whole-track grid was not applied is the analyzer's quick estimate over
+// the first 40 s, quantised to the tempogram's lags (99.4, 103.4, 107.7, 112.3,
+// 117.5, 123.0, ... about 5 % apart around 120): a 3 % step cannot be judged on
+// it, and a track it reads wrongly (a 125 BPM groove stored as 99.4) passes or
+// fails the step on a number that is not its tempo. So a Hot Mix judgement asks
+// the beat grid (library-db/grid.ts), in this order:
+//   - a grid written over the stored values (applied) → `tracks.bpm`, which is
+//     the grid's own tempo;
+//   - a measured grid whose main tempo is steady (grid-policy.ts steadyShare at
+//     GRID_WRITE_GATE.minSteadyShare, at most its maxBpm) but which was not
+//     written, typically held only by its coverage → the grid's tempo;
+//   - anything else (no grid, an unsteady one, double time) → unknown, so the
+//     track is out of a Hot Mix pick like any unmeasured track.
+// Nothing stored is rewritten, and no other reader (a show without Hot Mix,
+// the effects, the tagging words) sees this: it is the Hot Mix view only.
 //
-// The curve. A show may name its tempo over its running time as a few points
-// (position in %, BPM). It never widens the step: it only says which way the
-// set should move, so candidates on the curve's side of the anchor are offered
-// first, the way a mood's preferred energy is (scope.collect). A set therefore
-// travels along the curve one step at a time, as a DJ does, and a curve that
-// asks for a jump bigger than the step is walked, not jumped.
+// The step limit. A pick may sit at most `maxStepPct` away from its anchor,
+// octave-safe: 64 BPM reads as 128, so a half-time breakdown track is not
+// "far" from a 128 groove. The default (±3 %) is the gap a DJ closes by syncing
+// the incoming track alone, leaving the outgoing one untouched; past it a mix
+// splits the difference between both, and past about twice it no beat mix
+// sounds smooth (mix-design.md, the operator's rule). The station never
+// stretches a whole track.
+//
+// The anchor. A show with a curve (a few points of position in %, BPM over its
+// running time) anchors every pick on the curve's tempo at the pick's forecast
+// air position (`targetBpmAt`), never on the track before it: a DJ picks close
+// to the target and keeps the set there. Anchoring on the predecessor let the
+// set drift: each pick sits up to a step from the last one, so a show that
+// opens after a 96 BPM track crawls toward its 122 curve a step at a time, and
+// a pick pulled to the target during a seam and back to its own tempo after it
+// takes the next window further away. Two consecutive picks can then differ by
+// up to twice the step, which the seam planner (hot-mix-seam.ts) mixes by
+// meeting halfway, and past that takes the safe transition. Inside the window
+// the tempos nearest the target are offered first. A show without a curve has
+// no target, so its anchor stays the predecessor's tempo (through the same
+// resolver), and the set wanders freely within the step.
 //
 // Failure directions, deliberately different per path:
 //   - a candidate with no usable tempo cannot be judged, so it is OUT of a Hot
 //     Mix pick (the switch promises mixable neighbours, and an unknown tempo is
 //     the one thing a mix cannot plan around);
-//   - an anchor with no usable tempo (show start after an unmeasured track, the
-//     coast, an operator push) cannot anchor a step, so the window falls back
-//     to the curve's tempo at that point, and with no curve there is no window;
+//   - without a curve, an anchor with no usable tempo (show start after an
+//     unmeasured track, the coast, an operator push) cannot anchor a step, so
+//     there is no window; a curve whose position is unknown stands aside the
+//     same way, anchoring on the predecessor;
 //   - the agent's discovery tools are HARD (a tool with nothing in the window
 //     contributes nothing), while the pool picker behind them never starves: it
 //     keeps the nearest tempos, compatible key first among near-equals. Only the
@@ -36,12 +61,14 @@
 // open show still applies the step to everything the DJ picks. The operator's
 // own queueing is a manual action and stays exempt, as every manual trigger is.
 
-import { keyCompat } from './mix.js';
+import { keyCompat, type Analysis } from './mix.js';
+import { GRID_WRITE_GATE, steadyShare } from './grid-policy.js';
+import type { GridSegment, GridApplied, GridStatus } from './library-db/grid.js';
 import { repairHotMix, type HotMixCurvePoint } from '../schemas/show.js';
 
-// Within this distance of the curve the set is where it should be: both sides of
-// the anchor are equally welcome.
-const CURVE_DEADBAND_PCT = 1.5;
+// Within this distance of the curve's tempo a candidate is on target: offered
+// ahead of the rest of the window.
+const ON_TARGET_PCT = 1.5;
 // Among the nearest tempos, gaps this close count as equal and the key decides.
 const NEAREST_TIE_PCT = 1;
 // How many of the nearest tempos the never-starve fallback hands on.
@@ -68,6 +95,24 @@ export function takesRequests(show: HotMixShow): boolean {
 }
 
 const usableBpm = (bpm: unknown): number | null => (finite(bpm) && bpm > 0 ? bpm : null);
+
+// What the resolver reads of one track: its stored tempo and its grid row
+// (null when the track has none). Read by library.mixTempoFor.
+export interface MixTempoFacts {
+  bpm: number | null;
+  grid: { status: GridStatus; bpm: number | null; applied: GridApplied; segments: GridSegment[]; decodedMs: number | null } | null;
+}
+
+// The tempo a Hot Mix judgement may use (header), or null for unknown.
+export function mixTempoOf(f: MixTempoFacts | null | undefined): number | null {
+  const g = f?.grid;
+  if (!g || g.status !== 'ok') return null;
+  if (g.applied === 1) return usableBpm(f!.bpm);
+  const bpm = usableBpm(g.bpm);
+  if (bpm == null || bpm > GRID_WRITE_GATE.maxBpm || !g.segments.length) return null;
+  const steady = steadyShare({ bpm, segments: g.segments, decodedMs: g.decodedMs });
+  return steady != null && steady >= GRID_WRITE_GATE.minSteadyShare ? bpm : null;
+}
 
 // `to` moved by whole octaves to sit nearest `from`: the tempo a mix would
 // actually meet. Null when either side is unusable.
@@ -105,31 +150,38 @@ export function curveBpmAt(curve: readonly HotMixCurvePoint[], position: number 
   return last.bpm;
 }
 
-export type TempoDirection = 'up' | 'down' | null;
+// The show's target tempo at `position` (0..1 of its running time): the
+// curve's, or null for a show without Hot Mix, without a curve, or at an
+// unknown position. The one answer to "what tempo should the set be at now".
+export function targetBpmAt(show: HotMixShow, position: number | null): number | null {
+  const hm = hotMixOf(show);
+  return hm ? curveBpmAt(hm.curve, position) : null;
+}
 
-// What one pick may choose from. `toward` is the curve's side of the anchor,
-// null when the set is on the curve or there is none.
+// What one pick may choose from: the step around `anchorBpm`, which is the
+// curve's tempo when `anchoredOn` is 'curve' (then also `targetBpm`) and the
+// predecessor's otherwise.
 export interface TempoWindow {
   anchorBpm: number;
   maxStepPct: number;
   targetBpm: number | null;
-  toward: TempoDirection;
+  anchoredOn: 'curve' | 'predecessor';
 }
 
+// `predecessorBpm` is the track this pick follows, through mixTempoOf: read
+// only when the curve gives no target.
 export function tempoWindowFor(
   show: HotMixShow,
-  anchorBpm: number | null | undefined,
+  predecessorBpm: number | null | undefined,
   position: number | null,
 ): TempoWindow | null {
   const hm = hotMixOf(show);
   if (!hm) return null;
-  const target = curveBpmAt(hm.curve, position);
-  const anchor = usableBpm(anchorBpm) ?? target;
+  const target = usableBpm(curveBpmAt(hm.curve, position));
+  if (target != null) return { anchorBpm: target, maxStepPct: hm.maxStepPct, targetBpm: target, anchoredOn: 'curve' };
+  const anchor = usableBpm(predecessorBpm);
   if (anchor == null) return null;
-  let toward: TempoDirection = null;
-  const near = octaveNearest(anchor, target);
-  if (near != null && (Math.abs(near - anchor) / anchor) * 100 > CURVE_DEADBAND_PCT) toward = near > anchor ? 'up' : 'down';
-  return { anchorBpm: anchor, maxStepPct: hm.maxStepPct, targetBpm: target, toward };
+  return { anchorBpm: anchor, maxStepPct: hm.maxStepPct, targetBpm: null, anchoredOn: 'predecessor' };
 }
 
 export function fitsTempoWindow(bpm: number | null | undefined, w: TempoWindow): boolean {
@@ -137,25 +189,26 @@ export function fitsTempoWindow(bpm: number | null | undefined, w: TempoWindow):
   return step != null && step <= w.maxStepPct + 1e-9;
 }
 
-function onCurveSide(bpm: number | null | undefined, w: TempoWindow): boolean {
-  if (!w.toward) return true;
-  const near = octaveNearest(w.anchorBpm, usableBpm(bpm));
-  if (near == null) return false;
-  return w.toward === 'up' ? near >= w.anchorBpm : near <= w.anchorBpm;
+function onTarget(bpm: number | null | undefined, w: TempoWindow): boolean {
+  if (w.targetBpm == null) return true;
+  const step = tempoStepPct(w.targetBpm, usableBpm(bpm));
+  return step != null && step <= ON_TARGET_PCT + 1e-9;
 }
 
-// HARD: only tracks inside the window, the curve's side first, each side in the
-// order it came. Always a fresh array.
+// HARD: only tracks inside the window, those on the curve's target first, each
+// group in the order it came (a source's own shuffle survives). Always a fresh
+// array.
 export function withinTempoWindow<T>(tracks: readonly T[], w: TempoWindow, bpmOf: (t: T) => number | null): T[] {
   const inside = tracks.filter((t) => fitsTempoWindow(bpmOf(t), w));
-  if (!w.toward) return inside;
-  return [...inside.filter((t) => onCurveSide(bpmOf(t), w)), ...inside.filter((t) => !onCurveSide(bpmOf(t), w))];
+  if (w.targetBpm == null) return inside;
+  return [...inside.filter((t) => onTarget(bpmOf(t), w)), ...inside.filter((t) => !onTarget(bpmOf(t), w))];
 }
 
 // Never-starve, for the pool picker: the window's tracks when it has any, else
-// the nearest tempos (within one step of the nearest there is, at most eight),
-// compatible key first among near-equal gaps. Tracks with no
-// tempo stay out unless nothing else exists. Always a fresh array.
+// the tempos nearest its anchor (the curve's target, or the predecessor), within
+// one step of the nearest there is, at most eight, compatible key first among
+// near-equal gaps. Tracks with no tempo stay out unless nothing else exists.
+// Always a fresh array.
 export function nearestTempoFallback<T>(
   tracks: readonly T[],
   w: TempoWindow,
@@ -179,10 +232,29 @@ export function nearestTempoFallback<T>(
   return { tracks: measured.filter((x) => x.step <= reach + 1e-9).slice(0, NEAREST_KEEP).map((x) => x.t), relaxed: true };
 }
 
+// What a pick's soft ranking (the pool's re-rank, the Shortlist's order) aims
+// at in a Hot Mix pick: the window's anchor tempo (the curve's, with one) and
+// the predecessor's key, so the nearest tempo to the target comes first and
+// the key breaks near-ties. Outside Hot Mix, the predecessor's analysis as is.
+export function hotMixRankTarget(w: TempoWindow | null, predecessor: Analysis | null): Analysis | null {
+  if (!w) return predecessor;
+  return { ...(predecessor ?? { key: null }), bpm: w.anchorBpm };
+}
+
+// Whether a tempo can ever fit a window of this curve: inside the step around
+// the curve's lowest-to-highest tempo, octave-safe. The show editor's count.
+export function withinCurveReach(bpm: number | null | undefined, hm: HotMix): boolean {
+  if (!hm.curve.length) return false;
+  const lo = Math.min(...hm.curve.map((p) => p.bpm));
+  const hi = Math.max(...hm.curve.map((p) => p.bpm));
+  const near = octaveNearest((lo + hi) / 2, usableBpm(bpm));
+  return near != null && near >= lo * (1 - hm.maxStepPct / 100) - 1e-9 && near <= hi * (1 + hm.maxStepPct / 100) + 1e-9;
+}
+
 // A short booth-log description of a window.
 export function describeTempoWindow(w: TempoWindow): string {
   const lo = Math.round(w.anchorBpm * (1 - w.maxStepPct / 100));
   const hi = Math.round(w.anchorBpm * (1 + w.maxStepPct / 100));
-  const curve = w.targetBpm != null ? `, curve ${Math.round(w.targetBpm)} BPM${w.toward ? ` (${w.toward})` : ''}` : '';
-  return `${lo}-${hi} BPM around ${Math.round(w.anchorBpm)} (±${w.maxStepPct}%${curve})`;
+  const on = w.anchoredOn === 'curve' ? "the curve's tempo" : "the previous track's tempo";
+  return `${lo}-${hi} BPM around ${Math.round(w.anchorBpm)} (±${w.maxStepPct}%, ${on})`;
 }

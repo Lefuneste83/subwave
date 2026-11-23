@@ -371,7 +371,8 @@ export async function buildShortlist(context: ShortlistPlanningContext, offers: 
   if (!context.transitionTarget) return result;
   return {
     ...result,
-    candidates: orderByTransitionFit(result.candidates, context.transitionTarget, (candidate) => library.bpmKeyFor(candidate), offers),
+    // A Hot Mix pick orders on the Hot Mix resolver's tempo (library.mixTempoFor).
+    candidates: orderByTransitionFit(result.candidates, context.transitionTarget, (candidate) => library.pickAnalysisFor(candidate, !!context.scope.tempoWindow), offers),
   };
 }
 

@@ -12,6 +12,7 @@ import { isInstrumental } from './lyric-vocal.js';
 import { curveOutro, tailFromCurveOn } from './tail-levels.js';
 import type { TrackOutro } from './library-db/types.js';
 import { clearWalk } from './library-walk.js';
+import { mixTempoOf } from './hot-mix-policy.js';
 
 let loaded = false;
 
@@ -195,6 +196,34 @@ export function bpmKeyFor(track: any): { bpm: number | null; key: string | null;
     keyStart: openingKeyFrom(rec?.keyRanges, key),
     keyEnd: endingKeyFrom(rec?.keyRanges, durMs, key),
   };
+}
+
+// The tempo a DJ Hot Mix judgement may use (music/hot-mix-policy.ts
+// mixTempoOf): the beat grid's, never the quick head estimate or a file tag.
+// Null for a track with no library row, no id, or no trusted grid tempo.
+export function mixTempoFor(track: any): number | null {
+  if (!loaded || !track?.id) return null;
+  return mixTempoOf(db.mixTempoFacts(track.id));
+}
+
+// bpmKeyFor for a pick: in a Hot Mix pick (`hotMix` true) the tempo is
+// mixTempoFor's, so no ranking, prompt or filter of that pick reads a tempo
+// the window calls unknown; otherwise bpmKeyFor exactly.
+export function pickAnalysisFor(track: any, hotMix: boolean): ReturnType<typeof bpmKeyFor> {
+  const a = bpmKeyFor(track);
+  return hotMix ? { ...a, bpm: mixTempoFor(track) } : a;
+}
+
+// Ids → their Hot Mix tempo, for the show editor's count: every measured grid
+// in one pass (a track missing from the map has none).
+export function mixTempoById(): Map<string, number> {
+  const out = new Map<string, number>();
+  if (!loaded) return out;
+  for (const [id, facts] of db.measuredMixTempoFacts()) {
+    const bpm = mixTempoOf(facts);
+    if (bpm != null) out.set(id, bpm);
+  }
+  return out;
 }
 
 // Back-compat shim collapsing the DB's split write surfaces (metadata + tags).

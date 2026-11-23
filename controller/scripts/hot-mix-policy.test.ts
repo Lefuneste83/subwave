@@ -1,19 +1,72 @@
-// DJ Hot Mix, the rules on their own: the octave-safe step, the curve, the
-// window and its two failure directions, the requests toggle, and the saved
-// shape on both the strict save path and the lenient load path.
+// DJ Hot Mix, the rules on their own: the tempo resolver, the octave-safe
+// step, the curve and the window it anchors, the window's two failure
+// directions, the requests toggle, and the saved shape on both the strict save
+// path and the lenient load path.
 // Run: `npm test -- hot-mix-policy`.
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  curveBpmAt, fitsTempoWindow, hotMixOf, nearestTempoFallback, octaveNearest, takesRequests,
-  tempoStepPct, tempoWindowFor, withinTempoWindow,
+  curveBpmAt, describeTempoWindow, fitsTempoWindow, hotMixOf, hotMixRankTarget, mixTempoOf, nearestTempoFallback, octaveNearest,
+  takesRequests, targetBpmAt, tempoStepPct, tempoWindowFor, withinCurveReach, withinTempoWindow,
 } from '../src/music/hot-mix-policy.js';
 import { HOT_MIX_PHRASE_BARS, HOT_MIX_PHRASE_BARS_DEFAULT, HOT_MIX_STEP_PCT_DEFAULT, repairHotMix, repairShowForLoad, showSchema } from '../src/schemas/show.js';
 import { prevShowChangeMs } from '../src/broadcast/show-boundary.js';
 
 const show = (hotMix: unknown) => ({ hotMix });
 const ON = (extra: Record<string, unknown> = {}) => show({ enabled: true, ...extra });
+
+// ─── the tempo a mix can trust ──────────────────────────────────────────────
+
+// A grid of `bpm` over a 300 s track, steady for `steady` of it (one segment at
+// that tempo), the rest a segment 10 % slower.
+function grid(bpm: number, { steady = 0.95, applied = 0 as -1 | 0 | 1, status = 'ok' as 'ok' | 'unmeasurable' | 'failed' } = {}) {
+  const decodedMs = 300_000;
+  const periodUs = 60_000_000 / bpm;
+  const beats = Math.round((steady * decodedMs * 1000) / periodUs) + 1;
+  const slowUs = periodUs * 1.1;
+  const restBeats = Math.max(2, Math.round(((1 - steady) * decodedMs * 1000) / slowUs));
+  return {
+    status, bpm, applied, decodedMs,
+    segments: [
+      { anchorMs: 0, periodUs, beats, downbeatMs: 0 },
+      { anchorMs: (beats * periodUs) / 1000, periodUs: slowUs, beats: restBeats, downbeatMs: null },
+    ],
+  };
+}
+
+test('resolver: an applied grid answers with the stored tempo, which is the grid\'s', () => {
+  assert.equal(mixTempoOf({ bpm: 124.2, grid: grid(124.2, { applied: 1 }) }), 124.2);
+  // Applied but the stored tempo is gone: nothing to trust.
+  assert.equal(mixTempoOf({ bpm: null, grid: grid(124.2, { applied: 1 }) }), null);
+});
+
+test('resolver: a steady grid held only by its coverage answers with the grid\'s tempo', () => {
+  // The head estimate read 99.4 over the first 40 s; the whole-track grid
+  // holds 125 on most of the track but was not written (coverage under 0.8).
+  assert.equal(mixTempoOf({ bpm: 99.38, grid: grid(125, { steady: 0.917 }) }), 125);
+  // An operator-reverted grid is not written either; its steady tempo still judges a mix.
+  assert.equal(mixTempoOf({ bpm: 99.38, grid: grid(125, { applied: -1 }) }), 125);
+});
+
+test('resolver: an unsteady grid, no grid, a failed one or double time is unknown', () => {
+  assert.equal(mixTempoOf({ bpm: 99.38, grid: grid(125, { steady: 0.4 }) }), null);
+  assert.equal(mixTempoOf({ bpm: 123.05, grid: null }), null);
+  assert.equal(mixTempoOf({ bpm: 123.05, grid: { ...grid(125), status: 'unmeasurable' } }), null);
+  assert.equal(mixTempoOf({ bpm: 123.05, grid: { ...grid(125), status: 'failed' } }), null);
+  assert.equal(mixTempoOf({ bpm: 110, grid: grid(220) }), null);
+  assert.equal(mixTempoOf(null), null);
+  // The steady share is grid-policy's: every segment within its band counts.
+  const split = grid(125, { steady: 0.35 });
+  split.segments.push({ anchorMs: 200_000, periodUs: 60_000_000 / 126, beats: 200, downbeatMs: null });
+  assert.equal(mixTempoOf({ bpm: 99.38, grid: split }), 125);
+});
+
+test('resolver: a resolved tempo is judged octave-safe like any other', () => {
+  const w = tempoWindowFor(ON({ curve: [{ at: 0, bpm: 124 }] }), null, 0)!;
+  assert.equal(fitsTempoWindow(mixTempoOf({ bpm: 99.38, grid: grid(62.5) }), w), true);
+  assert.equal(fitsTempoWindow(mixTempoOf({ bpm: 99.38, grid: grid(125) }), w), true);
+});
 
 // ─── the step ───────────────────────────────────────────────────────────────
 
@@ -59,7 +112,7 @@ test('off, malformed or absent is no window: the show picks as it always did', (
 test('the window is the step around the anchor, the default when the step is bad', () => {
   const w = tempoWindowFor(ON(), 125, null)!;
   assert.equal(HOT_MIX_STEP_PCT_DEFAULT, 3);
-  assert.deepEqual(w, { anchorBpm: 125, maxStepPct: HOT_MIX_STEP_PCT_DEFAULT, targetBpm: null, toward: null });
+  assert.deepEqual(w, { anchorBpm: 125, maxStepPct: HOT_MIX_STEP_PCT_DEFAULT, targetBpm: null, anchoredOn: 'predecessor' });
   assert.equal(tempoWindowFor(ON({ maxStepPct: 400 }), 125, null)!.maxStepPct, HOT_MIX_STEP_PCT_DEFAULT);
   assert.equal(tempoWindowFor(ON({ maxStepPct: 3 }), 125, null)!.maxStepPct, 3);
   assert.equal(fitsTempoWindow(128.75, w), true);
@@ -68,25 +121,58 @@ test('the window is the step around the anchor, the default when the step is bad
   assert.equal(fitsTempoWindow(null, w), false);
 });
 
-test('an anchor with no tempo falls back to the curve, and with no curve there is no window', () => {
+test('without a curve, an anchor with no tempo has no window', () => {
   assert.equal(tempoWindowFor(ON(), null, 0.5), null);
-  const w = tempoWindowFor(ON({ curve: [{ at: 0, bpm: 120 }, { at: 100, bpm: 130 }] }), null, 0.5)!;
-  assert.equal(w.anchorBpm, 125);
-  assert.equal(w.toward, null);
+  assert.equal(tempoWindowFor(ON(), 0, 0.5), null);
 });
 
-test('the curve says which way to move; it never widens the step', () => {
-  const curve = [{ at: 0, bpm: 120 }, { at: 100, bpm: 140 }];
-  const up = tempoWindowFor(ON({ curve, maxStepPct: 6 }), 120, 1)!;
-  assert.equal(up.toward, 'up');
-  assert.equal(up.maxStepPct, 6);
-  const tracks = [{ id: 'down', bpm: 116 }, { id: 'far', bpm: 140 }, { id: 'up', bpm: 125 }, { id: 'none', bpm: null }];
-  const offered = withinTempoWindow(tracks, up, (t) => t.bpm).map((t) => t.id);
-  assert.deepEqual(offered, ['up', 'down']);
-  // On the curve: both sides equally welcome, in the order they came.
-  const level = tempoWindowFor(ON({ curve, maxStepPct: 6 }), 130, 0.5)!;
-  assert.equal(level.toward, null);
-  assert.deepEqual(withinTempoWindow([{ bpm: 126 }, { bpm: 134 }], level, (t) => t.bpm).map((t) => t.bpm), [126, 134]);
+test('with a curve the window is the step around the curve\'s tempo, never the predecessor\'s', () => {
+  // The predecessor closed the previous show at 96; the curve asks for 122.
+  const curve = [{ at: 0, bpm: 122 }, { at: 50, bpm: 124 }, { at: 75, bpm: 123 }, { at: 90, bpm: 122 }];
+  const w = tempoWindowFor(ON({ curve, maxStepPct: 3 }), 96, 0)!;
+  assert.deepEqual(w, { anchorBpm: 122, maxStepPct: 3, targetBpm: 122, anchoredOn: 'curve' });
+  assert.equal(fitsTempoWindow(125, w), true);
+  assert.equal(fitsTempoWindow(99.38, w), false);
+  assert.equal(fitsTempoWindow(98.9, w), false, 'within a step of the predecessor is no longer enough');
+  // The same window whatever the predecessor, unknown included.
+  assert.deepEqual(tempoWindowFor(ON({ curve, maxStepPct: 3 }), null, 0), w);
+  assert.deepEqual(tempoWindowFor(ON({ curve, maxStepPct: 3 }), 140, 0), w);
+  // Interpolated at the pick's own position.
+  assert.equal(tempoWindowFor(ON({ curve, maxStepPct: 3 }), 96, 0.25)!.anchorBpm, 123);
+  assert.equal(targetBpmAt(ON({ curve }), 0.25), 123);
+  assert.equal(targetBpmAt(ON(), 0.25), null);
+  assert.equal(targetBpmAt(show({ enabled: false, curve }), 0.25), null);
+  // A curve at an unknown position stands aside: the predecessor anchors.
+  assert.deepEqual(tempoWindowFor(ON({ curve, maxStepPct: 3 }), 120, null), { anchorBpm: 120, maxStepPct: 3, targetBpm: null, anchoredOn: 'predecessor' });
+  assert.match(describeTempoWindow(w), /^118-126 BPM around 122 \(±3%, the curve's tempo\)$/);
+  assert.match(describeTempoWindow(tempoWindowFor(ON(), 124, null)!), /around 124 \(±3%, the previous track's tempo\)/);
+});
+
+test('inside a curve\'s window the tempos on its target come first, each group in the order it came', () => {
+  const w = tempoWindowFor(ON({ curve: [{ at: 0, bpm: 122 }], maxStepPct: 3 }), 96, 0)!;
+  const tracks = [{ id: 'edge-low', bpm: 118.5 }, { id: 'far', bpm: 130 }, { id: 'on', bpm: 122.5 }, { id: 'edge-high', bpm: 125 }, { id: 'half', bpm: 61 }, { id: 'none', bpm: null }];
+  assert.deepEqual(withinTempoWindow(tracks, w, (t) => t.bpm).map((t) => t.id), ['on', 'half', 'edge-low', 'edge-high']);
+  // Without a curve the window keeps the order it was given.
+  const free = tempoWindowFor(ON({ maxStepPct: 3 }), 122, null)!;
+  assert.deepEqual(withinTempoWindow(tracks, free, (t) => t.bpm).map((t) => t.id), ['edge-low', 'on', 'edge-high', 'half']);
+});
+
+test('the ranking aims at the window\'s anchor tempo with the predecessor\'s key', () => {
+  const w = tempoWindowFor(ON({ curve: [{ at: 0, bpm: 122 }] }), 96, 0)!;
+  assert.deepEqual(hotMixRankTarget(w, { bpm: 96, key: '8A', keyEnd: '9A' }), { bpm: 122, key: '8A', keyEnd: '9A' });
+  assert.deepEqual(hotMixRankTarget(w, null), { key: null, bpm: 122 });
+  const pred = { bpm: 96, key: '8A' };
+  assert.equal(hotMixRankTarget(null, pred), pred);
+});
+
+test('the curve\'s reach: the step around its lowest to highest tempo, octave-safe', () => {
+  const hm = hotMixOf(ON({ curve: [{ at: 0, bpm: 120 }, { at: 100, bpm: 126 }], maxStepPct: 3 }))!;
+  assert.equal(withinCurveReach(116.5, hm), true);
+  assert.equal(withinCurveReach(129.7, hm), true);
+  assert.equal(withinCurveReach(64, hm), true);
+  assert.equal(withinCurveReach(99.38, hm), false);
+  assert.equal(withinCurveReach(null, hm), false);
+  assert.equal(withinCurveReach(122, hotMixOf(ON())!), false);
 });
 
 test('the hard window drops unknown tempos and hands back a fresh array', () => {
@@ -98,6 +184,17 @@ test('the hard window drops unknown tempos and hands back a fresh array', () => 
 });
 
 // ─── never-starve ───────────────────────────────────────────────────────────
+
+test('the fallback measures from the curve\'s target, not the predecessor', () => {
+  const w = tempoWindowFor(ON({ curve: [{ at: 0, bpm: 122 }], maxStepPct: 3 }), 96, 0)!;
+  const fit = nearestTempoFallback([
+    { id: 'near-predecessor', bpm: 97, key: null },
+    { id: 'nearest-target', bpm: 128, key: null },
+    { id: 'unknown', bpm: null, key: null },
+  ], w, (t) => t, null);
+  assert.equal(fit.relaxed, true);
+  assert.deepEqual(fit.tracks.map((t) => t.id), ['nearest-target']);
+});
 
 test('the fallback keeps the window when it has anything', () => {
   const w = tempoWindowFor(ON(), 128, null)!;

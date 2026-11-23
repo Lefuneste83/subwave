@@ -71,7 +71,7 @@ export function HotMixFields({ control, index }: { control: Control<ShowsFormVal
         control={control}
         name={`${base}.enabled`}
         label="DJ Hot Mix"
-        description="Mixes this show like a DJ set: each track the DJ picks stays close in tempo to the one before it, and the mixer beat-matches each transition. Meant for electronic shows."
+        description="Mixes this show like a DJ set: each track the DJ picks stays close to the tempo curve below (or, with no curve, to the track before it), and the mixer beat-matches each transition. Meant for electronic shows."
       />
       <ShowFieldHelp title="How the transitions are mixed">
         The incoming track starts on a downbeat, on a downbeat of the outgoing one, and both play together for the
@@ -97,13 +97,15 @@ export function HotMixFields({ control, index }: { control: Control<ShowsFormVal
             ref={stepCtl.field.ref}
           />
           <FieldDescription {...stepAria.descriptionProps}>
-            How far the tempo may move from one track to the next, between {HOT_MIX_STEP_PCT_MIN} and{' '}
-            {HOT_MIX_STEP_PCT_MAX} %. Half and double time count as the same tempo (64 BPM sits next to 128).
+            How far each pick&apos;s tempo may sit from the curve&apos;s tempo at that point (from the track before it,
+            with no curve), between {HOT_MIX_STEP_PCT_MIN} and {HOT_MIX_STEP_PCT_MAX} %. Half and double time count as the
+            same tempo (64 BPM sits next to 128).
           </FieldDescription>
           <ShowFieldHelp title="When nothing fits">
             The DJ only sees tracks inside the step. If the library has nothing there, the station takes the
-            nearest tempo it has, preferring a compatible key, and the booth log says so. Tracks with no measured tempo
-            are left out of a mixed show. Anything you queue yourself still plays.
+            nearest tempo it has, preferring a compatible key, and the booth log says so. A tempo counts only when the
+            beat grid measured it steady over the whole track: tracks without one are left out of a mixed show. Anything
+            you queue yourself still plays.
           </ShowFieldHelp>
           <FieldError {...stepAria.errorProps} errors={stepCtl.fieldState.error ? [stepCtl.fieldState.error] : undefined} />
         </div>
@@ -193,8 +195,9 @@ export function HotMixFields({ control, index }: { control: Control<ShowsFormVal
         </div>
         <FieldDescription {...curveAria.descriptionProps}>
           A few points over the show&apos;s running time, each a position in % of the show and a tempo, e.g. 0 % at 118, 50 % at 128, 100 % at 122 (up to{' '}
-          {HOT_MIX_CURVE_POINTS_MAX}). The set follows it one step at a time: the curve says which way to move, the
-          step still limits how far.
+          {HOT_MIX_CURVE_POINTS_MAX}). Each pick sits within the step of the curve&apos;s tempo where it airs, whatever the
+          track before it played, so the set stays on the curve; two tracks in a row may differ by up to twice the step,
+          and the mixer meets them halfway.
         </FieldDescription>
         <FieldError {...curveAria.errorProps} errors={curveErrors} />
       </div>
