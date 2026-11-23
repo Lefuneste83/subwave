@@ -84,7 +84,7 @@ test('formatEvalSummary reads sanely', () => {
     0.35,
   );
   const line = formatEvalSummary(s);
-  assert.ok(line.includes('2 tagged tracks re-voted'));
-  assert.ok(line.includes('moods agree 100%'));
-  assert.ok(line.includes('energies match 100%'));
+  assert.ok(line.includes('2 tracks compared'));
+  assert.ok(line.includes('moods match 100%'));
+  assert.ok(line.includes('energy 100%'));
 });

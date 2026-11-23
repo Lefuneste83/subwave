@@ -157,7 +157,7 @@ export function embeddingFailedProblem(where: string, error: string): string {
 export function tagScope(s: { asked: number; newTracks: number }): string {
   return s.asked === s.newTracks
     ? `${tracks(s.asked)} to ask the LLM about`
-    : `${tracks(s.asked)} to ask the LLM about, a spread of the ${fmtCount(s.newTracks)} new ones (the rest take their neighbours' moods)`;
+    : `${tracks(s.asked)} to ask the LLM about, a sample of the ${fmtCount(s.newTracks)} new ones (the rest get their moods from similar tracks)`;
 }
 
 export function tagResult(s: { asked: number; tagged: number; untaggable: number; calls: number }): { summary: string; outcome: Outcome } {
@@ -172,7 +172,7 @@ export function tagResult(s: { asked: number; tagged: number; untaggable: number
 
 // Spreading moods to similar tracks.
 export function spreadResult(s: { spread: number; unsure: number; rounds: number; considered: number }): string {
-  return `${fmtCount(s.spread)} of ${fmtCount(s.considered)} took their neighbours' moods, ${fmtCount(s.unsure)} still unsure` +
+  return `${fmtCount(s.spread)} of ${fmtCount(s.considered)} got their moods from similar tracks, ${fmtCount(s.unsure)} still unsure` +
     (s.rounds ? ` after ${s.rounds} round${s.rounds === 1 ? '' : 's'} of asking the LLM again` : '');
 }
 
@@ -186,13 +186,64 @@ export function walkStoppedProblem(walked: number, why: string): string {
   return `The library walk stopped after ${tracks(walked)} (${shortenAnalyzerMessage(why)}), so nothing was removed this run.`;
 }
 
-export function walkSummary(s: { walked: number; adopted: number; pruned: number; newTracks?: number }): string {
+export function walkSummary(s: { walked: number; newTracks?: number }): string {
+  return [`${tracks(s.walked)} read`, s.newTracks ? `${fmtCount(s.newTracks)} new to tag` : ''].filter(Boolean).join(', ');
+}
+
+// Tracks re-linked after a Navidrome ID change, and tracks removed: one line
+// each under the walk, only when there are any.
+export function walkChangeLines(s: { adopted: number; pruned: number }): string[] {
   return [
-    `${tracks(s.walked)} read`,
-    s.newTracks ? `${fmtCount(s.newTracks)} new to tag` : '',
-    s.adopted ? `${fmtCount(s.adopted)} re-linked after a server ID change` : '',
-    s.pruned ? `${fmtCount(s.pruned)} no longer on the server removed` : '',
-  ].filter(Boolean).join(', ');
+    s.adopted ? `Re-linked: ${tracks(s.adopted)} whose Navidrome ID changed — their tags and analysis are kept` : '',
+    s.pruned ? `Removed: ${tracks(s.pruned)} no longer in Navidrome` : '',
+  ].filter(Boolean);
+}
+
+// Tracks on albums whose year looks like a reissue's (the walk's era check).
+export function eraSuspectLine(n: number): string {
+  return `Release years: ${tracks(n)} ${n === 1 ? 'is' : 'are'} on compilations or reissues, so their album year is not used — ` +
+    `an original-year lookup is queued for ${n === 1 ? 'it' : 'them'}`;
+}
+
+// The replaced-file check at the end of the walk (replaced-file-policy.ts):
+// what it found and did, in one line. The signal counts are debug.
+export interface ReplacedCheck {
+  walkedNothing?: boolean;
+  // Navidrome's change times: null when they could not be read (size only).
+  changeTimes: { complete: boolean; futureDated: number } | null;
+  replaced: number;
+  stems?: { removed: number; failed: number; offline?: string };
+  accepted?: { count: number; resent: number };
+  held?: number;
+}
+
+export function replacedFilesLine(c: ReplacedCheck): string {
+  if (c.walkedNothing) return 'Replaced files: not checked (the walk read nothing)';
+  let what: string;
+  if (c.held) what = `${fmtCount(c.held)} found — on hold until you answer (see the warning)`;
+  else if (c.accepted?.count) {
+    what = `${fmtCount(c.accepted.count)} accepted as they are — their analysis is kept` +
+      (c.accepted.resent ? `, ${fmtCount(c.accepted.resent)} with a new size ${c.accepted.resent === 1 ? 'gets its' : 'get their'} stems separated again` : '');
+  } else if (c.replaced) {
+    what = `${fmtCount(c.replaced)} (same path, new audio) — their analysis is due again` +
+      (c.stems?.removed ? `, ${fmtCount(c.stems.removed)} stem set${c.stems.removed === 1 ? '' : 's'} dropped` : '') +
+      (c.stems?.failed ? `, ${fmtCount(c.stems.failed)} stem folder${c.stems.failed === 1 ? '' : 's'} could not be removed` : '') +
+      (c.stems?.offline ? ` (the stems share is offline: ${shorten(c.stems.offline, 80)})` : '');
+  } else what = c.changeTimes ? 'none since the last run' : 'none found';
+  const notes = [
+    c.changeTimes ? '' : 'checked by file size only — Navidrome\'s change times could not be read (the server is not Navidrome or did ' +
+      'not answer, its API refused or timed out, or the station kept the password back)',
+    c.changeTimes && !c.changeTimes.complete ? 'the change list was only partly read, so the next run reads it again' : '',
+    c.changeTimes?.futureDated ? `${fmtCount(c.changeTimes.futureDated)} file${c.changeTimes.futureDated === 1 ? '' : 's'} dated in the future skipped (a wrong clock on the files)` : '',
+  ].filter(Boolean);
+  // A size-only check joins its finding with a comma; the others are asides.
+  if (!c.changeTimes) return `Replaced files: ${what}, ${notes.join(' · ')}`;
+  return `Replaced files: ${[what, ...notes].join(' · ')}`;
+}
+
+export function replacedFilesDebug(d: { read: number; since: string | null; bySize: number; byTime: number }): string {
+  return `replaced-file check: ${fmtCount(d.read)} change times read since ${d.since ?? 'the start'}; ` +
+    `${d.bySize} by size, ${d.byTime} by change time`;
 }
 
 export function yearsSummary(s: { asked: number; found: number; notFound: number; errors: number; discogs?: number }): string {
@@ -201,20 +252,32 @@ export function yearsSummary(s: { asked: number; found: number; notFound: number
     (s.errors ? `, ${fmtCount(s.errors)} lookups failed (retried later: 1 h, 1 day, then 7 days)` : '');
 }
 
-// The enrich step: what it fetches, and what it found.
-export function enrichScope(s: { tracks: number; trackTags: number; years: number; pool: number }): string {
+// The enrich step: what it fetches from each source this run, and what it found.
+export interface EnrichSwitches { lastfm: boolean; lyrics: boolean; years: boolean }
+
+export function enrichScope(s: EnrichSwitches & { metaTracks: number; trackTags: number; yearTracks: number; pool: number }): string {
   const parts = [
-    s.tracks ? `${tracks(s.tracks)} to fetch details for` : '',
-    s.trackTags ? `${tracks(s.trackTags)} owed their own Last.fm tags` : '',
-    s.years ? `${tracks(s.years)} owed an original-year lookup` : '',
+    s.lastfm && s.metaTracks ? `for Last.fm tags` : '',
+    s.trackTags ? `${fmtCount(s.trackTags)} for their own Last.fm track tags` : '',
+    s.lyrics && s.metaTracks ? `for lyrics` : '',
+    s.yearTracks ? `${fmtCount(s.yearTracks)} for an original release year` : '',
   ].filter(Boolean);
-  return `${parts.join(', ')}, out of ${fmtCount(s.pool)} in the library`;
+  // "29 for Last.fm tags, 29 for lyrics": the shared count is said each time.
+  const said = parts.map(p => (p.startsWith('for ') ? `${fmtCount(s.metaTracks)} ${p}` : p));
+  if (said.length === 0) return `nothing, out of ${fmtCount(s.pool)} in the library`;
+  said[0] = said[0].replace(/^([\d,]+) /, (_m, n) => `${n} track${n === '1' ? '' : 's'} `);
+  return `${said.join(', ')}, out of ${fmtCount(s.pool)} in the library`;
 }
 
-export function enrichSummary(s: { tracks: number; tags: number; lyrics: number; years: number; yearsAsked: number; yearErrors: number }): string {
-  return `${tracks(s.tracks)} fetched: ${fmtCount(s.tags)} with Last.fm tags, ${fmtCount(s.lyrics)} with lyrics` +
-    (s.yearsAsked ? `; ${fmtCount(s.years)} of ${fmtCount(s.yearsAsked)} original years found` +
-      (s.yearErrors ? ` (${fmtCount(s.yearErrors)} lookups failed, retried later)` : '') : '');
+export function enrichSummary(s: EnrichSwitches & {
+  tracks: number; tagsFound: number; lyricsFound: number; yearLookups: { asked: number; found: number; errors: number };
+}): string {
+  return [
+    s.lastfm && s.tracks ? `Last.fm tags for ${fmtCount(s.tagsFound)} of ${fmtCount(s.tracks)}` : '',
+    s.lyrics && s.tracks ? `lyrics for ${fmtCount(s.lyricsFound)} of ${fmtCount(s.tracks)}` : '',
+    s.yearLookups.asked ? `original release years for ${fmtCount(s.yearLookups.found)} of ${fmtCount(s.yearLookups.asked)}` +
+      (s.yearLookups.errors ? ` (${fmtCount(s.yearLookups.errors)} lookups failed, retried later)` : '') : '',
+  ].filter(Boolean).join(', ') || 'nothing fetched';
 }
 
 // An analysis step's result: the counts, then what it wrote.
@@ -288,11 +351,11 @@ export const STEP_TITLE = {
   grid: 'Beat grid for Hot Mix (Beat This)',
   structure: 'Phrase structure for Hot Mix',
   refresh: 'Refresh the similarity vectors of the analysed tracks',
-  years: 'Look up original years (MusicBrainz)',
+  years: 'Look up original release years',
 } as const;
 
-export function enrichTitle(on: { lastfm: boolean; lyrics: boolean; years: boolean }): string {
-  const parts = [on.lastfm && 'Last.fm tags', on.lyrics && 'lyrics', on.years && 'original years'].filter(Boolean) as string[];
+export function enrichTitle(on: EnrichSwitches): string {
+  const parts = [on.lastfm && 'Last.fm tags', on.lyrics && 'lyrics', on.years && 'original release years'].filter(Boolean) as string[];
   if (parts.length === 0) return 'Fetch track details';
   return `Fetch ${parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`}`;
 }
@@ -315,15 +378,17 @@ function scoreReason(s: ScoreStats): string | null {
   return s.skipped && s.skipped !== 'no audio vectors' ? s.skipped : null;
 }
 
+// A relabel (labels re-derived from stored scores after a calibration
+// change) is internal: the result counts tracks scored, and the reporter's
+// debug line carries the rest.
 function scoredPart(what: string, s: ScoreStats): string {
-  const relabelled = s.relabelled && s.relabelled > s.scored ? `, ${fmtCount(s.relabelled)} relabelled` : '';
-  return `${fmtCount(s.scored)} ${what}${relabelled}`;
+  return `${fmtCount(s.scored)} ${what}`;
 }
 
 export function scoreSummary(s: { moods: ScoreStats; descriptors: ScoreStats; energy: string | null }): string {
   const passes = [s.moods, s.descriptors];
   const reasons = passes.map(scoreReason);
-  const idle = (p: ScoreStats) => p.skipped === 'no audio vectors' || (!p.skipped && p.scored === 0 && !p.relabelled);
+  const idle = (p: ScoreStats) => p.skipped === 'no audio vectors' || (!p.skipped && p.scored === 0);
   let scoring: string;
   if (reasons[0] && reasons[0] === reasons[1]) scoring = `moods and sound descriptors not scored: ${reasons[0]}`;
   else if (passes.every(idle)) scoring = passes.some(p => p.skipped === 'no audio vectors') ? '' : 'no new fingerprints to score';
@@ -349,18 +414,18 @@ export function energyResult(s: EnergyStats): { skip: string } | { summary: stri
   const switches = s.fillScope !== undefined || s.overruleScope !== undefined;
   if (s.skipped && !switches) return { skip: s.skipped };
   const parts: string[] = [];
-  parts.push(s.scope === 0 ? 'no spread energies to check'
-    : `${fmtCount(s.corrected)} of ${fmtCount(s.scope)} spread energies corrected, ${fmtCount(s.agreed)} confirmed, ` +
-      `${fmtCount(s.undecided)} left as they were (audio not decisive)`);
+  parts.push(s.scope === 0 ? 'no copied energies to check'
+    : `energies copied from similar tracks: ${fmtCount(s.corrected)} of ${fmtCount(s.scope)} corrected from the audio, ` +
+      `${fmtCount(s.agreed)} confirmed, ${fmtCount(s.undecided)} kept (the audio is not clear-cut)`);
   if (s.filled && s.fillScope !== undefined) {
     const n = s.filled.high + s.filled.medium + s.filled.low;
-    parts.push(s.fillScope === 0 ? 'no empty energies to fill'
-      : `${fmtCount(n)} of ${fmtCount(s.fillScope)} empty energies filled (${fmtCount(s.filled.high)} high, ` +
+    parts.push(s.fillScope === 0 ? 'no missing energies to fill'
+      : `${fmtCount(n)} of ${fmtCount(s.fillScope)} missing energies filled from the audio (${fmtCount(s.filled.high)} high, ` +
         `${fmtCount(s.filled.medium)} medium, ${fmtCount(s.filled.low)} low)`);
   }
   if (s.overruled !== undefined && s.overruleScope !== undefined) {
     parts.push(s.overruleScope === 0 ? 'no LLM energies to check'
-      : `${fmtCount(s.overruled)} of ${fmtCount(s.overruleScope)} LLM energies overruled by clearly different audio`);
+      : `${fmtCount(s.overruled)} of ${fmtCount(s.overruleScope)} LLM energies changed where the audio clearly says otherwise`);
   }
   return { summary: parts.join('; ') };
 }
@@ -468,16 +533,48 @@ export function systemicFailureProblem(run: number, lastReason: string): string 
     `against the tracks until one analyses again. ${plain?.fix ?? 'Check that the analyzer and the music server are reachable.'}`;
 }
 
-// The library as the run leaves it, for the closing block.
+// The library as the run leaves it, for the closing block. 'uncertain-llm' is
+// the LLM's answer for a track its similar tracks could not settle: by the LLM,
+// all the same.
 const SOURCE_NAME: Record<string, string> = {
-  llm: 'by the LLM', propagated: 'from neighbours', 'uncertain-llm': 'by the LLM after a second look', manual: 'by hand',
+  llm: 'by the LLM', 'uncertain-llm': 'by the LLM', propagated: 'from similar tracks', manual: 'by hand', 'legacy-v1': 'by an older tagger',
 };
 
 export function librarySummary(s: { tagged: number; moods: number; genres: number; embedded: number; bySource: Record<string, number> }): string {
-  const sources = Object.entries(s.bySource).filter(([, n]) => n > 0)
-    .map(([k, n]) => `${fmtCount(n)} ${SOURCE_NAME[k] ?? k}`);
+  const by = new Map<string, number>();
+  for (const [k, n] of Object.entries(s.bySource)) {
+    if (n > 0) by.set(SOURCE_NAME[k] ?? k, (by.get(SOURCE_NAME[k] ?? k) ?? 0) + n);
+  }
+  const sources = [...by].sort((a, b) => b[1] - a[1]).map(([name, n]) => `${fmtCount(n)} ${name}`);
   return `${fmtCount(s.tagged)} tracks tagged${sources.length ? ` (${sources.join(', ')})` : ''} · ` +
     `${fmtCount(s.embedded)} with similarity vectors · ${s.moods} mood${s.moods === 1 ? '' : 's'} · ${s.genres} genre${s.genres === 1 ? '' : 's'}`;
+}
+
+// After the analysis, tracks that got their moods from similar tracks get them
+// again over their new sounds-like fingerprints.
+export function redoneFromSimilarLine(changed: number, of: number): string {
+  return `Moods from similar tracks redone with the new sound fingerprints: ${fmtCount(changed)} of ${fmtCount(of)} changed`;
+}
+
+export function redoneFromSimilarFailed(error: string): string {
+  return `Redoing the moods of the analysed tracks from their similar tracks failed (${shorten(error, 120)}); the next run tries again.`;
+}
+
+// The quality self-check (propagation-eval.ts): tracks already tagged, tagged
+// again from their similar tracks alone, and compared with what they hold.
+export function selfCheckScope(): string {
+  return 'a sample of tracks already tagged, tagged again from their similar tracks alone and compared';
+}
+
+export function selfCheckSummary(s: { sampled: number; gatePassed: number; moodJaccard: number | null; energyMatched: number; energyComparable: number }): string {
+  if (s.sampled === 0) return 'nothing to compare against (not enough trusted tags)';
+  const pct = (n: number, d: number) => `${Math.round((n / Math.max(1, d)) * 100)}%`;
+  const matches = [
+    s.moodJaccard != null ? `moods match ${Math.round(s.moodJaccard * 100)}%` : '',
+    s.energyComparable > 0 ? `energy ${pct(s.energyMatched, s.energyComparable)}` : '',
+  ].filter(Boolean);
+  return `${fmtCount(s.sampled)} tracks compared: similar tracks alone could tag ${pct(s.gatePassed, s.sampled)} of them` +
+    (matches.length ? `; for those, ${matches.join(' and ')}` : '');
 }
 
 // ── Opening and closing blocks ─────────────────────────────────────────────

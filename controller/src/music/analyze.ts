@@ -18,7 +18,7 @@ import { audioEnergyOptions, runAudioEnergyPass } from './propagated-energy.js';
 import { reportProgress } from './tagger-progress.js';
 import * as runlog from './run-log.js';
 import * as F from './run-log-format.js';
-import { analysisBackendWhere, analyzerWhere } from './run-log-where.js';
+import { LOCAL_WHERE, analysisBackendWhere, analyzerWhere } from './run-log-where.js';
 import { quietAfterMinutes, quietGateDecision, quietOnlyEnabled, type QuietState } from './analyze-quiet-pure.js';
 import { dispatchAnalysis, type DispatchOutcome } from './analyze-dispatch.js';
 import {
@@ -333,6 +333,11 @@ async function scoreAudioMoods(): Promise<void> {
     st?.skip('no sounds-like fingerprints to score yet');
     return;
   }
+  for (const [what, s] of [['mood', moods], ['descriptor', descriptors]] as const) {
+    if (s.relabelled) runlog.debug(`${what} labels re-derived from stored scores: ${s.relabelled}`);
+  }
+  // No fingerprint to score: the step is the energy check alone.
+  if (!step().started) step().start({ runsOn: `${LOCAL_WHERE} (energies only: no sounds-like fingerprints to score)` });
   step().done({ summary: F.scoreSummary({ moods, descriptors, energy }) });
 }
 

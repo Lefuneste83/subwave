@@ -222,13 +222,13 @@ export async function walkNavidrome(
       candidates.set(c.id, null);
     }
   }
-  // One line per walk on the change-time signal, whatever it found.
-  step.note(walked === 0 ? 'Replaced-file check: skipped (the walk read nothing)'
-    : !fileChanges ? 'Replaced-file check: by size only (no change times: the server is not Navidrome or did not answer, its API refused or timed out, or the station kept the password back)'
-      : `Replaced-file check: ${fileChanges.changes.length.toLocaleString('en-GB')} change(s) read since `
-        + `${fileChanges.since ?? 'the start'}${fileChanges.complete ? '' : ' (partial: the read stopped before its floor, the mark stays)'}`
-        + (fileChanges.futureDated ? `, ${fileChanges.futureDated} future-dated file(s) skipped (a wrong clock on the files)` : '')
-        + `; ${sizeCandidates} by size, ${candidates.size - sizeCandidates} by change time`);
+  // The signal counts behind the one plain line said below (debug).
+  if (fileChanges) {
+    runlog.debug(F.replacedFilesDebug({
+      read: fileChanges.changes.length, since: fileChanges.since ?? null,
+      bySize: sizeCandidates, byTime: candidates.size - sizeCandidates,
+    }));
+  }
   const decision = decideReplacedClear({
     candidates: candidates.size, knownTracks: walked, confirmed: confirmReplaced, accepted: acceptReplaced,
   });
@@ -236,36 +236,36 @@ export async function walkNavidrome(
   if (held) runlog.problem('warning', decision.message, { hold: true });
   const replaced = decision.clear ? [...candidates.keys()] : [];
   for (const [id, size] of decision.clear ? candidates : []) db.clearTrackAudio(id, size);
+  let stemsDropped: { removed: number; failed: number; offline?: string } | undefined;
   if (replaced.length > 0) {
-    const stems = await import('../stem-cache.js')
+    stemsDropped = await import('../stem-cache.js')
       .then(m => m.forgetStems(replaced))
       .catch((err: unknown) => ({ removed: 0, failed: replaced.length, offline: String((err as Error)?.message ?? err) }));
-    step.note(
-      `${replaced.length.toLocaleString('en-GB')} file(s) replaced at the same path since they were measured: ` +
-        'their audio analysis is due again' +
-        (stems.removed ? `, ${stems.removed} stem set(s) dropped` : '') +
-        (stems.failed ? `, ${stems.failed} stem dir(s) could not be removed` : '') +
-        (stems.offline ? ` (stem cache offline: ${stems.offline})` : ''),
-    );
   }
+  let accepted: { count: number; resent: number } | undefined;
   if (!decision.clear && decision.reason === 'accepted' && candidates.size > 0) {
     const resent = db.acceptReplacedFiles(candidates, new Map(fileChanges?.changes.map(c => [c.id, c.updatedAt])));
-    step.note(`${candidates.size.toLocaleString('en-GB')} file(s) accepted as changed: their analysis is kept`
-      + (resent ? `; ${resent.toLocaleString('en-GB')} with a new size have their stems separated again` : ''));
+    accepted = { count: candidates.size, resent };
   }
+  // One line per walk, whatever it found.
+  step.note(F.replacedFilesLine({
+    walkedNothing: walked === 0,
+    changeTimes: fileChanges ? { complete: fileChanges.complete, futureDated: fileChanges.futureDated ?? 0 } : null,
+    replaced: replaced.length,
+    stems: stemsDropped,
+    accepted,
+    held: held ? candidates.size : 0,
+  }));
   // Only once acted on: a walk that dies before here, or a held clear, asks
   // again from the old mark.
   if (fileChanges?.complete && !held) await import('../file-changes.js').then(m => m.saveMark(fileChanges.newest)).catch(() => {});
   const suspect = [...eraReasons.values()].reduce((a, b) => a + b, 0);
   if (suspect) {
-    const breakdown = [...eraReasons.entries()]
+    step.note(F.eraSuspectLine(suspect));
+    runlog.debug(`era-suspect albums by reason: ${[...eraReasons.entries()]
       .sort((a, b) => b[1] - a[1])
       .map(([reason, n]) => `${reason} ${n.toLocaleString('en-GB')}`)
-      .join(', ');
-    step.note(
-      `${suspect.toLocaleString('en-GB')} tracks sit on albums whose year looks like a reissue's (compilations, ` +
-      'many artists…): that year is not used as theirs, and they are queued for an original-year lookup');
-    runlog.debug(`era-suspect albums by reason: ${breakdown}`);
+      .join(', ')}`);
   }
   return { walked, liveIds, replacedHeld: held ? candidates.size : 0 };
 }
@@ -303,13 +303,14 @@ export async function reconcileOnly() {
       heldMessage = held.message;
       runlog.problem('warning', held.message, { hold: true });
     }
-    walkStep.done({ summary: F.walkSummary({ walked, adopted, pruned }) });
+    for (const line of F.walkChangeLines({ adopted, pruned })) walkStep.note(line);
+    walkStep.done({ summary: F.walkSummary({ walked }) });
     reportCatalogueReady(walked);
     const yearStep = runlog.step('years', F.STEP_TITLE.years);
     const ids = pendingOriginalYearIds(false);
     if (ids.length === 0) yearStep.skip(years ? 'no original year is due' : 'original-year lookups are off');
     else {
-      yearStep.start({ runsOn: yearSources(), scope: F.scopeMissing({ missing: ids.length, pool: walked, what: 'an original year' }) });
+      yearStep.start({ runsOn: yearSources(), scope: F.scopeMissing({ missing: ids.length, pool: walked, what: 'an original release year' }) });
       const stats = await backfillOriginalYears(ids, false, 4);
       yearStep.done({ summary: F.yearsSummary(stats) });
     }

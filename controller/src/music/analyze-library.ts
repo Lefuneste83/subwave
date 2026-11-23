@@ -221,7 +221,7 @@ async function main() {
       // Planned means due: a not-found re-asked by --where unmeasurable/all is
       // asked again, a resolved or manual year never is (the planner skipped it).
       const st = runlog.step('years', F.STEP_TITLE.years);
-      st.start({ runsOn: yearSources(), scope: F.scopeMissing({ missing: yearIds.length, pool: db.trackCount(), what: 'an original year' }) });
+      st.start({ runsOn: yearSources(), scope: F.scopeMissing({ missing: yearIds.length, pool: db.trackCount(), what: 'an original release year' }) });
       const years = await runYearLookups(yearIds, { force: true });
       st.done({ summary: F.yearsSummary(years) });
     }
@@ -307,7 +307,8 @@ async function main() {
       adopted = r.adopted;
       pruned = r.pruned;
     }
-    st.done({ summary: F.walkSummary({ walked, adopted, pruned }), outcome: walkComplete ? 'ok' : 'partial' });
+    for (const line of F.walkChangeLines({ adopted, pruned })) st.note(line);
+    st.done({ summary: F.walkSummary({ walked }), outcome: walkComplete ? 'ok' : 'partial' });
   }
 
   const dirtyBefore = new Set(db.textVectorDirtyIds());

@@ -48,6 +48,7 @@ import * as runlog from './run-log.js';
 import * as F from './run-log-format.js';
 import { embeddingsWhere, LASTFM_WHERE, LOCAL_WHERE, modelName, navidromeWhere, plannedAnalyzerWhere } from './run-log-where.js';
 import { enrichSwitches, phaseEnrich } from './tag-library/enrich.js';
+import { yearSources } from './original-year.js';
 import {
   applyWizardOverlay,
   clamp01,
@@ -261,6 +262,7 @@ async function main() {
     [
       navidromeWhere(),
       ...(plan.enrich && on.lastfm ? [LASTFM_WHERE] : []),
+      ...(plan.enrich && on.years ? [yearSources()] : []),
       ...(plan.forwardTag || plan.reDecide ? llm.machines : []),
       ...(plan.forwardTag || plan.reEmbed ? [embeddingsWhere()] : []),
       ...(plan.analyze ? [plannedAnalyzerWhere()] : []),
@@ -326,8 +328,9 @@ async function main() {
       : allUntagged.slice(0, flags.limit);
   // The remembered untaggables are in scope but not "to tag": count them apart.
   const heldBack = targetUntagged.filter(id => noLlm.has(id)).length;
+  for (const line of F.walkChangeLines({ adopted, pruned })) walkStep.note(line);
   walkStep.done({
-    summary: F.walkSummary({ walked, adopted, pruned, newTracks: flags.rescan ? 0 : targetUntagged.length - heldBack }),
+    summary: F.walkSummary({ walked, newTracks: flags.rescan ? 0 : targetUntagged.length - heldBack }),
     outcome: walked > 0 ? 'ok' : 'partial',
   });
   if (flags.rescan) {
@@ -444,7 +447,7 @@ async function main() {
     if (considered === 0) spreadStep.skip('no new track is left without moods');
     else {
       spreadStep.start({
-        runsOn: `${LOCAL_WHERE} (nearest neighbours${audioFusionWeight > 0 ? ', with the sounds-like vectors' : ''})` +
+        runsOn: `${LOCAL_WHERE} (similar tracks by text${audioFusionWeight > 0 ? ' and sound' : ''})` +
           (maxRounds > 0 ? ` · the LLM again for the unsure ones` : ''),
         scope: `${F.fmtCount(considered)} new tracks without moods`,
       });
@@ -679,13 +682,13 @@ async function main() {
           });
           changed += 1;
         }
-        runlog.note(`Moods re-voted for ${F.fmtCount(changed)} of ${F.fmtCount(revote.length)} spread tracks over their new vectors`);
+        runlog.note(F.redoneFromSimilarLine(changed, revote.length));
         // The vote rewrote their energy, so the audio pass runs over it again,
         // with the operator's switches: a re-vote that leaves a row without an
         // energy gets it filled now, not at the next run.
         if (changed > 0) runAudioEnergyPass(audioEnergyOptions(settings.get()));
       } catch (err: any) {
-        runlog.problem('warning', `Re-voting the analysed tracks failed (the next run retries): ${err?.message || err}`);
+        runlog.problem('warning', F.redoneFromSimilarFailed(String(err?.message || err)));
       }
       lap('propagate');
     }
@@ -710,7 +713,7 @@ function reportSelfCheck(r: SelfCheckResult | null, at: number): void {
     st.skip(r.skipped);
     return;
   }
-  st.start({ runsOn: `${LOCAL_WHERE} (reads only)`, scope: 'a sample of tracks the LLM or the operator tagged, re-voted as if new', at });
+  st.start({ runsOn: `${LOCAL_WHERE} (reads only)`, scope: F.selfCheckScope(), at });
   if ('failed' in r) st.done({ summary: r.failed, outcome: 'partial' });
   else st.done({ summary: r.summary });
 }

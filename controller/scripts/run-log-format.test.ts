@@ -150,10 +150,98 @@ test('the audio scoring result says why nothing was scored, once', () => {
     'moods and sound descriptors not scored: the analyzer has no CLAP text model (ANALYZER_HEAVY=1 adds it)',
   );
   assert.equal(
-    f.scoreSummary({ moods: { scored: 29, skipped: null }, descriptors: { scored: 29, skipped: null }, energy: 'no spread energies to check' }),
-    '29 scored for moods; 29 for sound descriptors; no spread energies to check',
+    f.scoreSummary({ moods: { scored: 29, skipped: null }, descriptors: { scored: 29, skipped: null }, energy: 'no copied energies to check' }),
+    '29 scored for moods; 29 for sound descriptors; no copied energies to check',
   );
   assert.equal(f.scoreSummary({ moods: { scored: 0, skipped: null }, descriptors: { scored: 0, skipped: null }, energy: null }), 'no new fingerprints to score');
+});
+
+// Step 1's detail lines: plain words, one line each, a label first.
+test('replaced files: one plain line, the counts behind it only in debug', () => {
+  assert.equal(f.replacedFilesLine({ changeTimes: { complete: true, futureDated: 0 }, replaced: 0 }), 'Replaced files: none since the last run');
+  assert.equal(
+    f.replacedFilesLine({ changeTimes: { complete: true, futureDated: 0 }, replaced: 9, stems: { removed: 9, failed: 0 } }),
+    'Replaced files: 9 (same path, new audio) — their analysis is due again, 9 stem sets dropped',
+  );
+  assert.equal(
+    f.replacedFilesLine({ changeTimes: { complete: true, futureDated: 0 }, replaced: 0, accepted: { count: 3, resent: 1 } }),
+    'Replaced files: 3 accepted as they are — their analysis is kept, 1 with a new size gets its stems separated again',
+  );
+  assert.equal(
+    f.replacedFilesLine({ changeTimes: { complete: true, futureDated: 0 }, replaced: 0, held: 1201 }),
+    'Replaced files: 1,201 found — on hold until you answer (see the warning)',
+  );
+  assert.match(f.replacedFilesLine({ changeTimes: null, replaced: 0 }),
+    /^Replaced files: none found, checked by file size only — Navidrome's change times could not be read \(.*refused.*kept the password back.*\)$/);
+  assert.match(f.replacedFilesLine({ changeTimes: { complete: false, futureDated: 2 }, replaced: 1, stems: { removed: 0, failed: 0 } }),
+    /^Replaced files: 1 \(same path, new audio\) — their analysis is due again · the change list was only partly read, so the next run reads it again · 2 files dated in the future skipped \(a wrong clock on the files\)$/);
+  assert.equal(f.replacedFilesLine({ walkedNothing: true, changeTimes: null, replaced: 0 }), 'Replaced files: not checked (the walk read nothing)');
+  assert.equal(
+    f.replacedFilesDebug({ read: 3, since: '2026-11-23T05:40:49.659Z', bySize: 1, byTime: 2 }),
+    'replaced-file check: 3 change times read since 2026-11-23T05:40:49.659Z; 1 by size, 2 by change time',
+  );
+});
+
+test('the walk\'s other changes: one plain line each', () => {
+  assert.deepEqual(f.walkChangeLines({ adopted: 0, pruned: 0 }), []);
+  assert.deepEqual(f.walkChangeLines({ adopted: 3, pruned: 29 }), [
+    'Re-linked: 3 tracks whose Navidrome ID changed — their tags and analysis are kept',
+    'Removed: 29 tracks no longer in Navidrome',
+  ]);
+  assert.equal(
+    f.eraSuspectLine(8687),
+    'Release years: 8,687 tracks are on compilations or reissues, so their album year is not used — an original-year lookup is queued for them',
+  );
+  assert.equal(f.walkSummary({ walked: 149, newTracks: 29 }), '149 tracks read, 29 new to tag');
+});
+
+test('fetching track details: named, sourced and counted by what is on', () => {
+  const all = { lastfm: true, lyrics: true, years: true };
+  assert.equal(f.enrichTitle(all), 'Fetch Last.fm tags, lyrics and original release years');
+  assert.equal(f.enrichTitle({ lastfm: false, lyrics: true, years: false }), 'Fetch lyrics');
+  assert.equal(
+    f.enrichScope({ ...all, metaTracks: 29, trackTags: 0, yearTracks: 29, pool: 74725 }),
+    '29 tracks for Last.fm tags, 29 for lyrics, 29 for an original release year, out of 74,725 in the library',
+  );
+  assert.equal(
+    f.enrichScope({ lastfm: false, lyrics: true, years: true, metaTracks: 29, trackTags: 0, yearTracks: 0, pool: 149 }),
+    '29 tracks for lyrics, out of 149 in the library',
+  );
+  assert.equal(
+    f.enrichSummary({ ...all, tracks: 29, tagsFound: 11, lyricsFound: 0, yearLookups: { asked: 29, found: 4, errors: 2 } }),
+    'Last.fm tags for 11 of 29, lyrics for 0 of 29, original release years for 4 of 29 (2 lookups failed, retried later)',
+  );
+  assert.equal(
+    f.enrichSummary({ lastfm: false, lyrics: true, years: false, tracks: 29, tagsFound: 0, lyricsFound: 3, yearLookups: { asked: 0, found: 0, errors: 0 } }),
+    'lyrics for 3 of 29',
+  );
+});
+
+test('results carry no internal concept: relabels, spread energies, re-votes, second looks', () => {
+  const summary = f.scoreSummary({
+    moods: { scored: 29, relabelled: 149, skipped: null }, descriptors: { scored: 29, relabelled: 149, skipped: null }, energy: null,
+  });
+  assert.equal(summary, '29 scored for moods; 29 for sound descriptors');
+  const energy = f.energyResult({ scope: 19696, corrected: 0, agreed: 12800, undecided: 6896, skipped: null });
+  assert.deepEqual(energy, {
+    summary: 'energies copied from similar tracks: 0 of 19,696 corrected from the audio, 12,800 confirmed, 6,896 kept (the audio is not clear-cut)',
+  });
+  assert.deepEqual(f.energyResult({ scope: 0, corrected: 0, agreed: 0, undecided: 0, fillScope: 0, filled: { high: 0, medium: 0, low: 0 }, skipped: null }),
+    { summary: 'no copied energies to check; no missing energies to fill' });
+  assert.equal(
+    f.librarySummary({ tagged: 149, moods: 17, genres: 1, embedded: 149, bySource: { llm: 69, propagated: 4, 'uncertain-llm': 76 } }),
+    '149 tracks tagged (145 by the LLM, 4 from similar tracks) · 149 with similarity vectors · 17 moods · 1 genre',
+  );
+  assert.equal(f.selfCheckScope(), 'a sample of tracks already tagged, tagged again from their similar tracks alone and compared');
+  assert.equal(
+    f.selfCheckSummary({ sampled: 147, gatePassed: 2, moodJaccard: 0.5, energyMatched: 9, energyComparable: 14 }),
+    '147 tracks compared: similar tracks alone could tag 1% of them; for those, moods match 50% and energy 64%',
+  );
+  assert.equal(f.selfCheckSummary({ sampled: 0, gatePassed: 0, moodJaccard: null, energyMatched: 0, energyComparable: 0 }),
+    'nothing to compare against (not enough trusted tags)');
+  for (const text of [summary, ...Object.values(energy), f.selfCheckScope()]) {
+    assert.doesNotMatch(text, /relabel|spread|re-?vot|second look|neighbour|propagat/i, text);
+  }
 });
 
 test('the run banner lists every step in order with the count, and the machines once', () => {

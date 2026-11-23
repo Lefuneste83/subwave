@@ -58,13 +58,16 @@ export async function phaseEnrich(
   // empty rows and mask a later re-enable.
   const metaIds = lastfmEnabled || lyricsEnabled ? ids : [];
   const runsOn = [
-    lastfmEnabled ? (hasKey ? LASTFM_WHERE : `${navidromeWhere()} (artist info)`) : '',
+    lastfmEnabled ? (hasKey ? `${LASTFM_WHERE} (tags)` : `${navidromeWhere()} (artist info, for Last.fm tags)`) : '',
     lyricsEnabled && metaIds.length ? `${navidromeWhere()} (lyrics)` : '',
-    yearIds.length ? `${yearSources()} (original years)` : '',
+    yearIds.length ? `${yearSources()} (original release years)` : '',
   ].filter(Boolean);
   step.start({
     runsOn: runsOn.join(' · '),
-    scope: F.enrichScope({ tracks: metaIds.length, trackTags: trackTagIds.length, years: yearIds.length, pool: db.trackCount() }),
+    scope: F.enrichScope({
+      lastfm: lastfmEnabled, lyrics: lyricsEnabled, years: yearIds.length > 0,
+      metaTracks: metaIds.length, trackTags: trackTagIds.length, yearTracks: yearIds.length, pool: db.trackCount(),
+    }),
   });
   if (lastfmEnabled && !hasKey) {
     step.note('No Last.fm API key: artist tags come through the music server, which usually has none. Add a key in Settings → Library tagger.');
@@ -134,8 +137,9 @@ export async function phaseEnrich(
 
   step.done({
     summary: F.enrichSummary({
-      tracks: enrichedTracks, tags: enrichedTags, lyrics: enrichedLyrics,
-      years: years.found, yearsAsked: years.asked, yearErrors: years.errors,
+      lastfm: lastfmEnabled || trackTagIds.length > 0, lyrics: lyricsEnabled, years: years.asked > 0,
+      tracks: Math.max(enrichedTracks, trackTagIds.length), tagsFound: enrichedTags, lyricsFound: enrichedLyrics,
+      yearLookups: years,
     }),
   });
 }

@@ -324,7 +324,7 @@ test('with both switches off, an empty library skips exactly as before the switc
 test('with both switches off, the log line is the correction sentence alone', () => {
   const logs = logsOf(() => runAudioEnergyPass(OFF));
   assert.equal(logs.length, 1);
-  assert.match(logs[0], /^\d+ of \d+ spread energies corrected, \d+ confirmed, \d+ left as they were \(audio not decisive\)$/);
+  assert.match(logs[0], /^energies copied from similar tracks: \d+ of \d+ corrected from the audio, \d+ confirmed, \d+ kept \(the audio is not clear-cut\)$/);
 });
 
 test('a switch that is on says so even with nothing to do', () => {
@@ -336,7 +336,7 @@ test('a switch that is on says so even with nothing to do', () => {
   assert.equal(res.overruleScope, 0);
   assert.equal(res.overruled, 0);
   assert.equal(idle.length, 1);
-  assert.match(idle[0], /no empty energies to fill/);
+  assert.match(idle[0], /no missing energies to fill/);
   assert.match(idle[0], /no LLM energies to check/);
 
   // With rows to correct but none to fill: on reads "nothing to fill", off says nothing.
@@ -345,7 +345,7 @@ test('a switch that is on says so even with nothing to do', () => {
   try {
     sql.exec("UPDATE tracks SET audio_mood_scores_json = NULL WHERE id = 'offBlank'");
     const on = logsOf(() => runAudioEnergyPass({ fillEmpty: true, overruleLlm: false }));
-    assert.match(on.join('\n'), /; no empty energies to fill$/);
+    assert.match(on.join('\n'), /; no missing energies to fill$/);
     const off = logsOf(() => runAudioEnergyPass(OFF));
     assert.doesNotMatch(off.join('\n'), /empty energ/);
   } finally {

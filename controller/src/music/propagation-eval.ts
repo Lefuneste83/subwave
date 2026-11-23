@@ -3,6 +3,7 @@
 // propagated from the held-out track, so compare runs, not against 100%.
 // Pure scoring; the sampling + KNN + vote plumbing stays in tag-library.ts.
 
+import { selfCheckSummary } from './run-log-format.js';
 import type { NeighbourTags } from './tag-propagator.js';
 import type { VoteResult } from './tag-propagator.js';
 
@@ -62,14 +63,7 @@ export function summariseEval(cases: EvalCase[], confidenceThreshold: number): E
   };
 }
 
-// One human-readable line for the run log / progress panel.
+// One human-readable line for the run log: worded in run-log-format.ts.
 export function formatEvalSummary(s: EvalSummary): string {
-  if (s.sampled === 0) return 'nothing to check against (not enough trusted tags)';
-  const pct = (n: number, d: number) => `${Math.round((n / Math.max(1, d)) * 100)}%`;
-  const parts = [
-    `${s.sampled} tagged tracks re-voted from their neighbours: ${pct(s.gatePassed, s.sampled)} would be tagged automatically`,
-  ];
-  if (s.moodJaccard != null) parts.push(`moods agree ${Math.round(s.moodJaccard * 100)}%`);
-  if (s.energyComparable > 0) parts.push(`energies match ${pct(s.energyMatched, s.energyComparable)}`);
-  return parts.join(', ');
+  return selfCheckSummary(s);
 }

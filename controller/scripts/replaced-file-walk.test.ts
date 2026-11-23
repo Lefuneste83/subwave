@@ -163,13 +163,15 @@ test.after(async () => {
 
 // A real reconcile: the walk, then its final progress label and the walk's one
 // line on the change-time signal.
-async function reconcile(...flags: string[]): Promise<{ out: string; check: string; label: string }> {
+// `check` is the walk's one plain line; `detail` the signal counts behind it,
+// a debug line (RUN_LOG_VERBOSE).
+async function reconcile(...flags: string[]): Promise<{ out: string; check: string; detail: string; label: string }> {
   const child = spawn(
     process.execPath,
     ['--import', 'tsx', '--import', preload, 'src/music/tag-library.ts', '--reconcile-only', ...flags],
     // As the controller spawns it: the status lines arrive as [event]
     // sentinels, the channel the holds ride (tagger-progress.ts).
-    { cwd: controller, env: { ...process.env, SUBWAVE_TAGGER_MANAGED: '1' }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 },
+    { cwd: controller, env: { ...process.env, SUBWAVE_TAGGER_MANAGED: '1', RUN_LOG_VERBOSE: '1' }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 },
   );
   let out = '';
   child.stdout.on('data', chunk => { out += chunk; });
@@ -181,7 +183,8 @@ async function reconcile(...flags: string[]): Promise<{ out: string; check: stri
   assert.equal(code, 0, out);
   return {
     out,
-    check: out.match(/Replaced-file check[^"\n]*/)?.[0] ?? '',
+    check: out.match(/Replaced files: [^"\n]*/)?.[0] ?? '',
+    detail: out.match(/replaced-file check: [^"\n]*/)?.[0] ?? '',
     label: [...out.matchAll(/"label":"([^"]*)"/g)].at(-1)?.[1] ?? '',
   };
 }
@@ -199,9 +202,10 @@ test('a few replaced files clear at the end of the walk, lose their stems and mo
   by('s0').size += 5;
   by('s1').updatedAt = CHANGED;
 
-  const { check } = await reconcile();
+  const { check, detail } = await reconcile();
 
-  assert.match(check, /1 by size, 1 by change time/);
+  assert.match(detail, /1 by size, 1 by change time/);
+  assert.equal(check, 'Replaced files: 2 (same path, new audio) — their analysis is due again, 1 stem set dropped');
   assert.equal(stored('s0').bpm, null, 'a changed size clears');
   assert.equal(stored('s0').file_size, by('s0').size, 'the new size lands with the clear');
   assert.equal(stored('s1').bpm, null, 'a newer change time clears a file of the same size');
@@ -229,7 +233,8 @@ test('a mass replacement is held: nothing clears, the sizes and the mark stay, a
   assert.equal(mark(), MARK, 'a held clear does not move the mark');
 
   const next = await reconcile();
-  assert.match(next.check, new RegExp(`1 by size, ${MASS} by change time`), 'the next walk finds them again');
+  assert.match(next.detail, new RegExp(`1 by size, ${MASS} by change time`), 'the next walk finds them again');
+  assert.equal(next.check, `Replaced files: ${MASS + 1} found — on hold until you answer (see the warning)`);
   assert.equal(mark(), MARK);
 });
 
@@ -267,7 +272,7 @@ test('--accept-replaced clears nothing, and the same files are not found again',
 
   assert.doesNotMatch(accepted.out, /NOT cleared/);
   assert.deepEqual(holdsIn(accepted.out), []);
-  assert.match(accepted.out, new RegExp(`${MASS + 1} file\\(s\\) accepted`));
+  assert.match(accepted.check, new RegExp(`^Replaced files: ${MASS + 1} accepted as they are — their analysis is kept`));
   assert.equal(stored('s0').bpm, 100, 'the analysis stays');
   assert.equal(existsSync(stemDir), true, 'the stems stay');
   assert.equal(stored(`s${MASS}`).file_size, SIZE + MASS + 5, 'the size is stored');
@@ -276,8 +281,9 @@ test('--accept-replaced clears nothing, and the same files are not found again',
   // The next floor is the mark less its margin, so these same files are read
   // again. Moving the mark alone would find every one of them.
   const next = await reconcile();
-  assert.match(next.check, new RegExp(`${MASS} change\\(s\\) read`));
-  assert.match(next.check, /0 by size, 0 by change time/);
+  assert.match(next.detail, new RegExp(`${MASS} change times read`));
+  assert.match(next.detail, /0 by size, 0 by change time/);
+  assert.equal(next.check, 'Replaced files: none since the last run');
   assert.match(next.label, /in sync/i);
 
   // Accepting is about those files as they were: a later replacement still
@@ -293,12 +299,12 @@ test('an accepted file dated inside the margin is not found again', async () => 
 
   const accepted = await reconcile('--accept-replaced');
 
-  assert.match(accepted.check, /0 by size, 1 by change time/);
+  assert.match(accepted.detail, /0 by size, 1 by change time/);
   assert.equal(stored('s0').bpm, 100);
 
   const next = await reconcile();
-  assert.match(next.check, /1 change\(s\) read/, 'the same file is read again');
-  assert.match(next.check, /0 by size, 0 by change time/);
+  assert.match(next.detail, /1 change times read/, 'the same file is read again');
+  assert.match(next.detail, /0 by size, 0 by change time/);
   assert.equal(stored('s0').bpm, 100, 'the analysis stays');
 });
 
@@ -308,7 +314,7 @@ test('an accepted mass dated inside the margin does not go back on hold', async 
   await reconcile('--accept-replaced');
 
   const next = await reconcile();
-  assert.match(next.check, /0 by size, 0 by change time/);
+  assert.match(next.detail, /0 by size, 0 by change time/);
   assert.match(next.label, /in sync/i);
   assert.equal(stored('s0').bpm, 100);
 });
@@ -348,7 +354,7 @@ test('a partial read is acted on, says so, and does not move the mark', async ()
 
   const { check } = await reconcile();
 
-  assert.match(check, /partial/);
+  assert.match(check, /only partly read/);
   assert.doesNotMatch(check, /server stopped/, 'running out of pages is not the server\'s doing');
   assert.equal(stored('s0').bpm, null, 'the changes read are the newest: they still count');
   assert.equal(mark(), MARK);

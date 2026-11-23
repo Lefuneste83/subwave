@@ -59,7 +59,7 @@ test('the truth is read when the check starts, not while it votes', async () => 
   }, 0.35, { yieldBetweenVotes: true }));
   assert.equal(votes, Math.min(SELF_CHECK_SAMPLE, N));
   const summary = lines[0] ?? '';
-  assert.match(summary, /moods agree 100%, energies match 100%/, `scored against the truth read at the start: ${summary}`);
+  assert.match(summary, /moods match 100% and energy 100%/, `scored against the truth read at the start: ${summary}`);
   for (let i = 0; i < N; i++) db.upsertTrackTags(`t${i}`, { moods: ['happy'], energy: 'high', source: 'llm', confidence: 1, promptHash: 'h', model: 'm' } as never);
 });
 
