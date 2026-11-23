@@ -97,6 +97,10 @@ const { status } = spawnSync(
     'tsx',
     '--import',
     pathToFileURL(join(scriptsDir, 'test-utils', 'state-dir.ts')).href,
+    // A test file's console output on stderr: Node's runner misreads some of
+    // it on stdout (test-utils/child-stdout.ts).
+    '--import',
+    pathToFileURL(join(scriptsDir, 'test-utils', 'child-stdout.ts')).href,
     '--test',
     `--test-concurrency=${jobs}`,
     '--test-reporter=spec',
