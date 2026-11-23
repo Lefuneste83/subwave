@@ -15,35 +15,42 @@ import { compileSearch } from '../../music/search-query.js';
 
 export const router = express.Router();
 
+// The Browse list's filters, read from its query string. One reading for the
+// list and for the Library download of "everything the list shows"
+// (routes/library/download.ts), so the two can never disagree on a row.
+export function browseFilterFromQuery(q: Record<string, unknown>) {
+  const sort = (typeof q.sort === 'string' ? q.sort : 'artist') as
+    | 'artist' | 'title' | 'year' | 'taggedAt' | 'bpm' | 'loudness' | 'pace';
+  const vocal: 'instrumental' | 'vocal' | null =
+    q.vocal === 'instrumental' || q.vocal === 'vocal' ? q.vocal : null;
+  // The search box speaks the query language (music/search-query). Text that
+  // is not a valid query is searched as plain text, and the reason rides along
+  // for the box to show.
+  const search = typeof q.q === 'string' && q.q.trim() ? compileSearch(q.q) : null;
+  return {
+    search,
+    opts: {
+      moods: parseList(q.moods),
+      energy: typeof q.energy === 'string' && q.energy ? q.energy : null,
+      genre: typeof q.genre === 'string' && q.genre ? q.genre : null,
+      vocal,
+      yearFrom: parseIntSafe(q.yearFrom, null),
+      yearTo: parseIntSafe(q.yearTo, null),
+      query: search?.query ?? null,
+      sort,
+    },
+  };
+}
+
 router.get('/library/browse', requireAdmin, async (req, res) => {
   try {
     await library.load();
     const q = req.query || {};
-    const moods = parseList(q.moods);
-    const sort = (typeof q.sort === 'string' ? q.sort : 'artist') as
-      | 'artist' | 'title' | 'year' | 'taggedAt' | 'bpm' | 'loudness' | 'pace';
-    const vocal = q.vocal === 'instrumental' || q.vocal === 'vocal' ? q.vocal : null;
     const limit = parseIntSafe(q.limit, 50);
     const offset = parseIntSafe(q.offset, 0);
-    const yearFrom = parseIntSafe(q.yearFrom, null);
-    const yearTo = parseIntSafe(q.yearTo, null);
-    // The search box speaks the query language (music/search-query). Text that
-    // is not a valid query is searched as plain text, and the reason rides along
-    // for the box to show.
-    const search = typeof q.q === 'string' && q.q.trim() ? compileSearch(q.q) : null;
+    const { search, opts } = browseFilterFromQuery(q);
 
-    const result = library.filter({
-      moods,
-      energy: typeof q.energy === 'string' && q.energy ? q.energy : null,
-      genre: typeof q.genre === 'string' && q.genre ? q.genre : null,
-      vocal,
-      yearFrom,
-      yearTo,
-      query: search?.query ?? null,
-      sort,
-      limit,
-      offset,
-    });
+    const result = library.filter({ ...opts, limit, offset });
     // Drop station-archive rows an old tagger may have written into the index (#273).
     const cleanRows = result.rows.filter((row) => !subsonic.isStationArchive(row));
     const removed = result.rows.length - cleanRows.length;

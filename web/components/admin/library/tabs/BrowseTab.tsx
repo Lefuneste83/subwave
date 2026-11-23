@@ -7,6 +7,8 @@ import { Card, Btn } from '../../ui';
 import { num } from '../../LibraryTaggingPanel';
 import type { LibraryStatsLite } from '../../LibraryTaggingPanel';
 import { BrowseFilters } from '../BrowseFilters';
+import { DownloadButton } from '../DownloadButton';
+import { browseFilterParams, type BrowseFilterState } from '../download-policy';
 import { RowsTable } from '../RowsTable';
 import { useLibrary } from '../LibraryContext';
 import { libraryKeys, type BrowseKeyFilters } from '../queries';
@@ -41,24 +43,18 @@ export default function BrowseTab({
   // time and delaying them feels laggy.
   const [debouncedQ] = useDebounceValue(q, 250);
 
-  const filters: BrowseKeyFilters = {
-    moods, energy, vocal, genre, yearFrom, yearTo, q: debouncedQ.trim(), sort, page,
+  // The list's filters as sent: the download's "whole list" reads the same.
+  const listFilter: BrowseFilterState = {
+    moods, energy, vocal, genre, yearFrom, yearTo, q: debouncedQ.trim(), sort,
   };
+  const filters: BrowseKeyFilters = { ...listFilter, page };
 
   // No AbortController needed: the response is keyed to the filters that asked
   // for it, so a slow earlier request cannot overwrite a faster later one.
   const browseQuery = useAdminQuery<BrowseResponse>({
     key: libraryKeys.browse(filters),
     path: () => {
-      const params = new URLSearchParams();
-      if (moods.length) params.set('moods', moods.join(','));
-      if (energy !== 'any') params.set('energy', energy);
-      if (vocal !== 'any') params.set('vocal', vocal);
-      if (genre) params.set('genre', genre);
-      if (yearFrom) params.set('yearFrom', yearFrom);
-      if (yearTo) params.set('yearTo', yearTo);
-      if (debouncedQ.trim()) params.set('q', debouncedQ.trim());
-      params.set('sort', sort);
+      const params = new URLSearchParams(browseFilterParams(listFilter));
       params.set('limit', String(PAGE_SIZE));
       params.set('offset', String(page * PAGE_SIZE));
       return `/library/browse?${params}`;
@@ -118,6 +114,7 @@ export default function BrowseTab({
         readsAs={browse?.searched === q.trim() ? browse.readsAs ?? '' : ''}
         reindexing={browse?.searched === q.trim() && !!browse.reindexing}
         sort={sort} setSort={setSort}
+        actions={<DownloadButton filter={listFilter} listTotal={browse ? browse.total : null} />}
       />
 
       {filtersActive && (
