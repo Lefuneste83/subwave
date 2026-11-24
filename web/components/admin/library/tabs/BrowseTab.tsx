@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, type Dispatch, type SetStateAction } from 'react';
+import { useEffect, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { useDebounceValue } from 'usehooks-ts';
 import { X } from 'lucide-react';
 import { Card, Btn } from '../../ui';
@@ -29,11 +29,13 @@ export interface BrowseTabProps {
   sort: Sort; setSort: (s: Sort) => void;
   // Falls back for the filter counts before the first browse response lands.
   libStats: LibraryStatsLite | null;
+  // The selection bar, rendered under the filters, directly above the list.
+  selectionBar?: ReactNode;
 }
 
 export default function BrowseTab({
   moods, setMoods, energy, setEnergy, vocal, setVocal, genre, setGenre,
-  yearFrom, setYearFrom, yearTo, setYearTo, q, setQ, sort, setSort, libStats,
+  yearFrom, setYearFrom, yearTo, setYearTo, q, setQ, sort, setSort, libStats, selectionBar,
 }: BrowseTabProps) {
   const { seedVocab } = useLibrary();
 
@@ -144,6 +146,8 @@ export default function BrowseTab({
           </button>
         </div>
       )}
+
+      {selectionBar}
 
       <Card
         title="Tracks"
