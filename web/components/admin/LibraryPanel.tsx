@@ -62,7 +62,7 @@ function LibraryBody() {
   useEffect(() => { clearSelection(); }, [tab, clearSelection]);
 
   // Ticked rows are acted on from one bar, placed directly above the list it
-  // acts on: under Browse's filters and Search's box, at the top of Tracks.
+  // acts on: under Browse's filters and Search's box, at the top of Tracks and History.
   const selectionBar = selected.size > 0 ? (
     <AddToPlaylistBar
       count={selected.size}
@@ -184,7 +184,7 @@ function LibraryBody() {
 
       {tab === 'blocked' && <BlockedTabContainer />}
 
-      {tab === 'history' && <HistoryTabContainer />}
+      {tab === 'history' && <HistoryTabContainer selectionBar={selectionBar} />}
 
       {tab === 'tracks' && selectionBar}
 
