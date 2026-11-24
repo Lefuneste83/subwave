@@ -189,6 +189,9 @@ const STATS_INDEXES: Array<[name: string, sql: string]> = [
   // name (schema.ts ensureNamedColumns), and a failed build stops the loop.
   ['idx_tracks_overview', 'CREATE INDEX IF NOT EXISTS idx_tracks_overview ON tracks(id, album_id, artist_id, artist, album, title, genres, moods, audio_moods, lastfm_tags, duration_sec, bpm, musical_key, loudness_lufs, loudness_version)'],
   ['idx_tracks_era_open', 'CREATE INDEX IF NOT EXISTS idx_tracks_era_open ON tracks(era_untrusted, album_artist, album, original_year)'],
+  // Library → Transitions (music/transition-readiness.ts): the tracks side of
+  // its pass and of its inputs key, so neither reads the wide rows.
+  ['idx_tracks_transitions', 'CREATE INDEX IF NOT EXISTS idx_tracks_transitions ON tracks(id, bpm, stems_at)'],
 ];
 // Fork: the pre-review counts line built this index on fork stations (upstream
 // never shipped it); replaced by one of the above, dropped at open so it stops

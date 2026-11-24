@@ -48,6 +48,9 @@ export const libraryKeys = {
   // What a staged merge would orphan (#1593). Keyed on the merge itself.
   sceneReferences: (from: readonly string[], to: string) =>
     ['library', 'scene-references', [...from].sort().join('\u0000'), to] as const,
+  // Library → Transitions: the last count of what each track can take in a
+  // Hot Mix show (GET /library/transitions).
+  transitions: () => ['library', 'transitions'] as const,
   playlists: () => ['library', 'playlists'] as const,
   rulePlaylists: () => ['library', 'rule-playlists'] as const,
 };
