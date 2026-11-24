@@ -6,6 +6,7 @@ import * as blocklist from '../../music/blocklist.js';
 import * as db from '../../music/library-db.js';
 import * as coverage from '../../music/library-coverage.js';
 import { exportAttentionCsv } from '../../music/library-overview.js';
+import { getTransitionReadiness } from '../../music/transition-readiness.js';
 import * as subsonic from '../../music/subsonic.js';
 import * as lastfm from '../../music/lastfm.js';
 import { listAfterArtistLookup } from '../../music/lastfm-tag-policy.js';
@@ -140,6 +141,17 @@ router.post('/library/coverage/refresh', requireAdmin, async (_req, res) => {
     // sensible request timeout.
     coverage.refresh();
     res.json({ ok: true, coverage: await coverage.get() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Library → Transitions: the last count of what each track can take in a Hot
+// Mix show (music/transition-readiness.ts), null before the first. Never
+// counts here: a stale snapshot asks for a background recount.
+router.get('/library/transitions', requireAdmin, (_req, res) => {
+  try {
+    res.json({ readiness: getTransitionReadiness() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

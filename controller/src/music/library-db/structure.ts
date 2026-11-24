@@ -268,7 +268,7 @@ interface StructureRow {
   measured_at: string; grid_at: string | null; bars_json: string | null;
 }
 
-function parseStoredBars(json: string | null): StructureBars | null {
+export function parseStoredBars(json: string | null): StructureBars | null {
   if (!json) return null;
   try {
     return parseStructureBars(JSON.parse(json));

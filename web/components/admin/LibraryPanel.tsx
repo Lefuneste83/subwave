@@ -10,6 +10,7 @@ import { useTaggerControls } from './library/useTaggerControls';
 import BrowseTab from './library/tabs/BrowseTab';
 import SearchTab from './library/tabs/SearchTab';
 import EraReviewSection from './library/EraReviewSection';
+import TransitionsTab from './library/tabs/TransitionsTab';
 import TracksTab from './library/tabs/TracksTab';
 import HistoryTabContainer from './library/tabs/HistoryTabContainer';
 import BlockedTabContainer from './library/tabs/BlockedTabContainer';
@@ -163,7 +164,9 @@ function LibraryBody() {
 
       {tab === 'era' && <EraReviewSection />}
 
-      {tab !== 'blocked' && tab !== 'history' && selected.size > 0 && (
+      {tab === 'transitions' && <TransitionsTab />}
+
+      {tab !== 'blocked' && tab !== 'history' && tab !== 'transitions' && selected.size > 0 && (
         <AddToPlaylistBar
           count={selected.size}
           playlists={playlists}

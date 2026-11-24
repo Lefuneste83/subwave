@@ -30,9 +30,41 @@
 // The bass move the recipe goes with (the incoming bass held at its pot's
 // minimum until it swaps in on its first hard kick, music/bass-pot-policy.ts)
 // is the mixer's work: this only says where the bars are.
-import { barStartMs, PHRASE_BARS, type StructurePoints } from './structure-policy.js';
+import { barStartMs, PHRASE_BARS, structurePoints, type StructurePoints } from './structure-policy.js';
+import type { StructureBars, StructureStatus } from './library-db/structure.js';
 
 type Runs = ReadonlyArray<readonly [number, number, number]>;
+
+// One track's stored structure row (library-db/structure.ts getStructure), or
+// as much of it as this reads.
+export interface StoredStructure { status: StructureStatus; gridAt: string | null; bars: StructureBars | null }
+
+export type PhraseStructure =
+  | { ok: true; points: StructurePoints; runs: StructureBars['runs'] }
+  | { ok: false; why: 'not-measured' | 'older-grid' };
+
+// Whether a track's structure can place a phrase window on the grid the seam
+// plans on (`gridMeasuredAt`, track_grid.measured_at): measured ('ok'), its
+// bars readable, and measured on THAT grid, since bars measured on an older
+// one would put the window off its downbeats. The queue's check for each side
+// (queue.phraseWindowOf) and the Transitions count's.
+export function phraseStructureOf(st: StoredStructure | null | undefined, gridMeasuredAt: string): PhraseStructure {
+  if (st?.status !== 'ok' || !st.bars) return { ok: false, why: 'not-measured' };
+  if (st.gridAt !== gridMeasuredAt) return { ok: false, why: 'older-grid' };
+  return { ok: true, points: structurePoints(st.bars), runs: st.bars.runs };
+}
+
+// The outgoing side of a phrase window needs a full section to leave after.
+export function canLeaveOnPhrase(p: StructurePoints): p is StructurePoints & { lastHardKick: number; fullSectionStart: number } {
+  return p.lastHardKick != null && p.fullSectionStart != null;
+}
+
+// The incoming side needs at least one phrase before its first hard kick
+// (planPhraseWindow's own bound, before its silence trim, at any phrase
+// length: every length is at least PHRASE_BARS).
+export function canEnterOnPhrase(p: StructurePoints): boolean {
+  return p.firstHardKick != null && p.firstHardKick - 1 >= PHRASE_BARS;
+}
 
 export interface PhraseSide {
   points: StructurePoints;
@@ -76,7 +108,7 @@ function barLineMs(runs: Runs, bar: number): number | null {
 
 export function planPhraseWindow(input: PhraseInput): PhraseVerdict {
   const { a, b } = input;
-  if (a.points.lastHardKick == null || a.points.fullSectionStart == null) {
+  if (!canLeaveOnPhrase(a.points)) {
     return { ok: false, reason: 'no full section on the outgoing track' };
   }
   if (b.points.firstHardKick == null) return { ok: false, reason: 'no full section on the incoming track' };

@@ -21,8 +21,8 @@ import * as safeOutPolicy from '../music/safe-out-policy.js';
 import * as percussionPhase from '../music/percussion-phase.js';
 import { hotMixOf } from '../music/hot-mix-policy.js';
 import { getGrid, getStructure } from '../music/library-db.js';
-import { planPhraseWindow, type PhraseWindow } from '../music/phrase-mix-policy.js';
-import { structurePoints, type StructurePoints } from '../music/structure-policy.js';
+import { phraseStructureOf, planPhraseWindow, type PhraseWindow } from '../music/phrase-mix-policy.js';
+import type { StructurePoints } from '../music/structure-policy.js';
 import * as cueLanding from '../music/cue-landing.js';
 import * as libraryMount from '../music/library-mount.js';
 import { capCueOutSec } from '../music/track-floor.js';
@@ -458,9 +458,13 @@ function phraseWindowOf(
     { points: StructurePoints; runs: Array<[number, number, number]> } | string => {
     let st: ReturnType<typeof getStructure> = null;
     try { st = getStructure(id); } catch { /* no library db */ }
-    if (st?.status !== 'ok' || !st.bars) return `no structure measured on the ${which} track`;
-    if (st.gridAt !== grid.measuredAt) return `the ${which} track's structure was measured on an older beat grid`;
-    return { points: structurePoints(st.bars), runs: st.bars.runs };
+    const s = phraseStructureOf(st, grid.measuredAt);
+    if (!s.ok) {
+      return s.why === 'older-grid'
+        ? `the ${which} track's structure was measured on an older beat grid`
+        : `no structure measured on the ${which} track`;
+    }
+    return { points: s.points, runs: s.runs };
   };
   const a = sideOf(aId, aGrid, 'outgoing');
   if (typeof a === 'string') return { ok: false, reason: a };
