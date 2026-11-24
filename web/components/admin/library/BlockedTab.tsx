@@ -114,8 +114,10 @@ export function BlockedTab({ entries, counts, countedAt, loading, unblocking, bu
                 </label>
                 <span className={cn('lib-mtag lib-ktag shrink-0', `lib-ktag-${e.type}`)} title={`blocked ${e.type}`}>{e.type}</span>
                 <div className="min-w-0 flex-1">
-                  <div className="flex min-w-0 items-baseline gap-2">
-                    <span className="lib-title min-w-0">{e.name || e.id}</span>
+                  {/* Wraps: on a phone the figure drops under a long title
+                      rather than squeezing it to a few letters. */}
+                  <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+                    <span className="lib-title max-w-full min-w-0">{e.name || e.id}</span>
                     {count && (
                       <span
                         className={cn('shrink-0 font-mono text-[11px] tabular-nums', count.none ? 'text-muted' : 'text-ink')}
