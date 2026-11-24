@@ -61,6 +61,19 @@ function LibraryBody() {
   // the provider because only the panel knows the tab changed.
   useEffect(() => { clearSelection(); }, [tab, clearSelection]);
 
+  // Ticked rows are acted on from one bar, placed directly above the list it
+  // acts on: under Browse's filters and Search's box, at the top of Tracks.
+  const selectionBar = selected.size > 0 ? (
+    <AddToPlaylistBar
+      count={selected.size}
+      playlists={playlists}
+      busy={plBusy}
+      onAdd={addSelectedToPlaylist}
+      onClear={clearSelection}
+      download={<SelectionDownload ids={Array.from(selected)} />}
+    />
+  ) : null;
+
   return (
     // grid-cols-1: the implicit `auto` track is sized by min-content, so a
     // doorway card's un-shrinkable copy blew the column past a phone viewport.
@@ -140,18 +153,6 @@ function LibraryBody() {
 
       <Tabs tab={tab} setTab={setTab} />
 
-      {/* One place for every list tab, above its list: ticked rows are
-          acted on from here whichever tab they were ticked in. */}
-      {tab !== 'blocked' && tab !== 'history' && tab !== 'transitions' && selected.size > 0 && (
-        <AddToPlaylistBar
-          count={selected.size}
-          playlists={playlists}
-          busy={plBusy}
-          onAdd={addSelectedToPlaylist}
-          onClear={clearSelection}
-          download={<SelectionDownload ids={Array.from(selected)} />}
-        />
-      )}
 
       {tab === 'browse' && (
         <BrowseTab
@@ -164,6 +165,7 @@ function LibraryBody() {
           q={q} setQ={setQ}
           sort={sort} setSort={setSort}
           libStats={tag.libStats}
+          selectionBar={selectionBar}
         />
       )}
 
@@ -172,6 +174,7 @@ function LibraryBody() {
           searchQuery={searchQuery} setSearchQuery={setSearchQuery}
           searchMode={searchMode} setSearchMode={setSearchMode}
           urlRestored={urlRestored}
+          selectionBar={selectionBar}
         />
       )}
 
@@ -182,6 +185,8 @@ function LibraryBody() {
       {tab === 'blocked' && <BlockedTabContainer />}
 
       {tab === 'history' && <HistoryTabContainer />}
+
+      {tab === 'tracks' && selectionBar}
 
       {tab === 'tracks' && (
         <TracksTab
