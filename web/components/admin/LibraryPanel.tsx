@@ -140,6 +140,19 @@ function LibraryBody() {
 
       <Tabs tab={tab} setTab={setTab} />
 
+      {/* One place for every list tab, above its list: ticked rows are
+          acted on from here whichever tab they were ticked in. */}
+      {tab !== 'blocked' && tab !== 'history' && tab !== 'transitions' && selected.size > 0 && (
+        <AddToPlaylistBar
+          count={selected.size}
+          playlists={playlists}
+          busy={plBusy}
+          onAdd={addSelectedToPlaylist}
+          onClear={clearSelection}
+          download={<SelectionDownload ids={Array.from(selected)} />}
+        />
+      )}
+
       {tab === 'browse' && (
         <BrowseTab
           moods={moods} setMoods={setMoods}
@@ -165,17 +178,6 @@ function LibraryBody() {
       {tab === 'era' && <EraReviewSection />}
 
       {tab === 'transitions' && <TransitionsTab />}
-
-      {tab !== 'blocked' && tab !== 'history' && tab !== 'transitions' && selected.size > 0 && (
-        <AddToPlaylistBar
-          count={selected.size}
-          playlists={playlists}
-          busy={plBusy}
-          onAdd={addSelectedToPlaylist}
-          onClear={clearSelection}
-          download={<SelectionDownload ids={Array.from(selected)} />}
-        />
-      )}
 
       {tab === 'blocked' && <BlockedTabContainer />}
 
