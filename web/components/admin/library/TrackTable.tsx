@@ -198,22 +198,6 @@ function TrackRows(p: TrackTableProps) {
                 busy={p.liking === t.id}
                 onToggle={p.onToggleLike}
               />
-              {/* The heart only ever removes the operator's own like; on the
-                  Liked list a desktop row also clears the listeners' likes
-                  (the phone has it in the row menu). The way to take a track
-                  that left the library off this list. */}
-              {p.tab === 'liked' && like.count > 0 && (
-                <Btn
-                  sm
-                  className="hidden sm:inline-flex"
-                  onClick={() => p.onClearLikes(t)}
-                  disabled={!!p.liking}
-                  title={`Clear all likes (${like.count}): drops listener likes too`}
-                  aria-label={`clear all likes on ${t.title || 'track'}`}
-                >
-                  {p.liking === t.id ? '…' : <HeartOff size={12} />}
-                </Btn>
-              )}
               <QueueMenu
                 className="hidden sm:block"
                 track={t}
@@ -228,7 +212,7 @@ function TrackRows(p: TrackTableProps) {
                 tone={editing ? 'accent' : undefined}
                 onClick={() => p.onEdit(t)}
                 disabled={!!p.manualBusy}
-                title="Edit moods manually"
+                title="Edit infos manually"
               >
                 {editing ? <X size={12} /> : <Pencil size={12} />}
               </Btn>
@@ -276,6 +260,9 @@ function TrackRows(p: TrackTableProps) {
               onSave={(moods, energy, applyToAlbum) => p.onSaveManual(t, moods, energy, applyToAlbum)}
               onSaveEraYear={(originalYear, applyToAlbum) => p.onSaveEraYear(t, originalYear, applyToAlbum)}
               onCancel={p.onCancelEdit}
+              likeCount={like.count}
+              clearingLikes={p.liking === t.id}
+              onClearLikes={() => p.onClearLikes(t)}
             />
           )}
           </Fragment>
@@ -344,7 +331,7 @@ export function RowActionsMenu({
             </button>
           )}
           <button type="button" className={MENU_ITEM} disabled={disabled} onClick={() => run(() => onEdit(track))}>
-            {editing ? <X size={13} /> : <Pencil size={13} />} {editing ? 'Close mood editor' : 'Edit moods'}
+            {editing ? <X size={13} /> : <Pencil size={13} />} {editing ? 'Close editor' : 'Edit infos'}
           </button>
           <button type="button" className={MENU_ITEM} disabled={disabled} onClick={() => run(() => onRetag(track))}>
             {tagged ? <RotateCcw size={13} /> : <Sparkles size={13} />} {tagged ? 'Retag with AI' : 'Tag with AI'}
