@@ -105,6 +105,11 @@ export function ManualTagEditor(props: {
   onSave: (moods: string[], energy: string | null, applyToAlbum: boolean) => void;
   onSaveEraYear: (originalYear: number | null, applyToAlbum: boolean) => void;
   onCancel: () => void;
+  // Likes on the track, operator's and listeners' alike: the one place to clear
+  // them (the heart only ever removes the operator's own). Omitted, or 0: no button.
+  likeCount?: number;
+  clearingLikes?: boolean;
+  onClearLikes?: () => void;
 }) {
   const { track, vocab, busy, eraBusy } = props;
   const [sel, setSel] = useState<string[]>((track.moods || []).slice(0, 3));
@@ -206,6 +211,17 @@ export function ManualTagEditor(props: {
         <Btn sm tone="danger" onClick={() => props.onSave([], null, applyToAlbum)} disabled={busy || eraBusy}>
           Clear tags
         </Btn>
+        {props.onClearLikes && (props.likeCount ?? 0) > 0 && (
+          <Btn
+            sm
+            tone="danger"
+            onClick={props.onClearLikes}
+            disabled={busy || eraBusy || !!props.clearingLikes}
+            title="drops listener likes too: un-hearting only removes yours"
+          >
+            {props.clearingLikes ? 'Clearing…' : `Clear all likes (${props.likeCount})`}
+          </Btn>
+        )}
         <Btn sm onClick={props.onCancel} disabled={busy || eraBusy}>Cancel</Btn>
       </div>
     </div>
