@@ -561,3 +561,15 @@ test('names: copies get (2), (3) whatever their case; the header carries the exa
   assert.equal(names.attachmentDisposition('Björk - Jóga (Live).flac'),
     `attachment; filename="Bjork - Joga (Live).flac"; filename*=UTF-8''Bj%C3%B6rk%20-%20J%C3%B3ga%20%28Live%29.flac`);
 });
+
+// The editor's file line: the path that tells two copies of one song apart.
+test('GET /library/track/:id/file answers the file behind a row, 404 for an unknown id', async () => {
+  const r = await fetch(`${base}/library/track/a1/file`, { headers: auth });
+  assert.equal(r.status, 200);
+  const f = await r.json() as { id: string; filePath: string | null; fileSuffix: string | null; fileSize: number | null };
+  assert.equal(f.id, 'a1');
+  assert.equal(f.filePath, 'x/a1.flac');
+  assert.equal(f.fileSuffix, 'flac');
+  assert.equal((await fetch(`${base}/library/track/nope/file`, { headers: auth })).status, 404);
+  assert.equal((await fetch(`${base}/library/track/a1/file`)).status, 401);
+});
