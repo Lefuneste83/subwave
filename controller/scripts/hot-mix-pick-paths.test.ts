@@ -407,7 +407,7 @@ test('requests: a Hot Mix show refuses them by default, naming the show', async 
   await onAir(MIX);
   const res = await ask();
   assert.equal(res.status, 503);
-  assert.match(((await res.json()) as any).message, /closed during Future Frequencies/);
+  assert.match(((await res.json()) as any).message, /^Future Frequencies is mixed live/);
 });
 
 test('requests: the toggle opens them, and a show without Hot Mix is untouched', async () => {
@@ -417,7 +417,7 @@ test('requests: the toggle opens them, and a show without Hot Mix is untouched',
     // Past this gate the route goes on to its own checks; whatever it answers,
     // it is not the Hot Mix refusal.
     const body: any = await res.json().catch(() => ({}));
-    assert.doesNotMatch(String(body.message ?? ''), /continuous mix/);
+    assert.doesNotMatch(String(body.message ?? ''), /mixed live/);
   }
 });
 
@@ -427,7 +427,7 @@ const stateRequests = async () => ((await (await realFetch(`${base}/state`)).jso
 
 test('/state publishes the closure before anyone sends, with the same line the route refuses with', async () => {
   await onAir(MIX);
-  assert.deepEqual(await stateRequests(), { open: false, message: "Requests are closed during Future Frequencies: it's a continuous mix." });
+  assert.deepEqual(await stateRequests(), { open: false, message: "Future Frequencies is mixed live, track into track. Nothing is prerecorded, so requests are closed until the set ends." });
   await onAir({ hotMix: { enabled: true, closeRequests: false } });
   assert.deepEqual(await stateRequests(), { open: true });
   await onAir({});
@@ -452,8 +452,8 @@ test('requestsClosure: the one decision, pure', () => {
   assert.deepEqual(requestsClosure({ disabledByEnv: false, stationEnabled: undefined, show: null }), { open: true });
   assert.deepEqual(requestsClosure({ disabledByEnv: true, stationEnabled: true, show: null }), { open: false, reason: 'station', message: 'Requests are temporarily closed.' });
   assert.equal((requestsClosure({ disabledByEnv: false, stationEnabled: false, show: mix }) as any).reason, 'station');
-  assert.deepEqual(requestsClosure({ disabledByEnv: false, stationEnabled: true, show: mix }), { open: false, reason: 'hot-mix', message: "Requests are closed during Late Mix: it's a continuous mix." });
-  assert.match((requestsClosure({ disabledByEnv: false, stationEnabled: true, show: { hotMix: { enabled: true } } }) as any).message, /during this show/);
+  assert.deepEqual(requestsClosure({ disabledByEnv: false, stationEnabled: true, show: mix }), { open: false, reason: 'hot-mix', message: "Late Mix is mixed live, track into track. Nothing is prerecorded, so requests are closed until the set ends." });
+  assert.match((requestsClosure({ disabledByEnv: false, stationEnabled: true, show: { hotMix: { enabled: true } } }) as any).message, /^This show is mixed live/);
 });
 
 // ─── The saved show ─────────────────────────────────────────────────────────
