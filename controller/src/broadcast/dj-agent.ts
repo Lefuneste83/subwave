@@ -64,7 +64,7 @@ import { shortlistSourceHint } from '../music/shortlist-presentation.js';
 import type { Persona } from './queue/types.js';
 import { recordShortlistPick } from '../stats.js';
 import { predecessorContext, predecessorPrompt } from './dj-agent/pick-context.js';
-import { groundPickNote, onAirPickNoteLanguage, pickNoteReferences, stationClaimNames } from './dj-agent/pick-note.js';
+import { groundPickNote, onAirPickNoteLanguage, pickNoteReferences, pickNoteWithoutScriptLeak, stationClaimNames } from './dj-agent/pick-note.js';
 import type { PickNoteLanguage } from './dj-agent/pick-reason-language.js';
 
 // Re-exported so every existing `from './dj-agent.js'` import keeps working —
@@ -1121,6 +1121,13 @@ async function pickViaSelectionRoute(queue, ctx, { wantLink, audioWaypoint = nul
     object.reason = replacementSurvivedGuards
       ? shortlistReasonForLeanings(object.reason, true, song, noteLanguage)
       : shortlistClauseSelectionReason(song, object.musicalReason, noteLanguage);
+    // The review's own sentence reaches here ungrounded: a word from another
+    // writing system comes out of it, and the plain credit replaces it only
+    // when too little is left.
+    if (typeof object.reason === 'string') {
+      const cleaned = pickNoteWithoutScriptLeak(queue, object.reason, { track: song, candidates: extras.seen.values(), pickAnchor, show: activeShow, route: 'shortlist' });
+      if (cleaned !== object.reason) object.reason = cleaned || shortlistClauseSelectionReason(song, '', noteLanguage);
+    }
     if (shortlistPickResolution) {
       shortlistPickResolution.final = agenticTrackRef(song);
       shortlistPickResolution.reason = object.reason ?? null;

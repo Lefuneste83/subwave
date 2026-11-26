@@ -84,7 +84,10 @@ export function trimLinkToIntro(
   text: string | null | undefined,
   song: any,
   persona: Persona | null = null,
-  queue: { log?: (kind: string, message: string) => void } | null = null,
+  queue: {
+    log?: (kind: string, message: string) => void;
+    scriptLeakDropped?: (text: string, kind: string, opts: { persona?: Persona | null; names?: readonly unknown[] }) => boolean;
+  } | null = null,
 ): string | null {
   const raw = (text || '').trim();
   if (!raw) return null;
@@ -101,6 +104,10 @@ export function trimLinkToIntro(
     return null;
   }
   const display = normalizeForDisplay(clean);
+  // A word from another writing system goes here too, before the budget and
+  // before the caller records the line as the pick's `say` (queue.speakable
+  // is the rule's gate; the free-text writer has had its one retry).
+  if (display && queue?.scriptLeakDropped?.(display, 'link', { persona: speaker, names: [song?.title, song?.artist, song?.album] })) return null;
   // Non-DJ personas skip the budget but not the cleanup.
   if (!speaker?.djMode) return display || null;
   // A DURATION budget, so it is counted on the words the engine will read.

@@ -205,7 +205,9 @@ test('announce trims a leaked null before TTS, in raw or tag-wrapped form', asyn
   const line = 'Πάμε με τον "Sundowner".';
   for (const raw of [`${line} null`, `${line}</text>\n<parameter name="sfx">null`]) {
     spoken = [];
-    const out = await queue.announce(raw, 'programme-feature', { persona: HOST as never });
+    // A Greek line is spoken by a Greek host: the script-leak gate drops Greek
+    // words from an English (unset) one.
+    const out = await queue.announce(raw, 'programme-feature', { persona: { ...HOST, language: 'Greek' } as never });
     assert.equal(out.accepted, true);
     assert.deepEqual(spoken, [line], JSON.stringify(raw));
   }

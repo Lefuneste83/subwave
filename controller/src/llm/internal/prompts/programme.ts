@@ -229,6 +229,7 @@ export async function generateProgrammeIntro({ show, plan = null, persona = null
     prompt: decoratePrompt(ctxLines.join('\n'), { kind: 'programme-intro', recap, recentOpeners }),
     temperature: 0.95, topP: 0.92, repeatPenalty: 1.2, seed: randomSeed(),
     kind: 'generateProgrammeIntro',
+    speaker,
   });
 }
 
@@ -247,6 +248,7 @@ export async function generateProgrammeOutro({ show, plan = null, persona = null
     prompt: decoratePrompt(ctxLines.join('\n'), { kind: 'programme-outro', recap, recentOpeners }),
     temperature: 0.95, topP: 0.92, repeatPenalty: 1.2, seed: randomSeed(),
     kind: 'generateProgrammeOutro',
+    speaker,
   });
 }
 
@@ -274,6 +276,7 @@ export async function generateProgrammeFeature({ show, topic, plan = null, perso
     prompt: decoratePrompt(ctxLines.join('\n'), { kind: 'programme-feature', recap, recentOpeners }),
     temperature: 0.95, topP: 0.92, repeatPenalty: 1.2, seed: randomSeed(),
     kind: 'generateProgrammeFeature',
+    speaker,
   });
 }
 
