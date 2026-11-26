@@ -13,7 +13,8 @@
 //     `phrase`, split by whether its intro holds a phrase;
 //   - the structure's bars are parsed only for a track that reaches the
 //     phrase check;
-//   - canEnterOnPhrase says what planPhraseWindow says about an incoming intro;
+//   - canEnterOnPhrase says what planPhraseWindow says about an incoming intro
+//     at the longest phrase, its depth and a groove before the entry included;
 //   - a show's reach is the show editor's (withinCurveReach), octave-safe, and
 //     a show without a curve reaches every known tempo;
 //   - the pass lands its counts in the snapshot; the read never counts (the
@@ -151,11 +152,23 @@ test('canEnterOnPhrase agrees with planPhraseWindow on the incoming intro', () =
   const out = bars(16, 48);
   for (const k of ['kick', 'bass', 'mid'] as const) out[k].splice(48, 16, ...Array(16).fill(-20));
   const a = { points: structurePoints(out), runs: out.runs, cueInSec: 0, endSec: 10_000 };
-  for (const intro of [4, 7, 8, 9, 16]) {
+  // At the longest phrase a show can ask for, the shallowest entry: the
+  // intro's length, its depth (over 56 bars skipped: refused) and a groove
+  // before the entry (refused) all say the same on both sides.
+  const grooved = (intro: number) => {
     const b = bars(intro);
+    for (const k of ['kick', 'bass', 'mid'] as const) b[k].fill(0, 0, 8);
+    return b;
+  };
+  const cases: Array<[string, ReturnType<typeof bars>, boolean]> = [
+    ['4', bars(4), false], ['7', bars(7), false], ['8', bars(8), true], ['9', bars(9), true], ['16', bars(16), true],
+    ['88', bars(88), true], ['89', bars(89), false], ['96', bars(96), false], ['40 with a groove', grooved(40), false],
+  ];
+  for (const [name, b, enters] of cases) {
     const points = structurePoints(b);
-    const v = planPhraseWindow({ bars: 8, a, b: { points, runs: b.runs, cueInSec: 0 } });
-    assert.equal(canEnterOnPhrase(points), v.ok, `intro ${intro}`);
+    const v = planPhraseWindow({ bars: 32, a, b: { points, runs: b.runs, cueInSec: 0 } });
+    assert.equal(canEnterOnPhrase(points, b.runs), v.ok, `intro ${name}`);
+    assert.equal(v.ok, enters, `intro ${name}: ${JSON.stringify(v)}`);
   }
 });
 

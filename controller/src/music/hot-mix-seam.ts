@@ -26,9 +26,10 @@
 // A phrase window (music/phrase-mix-policy.ts, a show's `phraseMix`) names both
 // downbeats instead of searching for them: the outgoing track's overlap starts
 // on the downbeat at `aStartSec`, and the incoming one on its downbeat at
-// `bEntrySec`, however deep into the record that is (the window skips its
-// intro on purpose). Every other rule stands, and a window the grids do not
-// hold is refused, never moved: the caller then searches as before. Its
+// `bEntrySec`, past the 30 s cue-in search (the window skips its intro on
+// purpose, within phrase-mix-policy's own depth guards). Every other rule
+// stands, and a window the grids do not hold is refused, never moved: the
+// caller then searches as before. Its
 // structure counts four-beat bars of the incoming track's own beat, so an
 // incoming tempo folded an octave would put its first hard kick off the cut,
 // and is refused too; otherwise that kick plays exactly `leadSec` after the

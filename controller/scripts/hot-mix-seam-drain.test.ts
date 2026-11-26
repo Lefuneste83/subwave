@@ -399,6 +399,16 @@ test('phrase mix on, a window it cannot use: the searched seam, and the booth sa
   assert.match(logText(), /phrase mix not used for "out-120" → "in-shift-123" \(the phrase window's incoming downbeat is not on a trusted grid\): beat mix as before/);
   assert.equal(p.successor.mixIn?.inCueSec, 0.2);
   assert.equal(p.successor.mixIn?.punchSec, undefined);
+  // An entry that would skip more than a DJ intro: an 80-bar intro entered
+  // 8 bars before its kick is 72 bars in. B starts on its first downbeat.
+  queue.djLog.length = 0;
+  const D = track('in-deep-123', 123, 200);
+  structure(D.id, 200, B_BAR_US, 150, 81, 140);
+  p = pairOf(A, D);
+  await plan(p.item, p.successor);
+  assert.match(logText(), /phrase mix not used for "out-120" → "in-deep-123" \(the entry at bar 73 is \d+s into the incoming track \(over 56 bars\)\): beat mix as before/);
+  assert.equal(p.successor.mixIn?.inCueSec, 0.2);
+  assert.equal(p.successor.mixIn?.punchSec, undefined);
 });
 
 test('phrase mix off: exactly the seam it always was, structure or not', async () => {
