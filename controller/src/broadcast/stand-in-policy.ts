@@ -117,3 +117,20 @@ export function standInToken(text: string | null | undefined): string | null {
 export function withoutStandIns<Line extends { text: string }>(lines: readonly Line[], castNames: readonly string[]): Line[] {
   return lines.filter(line => !standInToken(stripSpeakerLabel(line.text, castNames)));
 }
+
+// A bare `null` or `undefined` standing at either end of a line, apart from
+// the words: a missing value printed into the text (a tool-call field leaking
+// into the spoken one ended a line `…Sundowner". null` on air). Lower case
+// only, as code prints them, and only where no speech puts them: after the
+// line's last sentence stop, or opening a line before more words. "Wir fangen
+// bei null an." and "The plan was undefined." stay; so does a capitalised
+// "Null." answering a question. Trimmed rather than dropping the line: the
+// rest is real speech. Returns the line unchanged when there is nothing to trim.
+const STRAY_TAIL = /([.!?…]["'”’»)\]]*)\s+(?:null|undefined)[.!?]?\s*$/u;
+const STRAY_HEAD = /^\s*(?:null|undefined)\s+(?=[\p{L}\p{N}"'“‘«])/u;
+
+export function withoutStrayNullTokens(text: string): string {
+  let out = text.replace(STRAY_TAIL, '$1');
+  out = out.replace(STRAY_HEAD, '');
+  return out === text ? text : out.trim();
+}

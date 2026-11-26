@@ -28,7 +28,7 @@ writeSkill('forced-words');
 const settings = await import('../src/settings.js');
 const session = await import('../src/broadcast/session.js');
 const { queue } = await import('../src/broadcast/queue.js');
-const { standInToken } = await import('../src/broadcast/stand-in-policy.js');
+const { standInToken, withoutStrayNullTokens } = await import('../src/broadcast/stand-in-policy.js');
 const { enqueuePick, trimLinkToIntro } = await import('../src/broadcast/dj-agent/enqueue.js');
 const { normalizeForDisplay } = await import('../src/audio/speech-text.js');
 const { writeSilentWav } = await import('../src/audio/wav-silence.js');
@@ -107,6 +107,22 @@ test('an empty line is the callers\' own "no line" case, not a stand-in', () => 
   assert.equal(standInToken(null), null);
 });
 
+test('a bare null or undefined at either end of a line is trimmed off', () => {
+  // Aired: a tool-call field leaked into the spoken one, and its null was read out.
+  assert.equal(withoutStrayNullTokens('Πάμε με τον "Sundowner". null'), 'Πάμε με τον "Sundowner".');
+  assert.equal(withoutStrayNullTokens('That was Efdemin! undefined.'), 'That was Efdemin!');
+  assert.equal(withoutStrayNullTokens('Next, «Moon».  null  '), 'Next, «Moon».');
+  assert.equal(withoutStrayNullTokens('null Here comes the rain.'), 'Here comes the rain.');
+  assert.equal(withoutStrayNullTokens('undefined «Moon» από το 1985.'), '«Moon» από το 1985.');
+});
+
+test('null and undefined as words, or as a whole line, are not trimmed', () => {
+  for (const line of [
+    'Wir fangen bei null an.', 'Das Spiel endet eins zu null', 'The plan was undefined.',
+    'Wie viele? Null.', 'null', 'undefined', 'Null Komma nichts.', 'Nothing here, null', 'A null result.',
+  ]) assert.equal(withoutStrayNullTokens(line), line, JSON.stringify(line));
+});
+
 // ── the speech paths ─────────────────────────────────────────────────────────
 
 type Seams = {
@@ -183,6 +199,24 @@ test('announce still airs real speech', async () => {
   const out = await queue.announce(line, 'programme-feature', { persona: HOST as never });
   assert.equal(out.accepted, true);
   assert.deepEqual(spoken, [line]);
+});
+
+test('announce trims a leaked null before TTS, in raw or tag-wrapped form', async () => {
+  const line = 'Πάμε με τον "Sundowner".';
+  for (const raw of [`${line} null`, `${line}</text>\n<parameter name="sfx">null`]) {
+    spoken = [];
+    const out = await queue.announce(raw, 'programme-feature', { persona: HOST as never });
+    assert.equal(out.accepted, true);
+    assert.deepEqual(spoken, [line], JSON.stringify(raw));
+  }
+});
+
+test('the trimmed line is judged as it airs, so a render-time recheck agrees', () => {
+  // A stand-in hidden behind the stray token is still a stand-in once trimmed.
+  assert.equal(queue.speakable('TBD. null', 'programme-feature'), '');
+  assert.equal(queue.speakable('Πάμε. null', 'programme-feature'), 'Πάμε.');
+  assert.equal(queue.speakable(queue.speakable('Πάμε. null', 'x'), 'x'), 'Πάμε.');
+  assert.equal(queue.speakable('Πάμε. null', 'x', { verbatim: true }), 'Πάμε. null', 'operator text is theirs');
 });
 
 test('the deferred path drops a stand-in too', async () => {

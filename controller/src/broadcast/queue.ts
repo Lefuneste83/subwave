@@ -67,7 +67,7 @@ import { recordPlaybackFailure } from '../observability/playback-failures.js';
 import { djCallsAllowed, presentListeners } from './listeners.js';
 import { trackLineVoiceAllowed } from './voice-policy.js';
 import { speakClockAllowed, stationIdDaypartDrifted, stationIdDaypartStamp } from './clock-policy.js';
-import { standInToken } from './stand-in-policy.js';
+import { standInToken, withoutStrayNullTokens } from './stand-in-policy.js';
 import { CLOCK_CHECK_EXEMPT_KINDS, isEnglishSpeech, reconcileClockPhrases, stripClockPhrases } from './clock-phrases.js';
 import { fuzzyAirTime } from '../llm/internal/prompts/scripts.js';
 import {
@@ -2976,12 +2976,20 @@ class Queue {
   // request intro (push, cleanUnrenderedIntro). `text` is the line with the
   // caller's label off and not yet normalised, because stand-in-policy reads it
   // both before and after normalising and past any other label; the return is
-  // the display form that airs. A stand-in line is dropped whole. An empty
+  // the display form that airs. A bare null/undefined at either end is trimmed
+  // first (stand-in-policy.withoutStrayNullTokens). A stand-in line is dropped whole. An empty
   // return is the callers' existing "nothing to air" case, so a dropped feature
   // falls back exactly as a stood-down skill does. Operator text is exempt: a
   // raw /dj/say (`verbatim`) and a jingle's script, which the operator typed
   // (jingles.create from the Imaging page and onboarding).
   speakable(text: string, kind: string, { verbatim = false } = {}): string {
+    // Judged on the display form, where a leaked tag around the token is gone,
+    // and then judged as that form, so the render's second pass agrees.
+    if (!verbatim) {
+      const shown = normalizeForDisplay(text);
+      const trimmed = withoutStrayNullTokens(shown);
+      if (trimmed !== shown) text = trimmed;
+    }
     const token = verbatim ? null : standInToken(text);
     if (!token) return normalizeForDisplay(text);
     this.log('scheduler', `${kind}: dropped a stand-in line ("${token}") instead of airing it`);

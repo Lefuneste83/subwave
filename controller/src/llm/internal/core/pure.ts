@@ -797,11 +797,49 @@ export function snapV3Stability(v: number): number {
 // never per-field: the AI SDK renders tool inputSchemas with io:'input', where a
 // per-field preprocess accepts `undefined` and so drops the field from the
 // parent's `required` array in the schema every provider sees.
+// Leaked tool-call markup (observed on a Qwen model behind an OpenAI-compatible
+// server): the server's XML tool-call parser closed the first argument late,
+// so `text` arrived as `…the line.</text>\n<parameter name="sfx">null`. The
+// display pass strips tags but keeps what sits between them, and the DJ read
+// the sibling field's `null` out on air. A tool-call tag never belongs in a
+// model's string value, so the string ends where the first one starts, and a
+// closing tag left dangling at that cut goes with it. A value that starts with
+// such a tag is left for normal validation: cutting it would empty it.
+const LEAKED_TOOL_MARKUP = /<\/?(?:parameter|function|tool_call)\b[^>\r\n]{0,120}>|<(?:parameter|function)=[^>\r\n]{0,120}>/i;
+
+export function cutLeakedToolMarkup(value: string): string {
+  const m = LEAKED_TOOL_MARKUP.exec(value);
+  if (!m) return value;
+  const head = value.slice(0, m.index).replace(/(?:\s*<\/[A-Za-z_][\w-]{0,40}>)+\s*$/, '').trimEnd();
+  return /[\p{L}\p{N}]/u.test(head) ? head : value;
+}
+
+// Every string in the value, through arrays and plain objects (an exchange's
+// `lines[].text`), returning the same reference when nothing was cut.
+function cutLeakedToolMarkupDeep(v: unknown): unknown {
+  if (typeof v === 'string') return cutLeakedToolMarkup(v);
+  if (Array.isArray(v)) {
+    const mapped = v.map(cutLeakedToolMarkupDeep);
+    return mapped.some((x, i) => x !== v[i]) ? mapped : v;
+  }
+  if (v && typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype) {
+    let out: Record<string, unknown> | null = null;
+    for (const [k, x] of Object.entries(v)) {
+      const y = cutLeakedToolMarkupDeep(x);
+      if (y !== x) (out ??= { ...(v as Record<string, unknown>) })[k] = y;
+    }
+    return out ?? v;
+  }
+  return v;
+}
+
 export function coerceModelPayload(raw: unknown, schema: z.ZodObject<z.ZodRawShape>): unknown {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
   const out: Record<string, unknown> = { ...raw };
   for (const [key, field] of Object.entries(schema.shape) as [string, z.ZodTypeAny][]) {
     let v = out[key];
+    const cut = cutLeakedToolMarkupDeep(v);
+    if (cut !== v) v = out[key] = cut;
     if ((v === 'null' || v === undefined) && field.safeParse(null).success) {
       out[key] = null;
       continue;
