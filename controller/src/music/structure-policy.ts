@@ -15,11 +15,18 @@
 // (scratch/onair/trim/structure.py):
 //   - a FULL bar is a full section: hard kick (kick level >= HARD_KICK_DB),
 //     bass present (measured > FULL_BASS_DB: stored >= it), mids (>= FULL_MID_DB) and a kick on at
-//     least FULL_MIN_KICKS beats. One lone non-full bar between two full ones
-//     is a fill and counts as full; two in a row break the run.
+//     least FULL_MIN_KICKS beats. Up to FILL_BARS non-full bars between two
+//     full ones are a fill and count as full; three in a row break the run. A
+//     producer's drum fill at the end of a phrase is often two bars long (the
+//     kick dropped 7-11 dB): a one-bar tolerance split such a track's main
+//     sections into runs of 14-15 bars, none long enough to count, and put its
+//     first hard kick after the last breakdown, minutes into the record.
 //   - the full section starts at the first run of >= FULL_RUN_BARS full bars
 //     (`fullSectionStart`), and ends at the last bar of the last such run
-//     (`lastHardKick`).
+//     (`lastHardKick`). `firstFullPhrase` is the first bar of the first run of
+//     at least a phrase (PHRASE_BARS) of full bars, which may be a shorter
+//     groove before the full section: a phrase-mix entry never skips a
+//     phrase of it (music/phrase-mix-policy.ts).
 //   - the first hard kick is where the kick RETURNS: the bar after the last
 //     dip (>= DIP_MIN_BARS consecutive bars with the kick below HARD_KICK_DB)
 //     within the DIP_LOOKBACK_BARS bars before the full section; with no such
@@ -39,6 +46,7 @@ export const FULL_BASS_DB = -12;
 export const FULL_MID_DB = -5.5;
 export const FULL_MIN_KICKS = 3;
 export const FULL_RUN_BARS = 16;
+export const FILL_BARS = 2;
 export const DIP_LOOKBACK_BARS = 24;
 export const DIP_MIN_BARS = 4;
 export const PHRASE_BARS = 8;
@@ -61,30 +69,40 @@ export interface StructurePoints {
   fullSectionStart: number | null;
   firstHardKick: number | null;
   lastHardKick: number | null;
+  firstFullPhrase: number | null;
   introBars: number | null;
   outroBars: number | null;
 }
 
 const barCount = (b: StructureRuleInput) => Math.min(b.kick.length, b.kicks.length, b.bass.length, b.mid.length);
 
-// Full-section bars, the lone-fill tolerance applied. Index i = bar i + 1.
+// Full-section bars, the fill tolerance applied: a gap of at most FILL_BARS
+// non-full bars with a full bar on each side counts as full. Index i = bar i + 1.
 export function fullBars(b: StructureRuleInput): boolean[] {
   const n = barCount(b);
   const raw: boolean[] = [];
   for (let i = 0; i < n; i++) {
     raw.push(b.kick[i] >= HARD_KICK_DB && b.bass[i] >= FULL_BASS_DB && b.mid[i] >= FULL_MID_DB && b.kicks[i] >= FULL_MIN_KICKS);
   }
-  return raw.map((f, i) => f || (i > 0 && i < n - 1 && raw[i - 1] && raw[i + 1]));
+  const full = raw.slice();
+  for (let i = 0; i < n;) {
+    if (raw[i]) { i++; continue; }
+    let j = i;
+    while (j < n && !raw[j]) j++;
+    if (i > 0 && j < n && j - i <= FILL_BARS) full.fill(true, i, j);
+    i = j;
+  }
+  return full;
 }
 
-// Runs of >= FULL_RUN_BARS full bars, as [first, last] indices (0-based).
-function fullRuns(full: readonly boolean[]): Array<[number, number]> {
+// Runs of >= `min` full bars, as [first, last] indices (0-based).
+function fullRuns(full: readonly boolean[], min: number): Array<[number, number]> {
   const runs: Array<[number, number]> = [];
   for (let i = 0; i < full.length;) {
     if (!full[i]) { i++; continue; }
     let j = i;
     while (j < full.length && full[j]) j++;
-    if (j - i >= FULL_RUN_BARS) runs.push([i, j - 1]);
+    if (j - i >= min) runs.push([i, j - 1]);
     i = j;
   }
   return runs;
@@ -92,9 +110,10 @@ function fullRuns(full: readonly boolean[]): Array<[number, number]> {
 
 export function structurePoints(b: StructureRuleInput): StructurePoints {
   const n = barCount(b);
-  const runs = fullRuns(fullBars(b));
+  const full = fullBars(b);
+  const runs = fullRuns(full, FULL_RUN_BARS);
   if (!runs.length) {
-    return { bars: n, fullSectionStart: null, firstHardKick: null, lastHardKick: null, introBars: null, outroBars: null };
+    return { bars: n, fullSectionStart: null, firstHardKick: null, lastHardKick: null, firstFullPhrase: null, introBars: null, outroBars: null };
   }
   const main = runs[0][0];
   // The dips (kick below the hard level) in the look-back window, as runs.
@@ -113,6 +132,7 @@ export function structurePoints(b: StructureRuleInput): StructurePoints {
     fullSectionStart: main + 1,
     firstHardKick: first + 1,
     lastHardKick: last + 1,
+    firstFullPhrase: fullRuns(full, PHRASE_BARS)[0][0] + 1,
     introBars: first,
     outroBars: n - 1 - last,
   };

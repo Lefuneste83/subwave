@@ -35,8 +35,8 @@ export const TIER_COPY: Record<TransitionTierId, TierCopy> = {
 export const SEAM_NOTE = 'Each track’s best case. A seam needs both sides: two phrase-ready tracks make a phrase mix, and the weaker side sets the seam.';
 
 const PART_COPY: Record<TransitionPartId, { label: string; title: string }> = {
-  'phrase-both': { label: 'Enters and leaves on a phrase', title: 'A full section, and at least 8 bars before its first big kick.' },
-  'phrase-out-only': { label: 'Leaves on a phrase, enters on the beat', title: 'Its intro holds under 8 bars before the first big kick, so it cannot enter on a phrase.' },
+  'phrase-both': { label: 'Enters and leaves on a phrase', title: 'A full section, and a phrase entry before its first big kick that skips neither a main section nor more than a 64-bar intro.' },
+  'phrase-out-only': { label: 'Leaves on a phrase, enters on the beat', title: 'Its intro holds under 8 bars before the first big kick, or entering a phrase before it would skip a main section or more than a 64-bar intro, so it enters on the beat.' },
   'no-full-section': { label: 'No full section', title: 'Structure measured, but no 16-bar run with kick, bass and mids together: nothing to place a phrase on.' },
   'structure-unmeasurable': { label: 'Structure unmeasurable', title: 'The analyzer could not measure its bars.' },
   'structure-failed': { label: 'Structure measurement failed', title: 'The structure measurement failed or could not be read; a later run tries again.' },

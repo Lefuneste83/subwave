@@ -2,13 +2,16 @@
 // (music/structure-policy.ts; the `structure` facet's stored arrays). Pure:
 // synthetic arrays only. Pinned:
 //   - a full-section bar needs a hard kick, bass, mids and a kick on most
-//     beats; one lone non-full bar between two full ones is a fill, not a gap;
+//     beats; up to two non-full bars between two full ones are a fill, not a
+//     gap (a producer's two-bar drum fill), three are a gap;
 //   - the full section is the first run of >= 16 full bars, and the first hard
 //     kick moves back to where the kick returns after the last dip of >= 4
 //     bars in the 24 bars before it (a 1-2 bar fill is no dip);
 //   - the operator's reference track: first hard kick at bar 65;
 //   - a kick at full strength from bar 1;
 //   - no full run at all: no points;
+//   - the first run of a phrase (8) of full bars, which may come before the
+//     full section;
 //   - phrase snapping (8-bar phrases counted from bar 1) and the bar -> ms map.
 // Run: `npm test -- structure-policy`.
 
@@ -43,13 +46,16 @@ test('the constants are the approved ones', () => {
   assert.equal(P.isSilentBar(-35), false);
 });
 
-test('a full bar needs all four conditions; a lone gap is tolerated, two are not', () => {
-  const b = full(10);
+test('a full bar needs all four conditions; a gap of up to two bars is tolerated, three are not', () => {
+  const b = full(11);
   set(b, 'kick', 2, 2, -4.5);   // soft kick
   set(b, 'bass', 4, 4, -12.5);  // no bass (stored step below -12)
   set(b, 'mid', 6, 6, -6);      // thin mids
-  set(b, 'kicks', 8, 9, 2);     // kick on two beats only, two bars running
-  assert.deepEqual(P.fullBars(b), [true, true, true, true, true, true, true, false, false, true]);
+  set(b, 'kicks', 8, 10, 2);    // kick on two beats only, three bars running
+  assert.deepEqual(P.fullBars(b), [true, true, true, true, true, true, true, false, false, false, true]);
+  // Two bars running (a two-bar drum fill, the kick 7 dB down) are a fill.
+  assert.deepEqual(P.fullBars(set(full(6), 'kick', 3, 4, -7)), Array(6).fill(true));
+  assert.equal(P.FILL_BARS, 2);
   // At the thresholds exactly: kick -4, mid -5.5 and bass -12 are full, kicks
   // 3 too (stored levels are the 0.5 dB step at or below the measurement, so
   // a stored -12 is a measurement in [-12, -11.5): above -12).
@@ -62,8 +68,8 @@ test('a full bar needs all four conditions; a lone gap is tolerated, two are not
 test('the reference track: the hard kick is bar 65', () => {
   // Kick at full strength 1-28, -7 dB 29-32, full 33-56, -7 dB 57-60,
   // -14 dB 61-64, full from 65 with a 2-bar -7 dB fill at 79-80. Mids -6/-7
-  // until 64, >= -5 from 65. So the first full RUN starts at 81, and the kick
-  // returned at 65 after its last real dip (57-64); the fill is no dip.
+  // until 64, >= -5 from 65. So the first full RUN starts at 65 (the fill is
+  // bridged), and the kick returned there after its last real dip (57-64).
   const n = 160;
   const b = full(n);
   set(b, 'kick', 29, 32, -7);
@@ -75,8 +81,9 @@ test('the reference track: the hard kick is bar 65', () => {
   set(b, 'kick', 145, n, -20); // an outro without the kick
   const s = P.structurePoints(b);
   assert.equal(s.bars, n);
-  assert.equal(s.fullSectionStart, 81);
+  assert.equal(s.fullSectionStart, 65);
   assert.equal(s.firstHardKick, 65);
+  assert.equal(s.firstFullPhrase, 65);
   assert.equal(s.lastHardKick, 144);
   assert.equal(s.introBars, 64);
   assert.equal(s.outroBars, 16);
@@ -87,7 +94,7 @@ test('the reference track: the hard kick is bar 65', () => {
 test('a kick at full strength from bar 1', () => {
   const b = set(full(100), 'kick', 97, 100, -30);
   const s = P.structurePoints(b);
-  assert.deepEqual(s, { bars: 100, fullSectionStart: 1, firstHardKick: 1, lastHardKick: 96, introBars: 0, outroBars: 4 });
+  assert.deepEqual(s, { bars: 100, fullSectionStart: 1, firstHardKick: 1, lastHardKick: 96, firstFullPhrase: 1, introBars: 0, outroBars: 4 });
 });
 
 test('a dip shorter than 4 bars, or further back than 24 bars, does not move the hard kick', () => {
@@ -103,14 +110,14 @@ test('a dip shorter than 4 bars, or further back than 24 bars, does not move the
 });
 
 test('no run of 16 full bars: no points', () => {
-  const b = set(full(40), 'kick', 16, 16, -10);
-  set(b, 'kick', 17, 17, -10);
-  // Two bars are never bridged: 1-15 (15 bars) and 18-40 (23 bars), the
-  // second is the run.
-  assert.equal(P.structurePoints(b).fullSectionStart, 18);
+  const b = set(full(40), 'kick', 16, 18, -10);
+  // Three bars are never bridged: 1-15 (15 bars) and 19-40 (22 bars), the
+  // second is the run; the first is still a phrase of full bars.
+  assert.equal(P.structurePoints(b).fullSectionStart, 19);
+  assert.equal(P.structurePoints(b).firstFullPhrase, 1);
   const none = set(full(30), 'mid', 1, 30, -9);
   assert.deepEqual(P.structurePoints(none), {
-    bars: 30, fullSectionStart: null, firstHardKick: null, lastHardKick: null, introBars: null, outroBars: null,
+    bars: 30, fullSectionStart: null, firstHardKick: null, lastHardKick: null, firstFullPhrase: null, introBars: null, outroBars: null,
   });
   assert.equal(P.structurePoints({ kick: [], kicks: [], bass: [], mid: [] }).bars, 0);
 });

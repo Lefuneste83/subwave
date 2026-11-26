@@ -106,7 +106,7 @@ export function readinessOf(f: ReadinessFacts): Readiness {
   const phrase = phraseStructureOf(f.structure, g.measuredAt);
   if (phrase.ok) {
     if (canLeaveOnPhrase(phrase.points)) {
-      return { tier: 'phrase', part: canEnterOnPhrase(phrase.points) ? 'phrase-both' : 'phrase-out-only', mixBpm };
+      return { tier: 'phrase', part: canEnterOnPhrase(phrase.points, phrase.runs) ? 'phrase-both' : 'phrase-out-only', mixBpm };
     }
     return { tier: 'beat', part: 'no-full-section', mixBpm };
   }

@@ -6513,7 +6513,7 @@ export type TransitionTierId = (typeof TRANSITION_TIER_IDS)[number];
 export const TRANSITION_PART_IDS = [
   // phrase
   'phrase-both',             // leaves and enters on a phrase
-  'phrase-out-only',         // leaves on a phrase; its intro holds under 8 bars
+  'phrase-out-only',         // leaves on a phrase; cannot enter on one (short or deep intro)
   // beat: why no phrases
   'no-full-section',         // structure measured, no 16-bar full section
   'structure-unmeasurable',  // the analyzer could not measure it (reason)

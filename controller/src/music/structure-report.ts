@@ -20,7 +20,7 @@ export interface StructureReportRow extends StructurePoints {
   lastHardKickEndMs: number | null;
 }
 
-const empty: StructurePoints = { bars: 0, fullSectionStart: null, firstHardKick: null, lastHardKick: null, introBars: null, outroBars: null };
+const empty: StructurePoints = { bars: 0, fullSectionStart: null, firstHardKick: null, lastHardKick: null, firstFullPhrase: null, introBars: null, outroBars: null };
 
 // One row per known id (unknown ids are left out); no ids = every track with a
 // measured structure.
