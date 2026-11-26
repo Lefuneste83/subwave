@@ -27,8 +27,8 @@ export function requestsClosure(input: { disabledByEnv: boolean; stationEnabled:
     return { open: false, reason: 'station', message: REQUESTS_CLOSED_MESSAGE };
   }
   if (!takesRequests(input.show)) {
-    const name = typeof input.show?.name === 'string' && input.show.name.trim() ? input.show.name.trim() : 'this show';
-    return { open: false, reason: 'hot-mix', message: `Requests are closed during ${name}: it's a continuous mix.` };
+    const name = typeof input.show?.name === 'string' && input.show.name.trim() ? input.show.name.trim() : 'This show';
+    return { open: false, reason: 'hot-mix', message: `${name} is mixed live, track into track. Nothing is prerecorded, so requests are closed until the set ends.` };
   }
   return { open: true };
 }
