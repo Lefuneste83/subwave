@@ -15,7 +15,7 @@ process.env.STATE_DIR = stateDir;
 
 const { spokenTimePhrase, spokenTimePhrases } = await import('../src/time.js');
 const { getClockContext } = await import('../src/context.js');
-const { nextHourlyTimeClause } = await import('../src/llm/internal/prompts/scripts.js');
+const { nextHourlyTimeClause, stationIdPrompt } = await import('../src/llm/internal/prompts/scripts.js');
 const settings = await import('../src/settings.js');
 const { generateHourlyTime, buildContextLines } = await import('../src/llm/dj.js');
 const { ANGLES } = await import('../src/llm/internal/prompts/context.js');
@@ -84,6 +84,48 @@ test('the hour-only and bare fallbacks are untouched, byte for byte', () => {
     'Say the time in natural spoken words ("two in the afternoon", "just gone eight") — never digits or 24-hour form.');
 });
 
+// The phrase is English. Told to "say exactly" it, a Greek DJ aired "…αργά —
+// just gone five in the morning." A persona that speaks no English gets it as
+// a reading to say in its own language; every other persona's clause is
+// byte-identical to what it was.
+const PREDATES = { spokenHour: 'five in the morning', spokenTime: 'just gone five in the morning' };
+const ENGLISH_CLAUSE = 'The time to announce is "just gone five in the morning" — say exactly that time, in natural spoken words — never digits or 24-hour form, never a different time.';
+
+test('an English or unset persona, or one that also speaks English, keeps the clause byte for byte', () => {
+  for (const persona of [null, {}, { language: '' }, { language: 'English' }, { language: 'en-GB' },
+    { language: 'English', alsoSpeaks: 'Greek' }, { language: 'Greek', alsoSpeaks: 'English' }]) {
+    assert.equal(nextHourlyTimeClause(PREDATES, persona), ENGLISH_CLAUSE, JSON.stringify(persona));
+  }
+});
+
+test('a persona that speaks no English is told to say the reading in its own language', () => {
+  for (const language of ['Greek', 'French', 'Japanese']) {
+    const clause = nextHourlyTimeClause(PREDATES, { language });
+    assert.ok(clause.startsWith(ENGLISH_CLAUSE), clause);
+    assert.ok(clause.includes(`say any you use in ${language}, in ${language} words`), clause);
+    assert.match(clause, /never the English phrase/);
+  }
+  const hourOnly = nextHourlyTimeClause({ spokenHour: 'five in the morning' }, { language: 'Greek' });
+  assert.match(hourOnly, /say any you use in Greek/);
+  assert.match(nextHourlyTimeClause(null, { language: 'Greek' }), /say any you use in Greek/);
+});
+
+test('generateHourlyTime hands a Greek persona the note, and an English one none', async () => {
+  const greek = await captureHourly(hourlyContext, false, { language: 'Greek' });
+  assert.match(greek.user, /The time to announce is "[^"]+" — say exactly that time.*say any you use in Greek, in Greek words/);
+  const english = await captureHourly(hourlyContext, false, { language: '' });
+  assert.doesNotMatch(english.user, /in English only|say any you use in/);
+});
+
+test('the station ID\'s daypart nudge carries the same note for a persona that speaks no English', () => {
+  const context = { clock: { spokenDaypart: 'in the evening' } };
+  const greek = stationIdPrompt({ context, persona: { name: 'Niki', language: 'Greek' } });
+  assert.match(greek, /say only "in the evening" — never the hour.*hour may have changed by then\)\. Time phrases given here are in English only to fix the reading: say any you use in Greek/);
+  const english = stationIdPrompt({ context, persona: { name: 'Niki', language: '' } });
+  assert.match(english, /hour may have changed by then\)\./);
+  assert.doesNotMatch(english, /in English only/);
+});
+
 test('the clock context carries the band, canonical wording first', () => {
   const clock: any = getClockContext();
   assert.ok(Array.isArray(clock.spokenTimeOptions));
@@ -91,7 +133,7 @@ test('the clock context carries the band, canonical wording first', () => {
   assert.ok(clock.spokenTimeOptions.length >= 3);
 });
 
-async function captureHourly(context: unknown, showWelcome = false) {
+async function captureHourly(context: unknown, showWelcome = false, personaOverride: Record<string, unknown> = {}) {
   const originalLlm = structuredClone(settings.get().llm);
   const realFetch = globalThis.fetch;
   const requests: Array<{ messages: Array<{ role: string; content: string }> }> = [];
@@ -110,7 +152,7 @@ async function captureHourly(context: unknown, showWelcome = false) {
     }) as typeof fetch;
     await generateHourlyTime({
       context, showWelcome,
-      persona: { name: 'Tom', soul: "Reads the weather like he's looked out the window", scriptLength: 'extended' },
+      persona: { name: 'Tom', soul: "Reads the weather like he's looked out the window", scriptLength: 'extended', ...personaOverride },
       recap: 'Earlier: a sunny spring Saturday.', recentOpeners: ['Just gone noon'],
     });
     assert.equal(requests.length, 1);

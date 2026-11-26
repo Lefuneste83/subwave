@@ -12,6 +12,8 @@ import {
   reconcileClockPhrases,
   isEnglishSpeech,
   CLOCK_CHECK_EXEMPT_KINDS,
+  spokenClockRule,
+  dropClockSentences,
 } from '../src/broadcast/clock-phrases.js';
 
 test('find: "just after ten" at 11:48 is off by 83', () => {
@@ -370,3 +372,20 @@ test('find: production phrases followed by a clause word still match', () => {
   assert.deepEqual(findClockPhrases('It is just past four-thirty, and the world is quiet.'), []);
 });
 
+test('spokenClockRule: English primary corrects, no English drops, English in the mix passes', () => {
+  assert.equal(spokenClockRule({ primary: 'English' }), 'english');
+  assert.equal(spokenClockRule({ primary: 'en-GB', mix: ['Greek'] }), 'english');
+  assert.equal(spokenClockRule({ primary: 'Greek' }), 'foreign');
+  assert.equal(spokenClockRule({ primary: 'French', mix: ['Spanish'] }), 'foreign');
+  assert.equal(spokenClockRule({ primary: 'Japanese', mix: [] }), 'foreign');
+  assert.equal(spokenClockRule({ primary: 'Greek', mix: ['English'] }), 'pass');
+});
+
+test('dropClockSentences: each sentence stating an English clock goes, whatever time it states', () => {
+  const out = dropClockSentences('Ναι, οι κουρτίνες πέφτουν αργά — just gone five in the morning. Ακούμε Moon.');
+  assert.equal(out.text, 'Ακούμε Moon.');
+  assert.deepEqual(out.changes, [{ from: 'just gone five', to: null, offMin: null }]);
+  for (const line of ['Μόλις έξι το απόγευμα.', 'Il est presque dix heures, voici Moon.', 'Ακούμε το «Half Past Two».', 'Ακούμε το "Nine O\'Clock".']) {
+    assert.deepEqual(dropClockSentences(line), { text: line, changes: [] }, line);
+  }
+});

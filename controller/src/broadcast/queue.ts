@@ -68,7 +68,7 @@ import { djCallsAllowed, presentListeners } from './listeners.js';
 import { trackLineVoiceAllowed } from './voice-policy.js';
 import { speakClockAllowed, stationIdDaypartDrifted, stationIdDaypartStamp } from './clock-policy.js';
 import { standInToken, withoutStrayNullTokens } from './stand-in-policy.js';
-import { CLOCK_CHECK_EXEMPT_KINDS, isEnglishSpeech, reconcileClockPhrases, stripClockPhrases } from './clock-phrases.js';
+import { CLOCK_CHECK_EXEMPT_KINDS, dropClockSentences, reconcileClockPhrases, spokenClockRule, stripClockPhrases } from './clock-phrases.js';
 import { fuzzyAirTime } from '../llm/internal/prompts/scripts.js';
 import {
   currentTalkAir,
@@ -3006,11 +3006,23 @@ class Queue {
   // pick's link was already judged against its air time by generateLink. The
   // hourly check IS the clock and a reminiscence states a past time, so both
   // are exempt (clock-phrases.CLOCK_CHECK_EXEMPT_KINDS), and so is operator
-  // text. English only: any other language passes unchanged.
+  // text. A persona that speaks no English loses the sentence of any English
+  // clock phrase instead, every kind included, and one that also speaks
+  // English passes unchanged (clock-phrases.spokenClockRule).
   clockChecked(text: string, kind: string, persona: Persona | null, { verbatim = false } = {}): string {
-    if (verbatim || !text || CLOCK_CHECK_EXEMPT_KINDS.has(kind)) return text;
+    if (verbatim || !text) return text;
     const speaker = persona ?? settings.getEffectivePersona();
-    if (!isEnglishSpeech(speaker?.language)) return text;
+    const languages = settings.personaLanguages(speaker);
+    const rule = spokenClockRule(languages);
+    if (rule === 'foreign') {
+      const out = dropClockSentences(text);
+      for (const c of out.changes) {
+        this.log('dj', `${kind}: English time "${c.from}" removed with its sentence from a ${languages.primary} line`);
+        logEvent('speech.clockCorrected', { kind, from: c.from, to: null, offMin: null, airHhmm: null, language: languages.primary });
+      }
+      return out.text;
+    }
+    if (CLOCK_CHECK_EXEMPT_KINDS.has(kind) || rule === 'pass') return text;
     const clock = getClockContext(new Date());
     const supplied = speakClockAllowed() ? fuzzyAirTime(clock) : null;
     const out = reconcileClockPhrases(text, { airHhmm: clock.hhmm, supplied });

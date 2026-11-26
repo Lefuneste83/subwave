@@ -189,8 +189,30 @@ test('operator text airs as typed (POST /dj/say passes verbatim)', async () => {
   assert.equal(spoken[0], line);
 });
 
-test('a non-English persona passes unchanged (fail open)', async () => {
-  const line = `Kalispera, just after ${wrongHour()} on Plakias radio.`;
-  await queue.announce(line, 'station-id', { persona: GREEK as never });
+// A persona that speaks no English: any English clock phrase is a leak, right
+// time or wrong, and a correction would only insert more English. Its sentence
+// goes, on every kind, the hourly check included (aired: "Ναι, φτάσαμε στην
+// ώρα που οι κουρτίνες πέφτουν αργά — just gone five in the morning.").
+test('a persona that speaks no English loses an English clock phrase\'s sentence, any kind', async () => {
+  await queue.announce(`Καλησπέρα. Just after ${wrongHour()} on Vrachonas radio.`, 'station-id', { persona: GREEK as never });
+  assert.deepEqual(spoken, ['Καλησπέρα.']);
+  spoken = [];
+  const out = await queue.announce('Ναι, φτάσαμε στην ώρα που οι κουρτίνες πέφτουν αργά — just gone five in the morning.', 'hourly-check', { persona: GREEK as never });
+  assert.equal(out.accepted, false, 'nothing left to air');
+  assert.deepEqual(spoken, []);
+});
+
+test('a Greek line with no English clock phrase, or from a persona that also speaks English, passes unchanged', async () => {
+  const greekOnly = 'Μόλις έξι το απόγευμα, ώρα για μπάσα.';
+  await queue.announce(greekOnly, 'hourly-check', { persona: GREEK as never });
+  assert.equal(spoken[0], greekOnly);
+  const line = `Kalispera, just after ${wrongHour()} on Vrachonas radio.`;
+  await queue.announce(line, 'station-id', { persona: { ...GREEK, alsoSpeaks: 'English' } as never });
+  assert.equal(spoken[1], line);
+});
+
+test('operator text from a persona that speaks no English still airs as typed', async () => {
+  const line = `Meet us at the bar just after ${wrongHour()} tonight.`;
+  await queue.announce(line, 'dj-speak', { persona: GREEK as never, verbatim: true });
   assert.equal(spoken[0], line);
 });

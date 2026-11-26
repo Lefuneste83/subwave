@@ -2,7 +2,8 @@
 // repeating itself, and small models copy the clock phrase in them ("just after
 // ten") into lines that air an hour later. This module finds English clock
 // phrases, strips them from prompt memory, and corrects a stated time that does
-// not match the air time. English only: callers fail open for other languages.
+// not match the air time. The phrases and the corrections are English, so the
+// rule a line gets follows its speaker's languages (spokenClockRule).
 
 export interface ClockPhrase {
   start: number;
@@ -46,17 +47,24 @@ function hourVal(w: string): number {
 
 // Odd number of straight quotes (or more open-curly than close-curly) before
 // the index means the match sits inside a title/quote and must be skipped.
-function insideQuotes(text: string, index: number): boolean {
+// `guillemets` counts « » the same way: the quotes a Greek, French or Russian
+// line puts round a title ("Ακούμε το «Half Past Two»"). Only the non-English
+// drop asks for it, so English matching is exactly what it was.
+function insideQuotes(text: string, index: number, guillemets = false): boolean {
   let straight = 0;
   let open = 0;
   let close = 0;
+  let gOpen = 0;
+  let gClose = 0;
   for (let i = 0; i < index; i++) {
     const c = text[i];
     if (c === '"') straight++;
     else if (c === '\u201c') open++;
     else if (c === '\u201d') close++;
+    else if (c === '\u00ab') gOpen++;
+    else if (c === '\u00bb') gClose++;
   }
-  return straight % 2 === 1 || open > close;
+  return straight % 2 === 1 || open > close || (guillemets && gOpen > gClose);
 }
 
 function normCirc(v: number): number {
@@ -104,7 +112,32 @@ export function isEnglishSpeech(language: unknown): boolean {
   return t === 'en' || t.startsWith('en-') || t.startsWith('en_') || t.startsWith('english');
 }
 
-export function findClockPhrases(text: string): ClockPhrase[] {
+// Which clock rule a spoken line gets, from settings.personaLanguages():
+// - 'english': an English primary (the default) — wrong times corrected to
+//   the supplied phrase, as below;
+// - 'foreign': no English among the persona's languages — an English clock
+//   phrase is a leak whatever time it states, and correcting it would insert
+//   more English, so the sentence carrying it is dropped (dropClockSentences).
+//   The finder only knows English, so a time said in the persona's own
+//   language is never touched. No kind is exempt: the hourly check is the
+//   clock's authority in English, and its English wording copied into a Greek
+//   line ("…αργά — just gone five in the morning.") was still a leak;
+// - 'pass': a non-English primary that also speaks English — English words
+//   are its own, and a correction would decide its language for it, so the
+//   line passes unchanged, as every non-English line used to.
+export type SpokenClockRule = 'english' | 'foreign' | 'pass';
+
+export function spokenClockRule(languages: { primary: string; mix?: readonly string[] }): SpokenClockRule {
+  if (isEnglishSpeech(languages.primary)) return 'english';
+  return (languages.mix ?? []).some(isEnglishSpeech) ? 'pass' : 'foreign';
+}
+
+// Every sentence that states a clock in English, gone; the rest of the line kept.
+export function dropClockSentences(text: string): ReturnType<typeof reconcileClockPhrases> {
+  return reconcileClockPhrases(text, { airHhmm: null, supplied: null, guillemets: true });
+}
+
+export function findClockPhrases(text: string, { guillemets = false }: { guillemets?: boolean } = {}): ClockPhrase[] {
   if (!text) return [];
   const raw: Raw[] = [];
 
@@ -195,7 +228,7 @@ export function findClockPhrases(text: string): ClockPhrase[] {
 
   // Then drop what is not a statement of the time now.
   const kept = claimed.filter((r) => {
-    if (insideQuotes(text, r.start)) return false;
+    if (insideQuotes(text, r.start, guillemets)) return false;
     // "since half past seven", "until nine o'clock": a time the line refers
     // BACK or ahead to, not a statement of the time now.
     if (/\b(?:since|from|until|till|before)\s+$/i.test(text.slice(Math.max(0, r.start - 12), r.start))) return false;
@@ -290,8 +323,9 @@ export function reconcileClockPhrases(text: string, opts: {
   airHhmm: string | null;
   supplied: string | null;
   toleranceMin?: number;
+  guillemets?: boolean;
 }): { text: string; changes: { from: string; to: string | null; offMin: number | null }[] } {
-  const phrases = findClockPhrases(text);
+  const phrases = findClockPhrases(text, { guillemets: opts.guillemets === true });
   if (phrases.length === 0) return { text, changes: [] };
 
   const tolerance = opts.toleranceMin ?? CLOCK_TOLERANCE_MIN;

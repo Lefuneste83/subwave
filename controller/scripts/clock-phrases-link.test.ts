@@ -28,12 +28,13 @@ await settings.update({
 });
 
 let reply = '';
+let lastBody = '';
 const realFetch = globalThis.fetch;
-globalThis.fetch = (async () => chatCompletionResponse({
+globalThis.fetch = (async (_input: unknown, init?: RequestInit) => (lastBody = String(init?.body ?? ''), chatCompletionResponse({
   id: 'chatcmpl-fixture',
   message: { role: 'assistant', content: reply },
   usage: { prompt_tokens: 10, completion_tokens: 8, total_tokens: 18 },
-})) as typeof fetch;
+}))) as typeof fetch;
 after(() => { globalThis.fetch = realFetch; });
 
 const HOST = { name: 'Somer', soul: 'warm', language: '', linkStyle: 'natural', scriptLength: 'concise' };
@@ -62,11 +63,32 @@ test('without a verified air time, a stated time drops its sentence', async () =
   assert.equal(link, 'Here is Take A Second by Bar.ba.');
 });
 
-test('a non-English persona\'s link passes unchanged', async () => {
-  reply = 'Just past ten in Plakias, kalimera.';
+// A persona that speaks no English: an English clock phrase is a leak whatever
+// it states, and correcting it would insert more English, so its sentence goes.
+test('a persona that speaks no English loses an English clock phrase\'s sentence', async () => {
+  reply = 'Ακούμε το Take A Second. Just past ten in Vrachonas, kalimera.';
+  const greek = { ...HOST, language: 'Greek' };
+  const link = await generateLink({ previous: null, current, context: { clock }, clockIsAirTime: true, persona: greek });
+  assert.equal(link, 'Ακούμε το Take A Second.');
+  reply = 'Ακούμε το Take A Second, λίγο πριν το μεσημέρι.';
+  assert.equal(await generateLink({ previous: null, current, context: { clock }, clockIsAirTime: true, persona: greek }), reply,
+    'a time said in the persona\'s own language is never touched');
+});
+
+test('a non-English persona that also speaks English passes unchanged', async () => {
+  reply = 'Just past ten in Vrachonas, kalimera.';
   const link = await generateLink({
     previous: null, current, context: { clock }, clockIsAirTime: true,
-    persona: { ...HOST, language: 'Greek' },
+    persona: { ...HOST, language: 'Greek', alsoSpeaks: 'English' },
   });
   assert.equal(link, reply);
+});
+
+test('the link prompt asks a persona that speaks no English for the time in its own language', async () => {
+  reply = 'Take A Second.';
+  await generateLink({ previous: null, current, context: { clock }, clockIsAirTime: true, persona: { ...HOST, language: 'Greek' } });
+  assert.match(lastBody, /use only the approximate phrase supplied in Current Context; do not turn it into an exact minute\. Time phrases given here are in English only to fix the reading: say any you use in Greek, in Greek words/);
+  await generateLink({ previous: null, current, context: { clock }, clockIsAirTime: true, persona: HOST });
+  assert.match(lastBody, /do not turn it into an exact minute\./);
+  assert.doesNotMatch(lastBody, /in English only/);
 });
