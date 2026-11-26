@@ -67,8 +67,8 @@ import { recordPlaybackFailure } from '../observability/playback-failures.js';
 import { djCallsAllowed, presentListeners } from './listeners.js';
 import { trackLineVoiceAllowed } from './voice-policy.js';
 import { speakClockAllowed, stationIdDaypartDrifted, stationIdDaypartStamp } from './clock-policy.js';
-import { standInToken } from './stand-in-policy.js';
-import { CLOCK_CHECK_EXEMPT_KINDS, isEnglishSpeech, reconcileClockPhrases, stripClockPhrases } from './clock-phrases.js';
+import { standInToken, withoutStrayNullTokens } from './stand-in-policy.js';
+import { CLOCK_CHECK_EXEMPT_KINDS, dropClockSentences, reconcileClockPhrases, spokenClockRule, stripClockPhrases } from './clock-phrases.js';
 import { fuzzyAirTime } from '../llm/internal/prompts/scripts.js';
 import {
   currentTalkAir,
@@ -2976,12 +2976,20 @@ class Queue {
   // request intro (push, cleanUnrenderedIntro). `text` is the line with the
   // caller's label off and not yet normalised, because stand-in-policy reads it
   // both before and after normalising and past any other label; the return is
-  // the display form that airs. A stand-in line is dropped whole. An empty
+  // the display form that airs. A bare null/undefined at either end is trimmed
+  // first (stand-in-policy.withoutStrayNullTokens). A stand-in line is dropped whole. An empty
   // return is the callers' existing "nothing to air" case, so a dropped feature
   // falls back exactly as a stood-down skill does. Operator text is exempt: a
   // raw /dj/say (`verbatim`) and a jingle's script, which the operator typed
   // (jingles.create from the Imaging page and onboarding).
   speakable(text: string, kind: string, { verbatim = false } = {}): string {
+    // Judged on the display form, where a leaked tag around the token is gone,
+    // and then judged as that form, so the render's second pass agrees.
+    if (!verbatim) {
+      const shown = normalizeForDisplay(text);
+      const trimmed = withoutStrayNullTokens(shown);
+      if (trimmed !== shown) text = trimmed;
+    }
     const token = verbatim ? null : standInToken(text);
     if (!token) return normalizeForDisplay(text);
     this.log('scheduler', `${kind}: dropped a stand-in line ("${token}") instead of airing it`);
@@ -2998,11 +3006,23 @@ class Queue {
   // pick's link was already judged against its air time by generateLink. The
   // hourly check IS the clock and a reminiscence states a past time, so both
   // are exempt (clock-phrases.CLOCK_CHECK_EXEMPT_KINDS), and so is operator
-  // text. English only: any other language passes unchanged.
+  // text. A persona that speaks no English loses the sentence of any English
+  // clock phrase instead, every kind included, and one that also speaks
+  // English passes unchanged (clock-phrases.spokenClockRule).
   clockChecked(text: string, kind: string, persona: Persona | null, { verbatim = false } = {}): string {
-    if (verbatim || !text || CLOCK_CHECK_EXEMPT_KINDS.has(kind)) return text;
+    if (verbatim || !text) return text;
     const speaker = persona ?? settings.getEffectivePersona();
-    if (!isEnglishSpeech(speaker?.language)) return text;
+    const languages = settings.personaLanguages(speaker);
+    const rule = spokenClockRule(languages);
+    if (rule === 'foreign') {
+      const out = dropClockSentences(text);
+      for (const c of out.changes) {
+        this.log('dj', `${kind}: English time "${c.from}" removed with its sentence from a ${languages.primary} line`);
+        logEvent('speech.clockCorrected', { kind, from: c.from, to: null, offMin: null, airHhmm: null, language: languages.primary });
+      }
+      return out.text;
+    }
+    if (CLOCK_CHECK_EXEMPT_KINDS.has(kind) || rule === 'pass') return text;
     const clock = getClockContext(new Date());
     const supplied = speakClockAllowed() ? fuzzyAirTime(clock) : null;
     const out = reconcileClockPhrases(text, { airHhmm: clock.hhmm, supplied });

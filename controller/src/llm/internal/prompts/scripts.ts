@@ -19,7 +19,7 @@ import { announceLine, nextAnnounceForm } from '../../../broadcast/announce-line
 import * as library from '../../../music/library.js';
 import { contextSleeveNotesFor, releaseYearMentionEligible, selectSleeveNotes, stationHistoryNoteFor } from './sleeve-notes.js';
 import { stripRecapSpokenTags, stripSpokenTags } from './recent-speech.js';
-import { isEnglishSpeech, reconcileClockPhrases } from '../../../broadcast/clock-phrases.js';
+import { dropClockSentences, reconcileClockPhrases, spokenClockRule } from '../../../broadcast/clock-phrases.js';
 import { logEvent } from '../../../observability/events.js';
 import { namedSubjectLine } from '../../../broadcast/preparation-subject-wording.js';
 
@@ -231,7 +231,7 @@ export function stationIdPrompt({ context = null, persona = null }: any = {}) {
   const daypart = context?.clock?.spokenDaypart;
   const clockNudge = speakClockAllowed()
     ? (daypart
-        ? ` If you nod to the clock, say only "${daypart}" — never the hour and never the minutes (this airs a few minutes after you write it, and the hour may have changed by then).`
+        ? ` If you nod to the clock, say only "${daypart}" — never the hour and never the minutes (this airs a few minutes after you write it, and the hour may have changed by then).${clockWordingNote(speaker)}`
         : ` If you nod to the clock, name only the part of the day (morning, afternoon, evening, night) — never the hour and never the minutes (this airs a few minutes after you write it, and the hour may have changed by then).`)
     : '';
   const handover = context?.showHandover;
@@ -395,7 +395,7 @@ export function linkPrompt({
 
   const facts = verifiedContextPacket(context, current, clockIsAirTime);
   if (clockIsAirTime && fuzzyAirTime(context?.clock)) {
-    rules.push("If you mention the time, use only the approximate phrase supplied in Current Context; do not turn it into an exact minute.");
+    rules.push("If you mention the time, use only the approximate phrase supplied in Current Context; do not turn it into an exact minute." + clockWordingNote(speaker));
   } else {
     rules.push("Do not state a clock time; no verified air time was supplied.");
   }
@@ -517,7 +517,17 @@ function clockCheckedLink(
   args: { clockIsAirTime?: boolean; context?: { clock?: { hhmm?: unknown } } | null },
   speaker: { language?: unknown } | null | undefined,
 ): string {
-  if (!link || !isEnglishSpeech(speaker?.language)) return link;
+  if (!link) return link;
+  const languages = settings.personaLanguages(speaker);
+  const rule = spokenClockRule(languages);
+  if (rule === 'foreign') {
+    const out = dropClockSentences(link);
+    for (const c of out.changes) {
+      logEvent('speech.clockCorrected', { kind: 'link', from: c.from, to: null, offMin: null, airHhmm: null, language: languages.primary });
+    }
+    return out.text;
+  }
+  if (rule === 'pass') return link;
   const clock = args?.clockIsAirTime ? args.context?.clock : null;
   const airHhmm = clock && typeof clock.hhmm === 'string' ? clock.hhmm : null;
   const supplied = airHhmm ? fuzzyAirTime(clock) : null;
@@ -551,16 +561,30 @@ function clockCheckedLink(
 // harmless in the only direction that matters — it can skip a wording, never
 // repeat one — but there is exactly one production caller and it should stay
 // that way.
-export function nextHourlyTimeClause(clock: any) {
+export function nextHourlyTimeClause(clock: any, persona: unknown = null) {
   const spokenTime = pickTimePhrase(clock?.spokenTimeOptions) ?? clock?.spokenTime;
   const spoken = clock?.spokenHour;
+  const wording = clockWordingNote(persona);
   if (spokenTime) {
-    return `The time to announce is "${spokenTime}" — say exactly that time, in natural spoken words — never digits or 24-hour form, never a different time.`;
+    return `The time to announce is "${spokenTime}" — say exactly that time, in natural spoken words — never digits or 24-hour form, never a different time.${wording}`;
   }
   if (spoken) {
-    return `The hour to announce is ${spoken} — say exactly that hour, in natural spoken words ("just gone ${spoken}", or similar) — never digits or 24-hour form, never a different hour.`;
+    return `The hour to announce is ${spoken} — say exactly that hour, in natural spoken words ("just gone ${spoken}", or similar) — never digits or 24-hour form, never a different hour.${wording}`;
   }
-  return `Say the time in natural spoken words ("two in the afternoon", "just gone eight") — never digits or 24-hour form.`;
+  return `Say the time in natural spoken words ("two in the afternoon", "just gone eight") — never digits or 24-hour form.${wording}`;
+}
+
+// The clock phrases handed to a prompt are English (time.ts), the reading
+// code worked out so a small model never converts the clock itself. A persona
+// that speaks no English gets each as a reading to put in its own language:
+// told to "say exactly" one, a Greek DJ aired "…αργά — just gone five in the
+// morning." Empty for every other persona, so their prompts are unchanged.
+// Who counts as speaking no English is clock-phrases.spokenClockRule's call,
+// the same one the air-side check makes.
+export function clockWordingNote(persona: unknown): string {
+  const languages = settings.personaLanguages(persona);
+  if (spokenClockRule(languages) !== 'foreign') return '';
+  return ` Time phrases given here are in English only to fix the reading: say any you use in ${languages.primary}, in ${languages.primary} words — never the English phrase or any other English word.`;
 }
 
 // Hourly-only override after the saved persona: omitting weather context alone
@@ -572,7 +596,7 @@ const HOURLY_NO_WEATHER_RULE = 'For this hourly time check, do not mention weath
 
 export async function generateHourlyTime({ recap = null, context = null, recentOpeners = null, persona = null, showWelcome = false }: any = {}) {
   const ctxLines = buildContextLines(context, { contextFields: SCRIPT_CONTEXT_FIELDS });
-  const timeClause = nextHourlyTimeClause(context?.clock);
+  const timeClause = nextHourlyTimeClause(context?.clock, persona || settings.getEffectivePersona());
   ctxLines.push(`Task: a brief top-of-the-hour time check, in character. ${lengthPhrase('hourly', persona || undefined)}. ${timeClause}`);
   if (showWelcome && context?.activeShow?.name) {
     ctxLines.push(`The schedule is now in "${context.activeShow.name}". After the required time check, you may add one short, natural welcome to it. The complete line may be two short sentences. Do not introduce yourself by name, mention an outgoing presenter, or claim the show began at a particular time.`);
