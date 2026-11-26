@@ -208,6 +208,7 @@ export async function generateIntro({ track, context, requestedBy = null, reques
     prompt: decoratePrompt(prompt, { kind: 'intro', recap, recentOpeners }),
     temperature: 0.95, topP: 0.92, repeatPenalty: 1.2, seed: randomSeed(),
     kind: 'generateIntro',
+    speaker,
   });
 }
 
@@ -251,6 +252,7 @@ export async function generateStationId({ recap = null, context = null, recentOp
     prompt: decoratePrompt(stationIdPrompt({ context, persona: speaker }), { kind: 'station_id', recap, recentOpeners }),
     temperature: 1.0, topP: 0.9, repeatPenalty: 1.25, seed: randomSeed(),
     kind: 'generateStationId',
+    speaker,
   });
 }
 
@@ -286,6 +288,7 @@ export async function generateSignoff(args: any) {
     prompt: signoffPrompt(args),
     temperature: 1.0, topP: 0.9, repeatPenalty: 1.25, seed: randomSeed(),
     kind: 'generateSignoff',
+    speaker: args.personaOut || settings.getEffectivePersona(),
   });
 }
 
@@ -315,6 +318,7 @@ export async function generateHandoffGreeting(args: any) {
     prompt: handoffGreetingPrompt(args),
     temperature: 0.95, topP: 0.92, repeatPenalty: 1.2, seed: randomSeed(),
     kind: 'generateHandoffGreeting',
+    speaker: args.personaIn || settings.getEffectivePersona(),
   });
 }
 
@@ -330,6 +334,7 @@ export async function generateAdLib({ instruction, context = null, recap = null,
     prompt: decoratePrompt(ctxLines.join('\n'), { kind: 'adlib', recap, recentOpeners }),
     temperature: 0.95, topP: 0.92, repeatPenalty: 1.2, seed: randomSeed(),
     kind: 'generateAdLib',
+    speaker: settings.getEffectivePersona(),
   });
 }
 
@@ -493,6 +498,7 @@ export async function generateLink(args: any) {
       seed: randomSeed(),
       maxOutputTokens: 64,
       kind: 'generateAnnounceLinkFallback',
+      speaker,
     });
   }
   const link = await djText({
@@ -503,6 +509,7 @@ export async function generateLink(args: any) {
     repeatPenalty: 1.2,
     seed: randomSeed(),
     kind: 'generateLink',
+    speaker,
   });
   return clockCheckedLink(link, args, speaker);
 }
@@ -606,5 +613,6 @@ export async function generateHourlyTime({ recap = null, context = null, recentO
     prompt: decoratePrompt(ctxLines.join('\n'), { kind: 'hourly', recap, recentOpeners }),
     temperature: 0.9, topP: 0.95, repeatPenalty: 1.15, seed: randomSeed(),
     kind: 'generateHourlyTime',
+    speaker: persona || settings.getEffectivePersona(),
   });
 }

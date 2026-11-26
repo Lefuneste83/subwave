@@ -9,7 +9,9 @@ import { withFailover } from '../core/failover.js';
 import { withTransientRetry } from '../core/retry.js';
 import { stripThinking, truncationError, usageOf, perfOf, warningsOf, failureDiagnostics } from '../core/pure.js';
 import { llmCallOptions, repeatPenaltyApplies, samplingWithLocalKnobs } from '../provider/capabilities.js';
-import { resolveMaxOutputTokens } from '../../../settings.js';
+import { personaLanguages, resolveMaxOutputTokens } from '../../../settings.js';
+import { scriptLeakVerdict, type ScriptLeak } from '../../../util/script-leak-policy.js';
+import { logEvent } from '../../../observability/events.js';
 
 // Hard output-token cap. A reasoning model with no cap can generate until it
 // fills the whole context window — one runaway <think> ramble then ties up the
@@ -19,7 +21,41 @@ import { resolveMaxOutputTokens } from '../../../settings.js';
 // (issue #712); 0 there keeps this default.
 const MAX_TOKENS_TEXT = 4000;
 
-export async function djText({
+// `speaker` is the persona the line will be spoken by. When a caller names it,
+// the reply is checked for a word from a writing system the speaker's language
+// does not use (util/script-leak-policy.ts), judged against everything the
+// model was handed (system + prompt carry the names it may write), and a leak
+// is regenerated ONCE, with a note naming the stray letters. The homelab
+// default is slow, so never more than once. The retry's own answer is returned
+// whatever it holds: queue.speakable is the gate that drops a line still
+// leaking, so a dropped line is never recorded as said. Without `speaker` the
+// call is unchanged.
+export async function djText(args: any): Promise<string> {
+  const out = await djTextOnce(args);
+  if (args?.speaker === undefined) return out;
+  const languages = personaLanguages(args.speaker);
+  const verdict = scriptLeakVerdict(out, { languages, names: [args.system, args.prompt], surface: 'speech', retry: true });
+  if (verdict.action !== 'regenerate') return out;
+  const { leak } = verdict;
+  const kind = args.kind || 'sdk.djText';
+  logEvent('speech.scriptLeak', { kind, stage: 'retry', language: languages.primary, runs: leak.runs, scripts: leak.scripts });
+  try {
+    return await djTextOnce({
+      ...args,
+      prompt: `${args.prompt}${scriptLeakRetryNote(languages.primary, leak)}`,
+      seed: typeof args.seed === 'number' ? (args.seed + 1) % 2147483647 : args.seed,
+    });
+  } catch {
+    // The first answer goes on to the gate, which drops it.
+    return out;
+  }
+}
+
+function scriptLeakRetryNote(language: string, leak: ScriptLeak): string {
+  return `\n\nWRITING SYSTEM: a draft of this line slipped letters from another writing system into it (${leak.runs.map((r) => `"${r}"`).join(', ')}). Write the line again in ${language}, in its own script, with no word from any other writing system. Names keep exactly the spelling given above.`;
+}
+
+async function djTextOnce({
   system,
   prompt,
   temperature = 0.9,

@@ -68,6 +68,7 @@ import { djCallsAllowed, presentListeners } from './listeners.js';
 import { trackLineVoiceAllowed } from './voice-policy.js';
 import { speakClockAllowed, stationIdDaypartDrifted, stationIdDaypartStamp } from './clock-policy.js';
 import { standInToken, withoutStrayNullTokens } from './stand-in-policy.js';
+import { scriptLeakVerdict } from '../util/script-leak-policy.js';
 import { CLOCK_CHECK_EXEMPT_KINDS, dropClockSentences, reconcileClockPhrases, spokenClockRule, stripClockPhrases } from './clock-phrases.js';
 import { fuzzyAirTime } from '../llm/internal/prompts/scripts.js';
 import {
@@ -478,6 +479,12 @@ function phraseWindowOf(
   return v.ok ? { ok: true, window: v.window, lastKick: a.points.lastHardKick! } : v;
 }
 
+// The names a pushed intro was written around: its track's credits, the
+// requester it greets and the track it back-announces (speakable's `names`).
+function introNames(track: any, requestedBy: unknown, linkPrev: any): unknown[] {
+  return [track?.title, track?.artist, track?.album, track?.albumArtist, requestedBy, linkPrev?.title, linkPrev?.artist];
+}
+
 class Queue {
   upcoming: QueueItem[] = [];  // request items pushed by listeners, not yet playing
   current: QueueItem | null = null;    // what's broadcasting right now (request or auto)
@@ -586,7 +593,7 @@ class Queue {
     const written = item.introLabelChecked
       ? item.introScript
       : stripSpeakerLabel(item.introScript, speaker?.name ? [speaker.name] : []);
-    const spoken = this.speakable(written, item.introKind || 'dj-speak');
+    const spoken = this.speakable(written, item.introKind || 'dj-speak', { persona: speaker, names: introNames(item.track, item.requestedBy, item.linkPrev) });
     if (!spoken) {
       item.introScript = null;
       item.introPersona = null;
@@ -1136,7 +1143,7 @@ class Queue {
       const written = introLabelChecked
         ? introScript
         : stripSpeakerLabel(introScript, speaker?.name ? [speaker.name] : []);
-      const spoken = this.speakable(written, introKind);
+      const spoken = this.speakable(written, introKind, { persona: speaker, names: introNames(track, requestedBy, linkPrev) });
       if (!spoken) {
         if (written.trim()) onStandInDropped?.();
         introScript = null;
@@ -2982,7 +2989,15 @@ class Queue {
   // falls back exactly as a stood-down skill does. Operator text is exempt: a
   // raw /dj/say (`verbatim`) and a jingle's script, which the operator typed
   // (jingles.create from the Imaging page and onboarding).
-  speakable(text: string, kind: string, { verbatim = false } = {}): string {
+  //
+  // A line carrying a word from a writing system its speaker's language does
+  // not use (util/script-leak-policy.ts) is dropped the same way, judged on the
+  // display form against the speaker's languages (`persona`, else the on-air
+  // one, the same resolution announce() makes) and the names the line may
+  // carry (spokenNames, plus the caller's `names`). The free-text writers have
+  // already had their one retry (llm djText `speaker`); what reaches here
+  // still leaking goes.
+  speakable(text: string, kind: string, { verbatim = false, persona = null, names = [] }: { verbatim?: boolean; persona?: Persona | null; names?: readonly unknown[] } = {}): string {
     // Judged on the display form, where a leaked tag around the token is gone,
     // and then judged as that form, so the render's second pass agrees.
     if (!verbatim) {
@@ -2991,10 +3006,42 @@ class Queue {
       if (trimmed !== shown) text = trimmed;
     }
     const token = verbatim ? null : standInToken(text);
-    if (!token) return normalizeForDisplay(text);
+    if (!token) {
+      const shown = normalizeForDisplay(text);
+      if (!verbatim && this.scriptLeakDropped(shown, kind, { persona, names })) return '';
+      return shown;
+    }
     this.log('scheduler', `${kind}: dropped a stand-in line ("${token}") instead of airing it`);
     logEvent('speech.standInDropped', { kind, token });
     return '';
+  }
+
+  // The names a spoken line may legitimately write in another script: the
+  // station, the roster, every show, the weather place, and the tracks the
+  // writers are handed (on air, queued with their requesters and back-announce
+  // targets, recently played). `extra` is the caller's own (the pushed track).
+  spokenNames(extra: readonly unknown[] = []): unknown[] {
+    const s: any = settings.get();
+    const out: unknown[] = [...extra, s?.station, s?.weather?.locationName, s?.weather?.onAirLocation];
+    const track = (t: any) => (t ? [t.title, t.artist, t.album, t.albumArtist] : []);
+    for (const p of Array.isArray(s?.personas) ? s.personas : []) out.push(p?.name);
+    for (const sh of Array.isArray(s?.shows) ? s.shows : []) out.push(sh?.name, sh?.topic);
+    out.push(...track(this.current?.track), this.current?.requestedBy);
+    for (const i of this.upcoming) out.push(...track(i.track), i.requestedBy, i.linkPrev?.title, i.linkPrev?.artist);
+    for (const h of this.history.slice(0, 12)) out.push(...track(h.track));
+    return out;
+  }
+
+  // True when `text` carries a foreign-script word, logged once with the
+  // offending letters (never the line or the prompt).
+  scriptLeakDropped(text: string, kind: string, { persona = null, names = [] }: { persona?: Persona | null; names?: readonly unknown[] } = {}): boolean {
+    const languages = settings.personaLanguages(persona ?? settings.getEffectivePersona());
+    const verdict = scriptLeakVerdict(text, { languages, names: this.spokenNames(names), surface: 'speech' });
+    if (verdict.action !== 'drop') return false;
+    const { leak } = verdict;
+    this.log('scheduler', `${kind}: dropped a ${languages.primary} line carrying another writing system (${leak.runs.map((r) => `"${r}"`).join(', ')}) instead of airing it`);
+    logEvent('speech.scriptLeakDropped', { kind, language: languages.primary, runs: leak.runs, scripts: leak.scripts });
+    return true;
   }
 
   // M1: a generated line may state a time copied from the DJ's earlier speech
@@ -3086,7 +3133,7 @@ class Queue {
     // The stand-in gate exempts only RAW operator text (meta.verbatim); the
     // clock check (M1) also spares a styled /dj/say (`verbatim`), a manual action.
     const standInExempt = meta?.verbatim === true;
-    const checked = this.speakable(written, kind, { verbatim: standInExempt });
+    const checked = this.speakable(written, kind, { verbatim: standInExempt, persona: speaker });
     const safeText = this.clockChecked(checked, kind, speaker, { verbatim: verbatim || standInExempt });
     if (!safeText) {
       return {
@@ -3321,7 +3368,7 @@ class Queue {
       // Each clip owns its speaker's gain, attribution and live-edge marker.
       // Conversational batching must preserve those before it can air here.
       for (const l of lines) {
-        const text = this.clockChecked(this.speakable(stripSpeakerLabel(l.text || '', knownNames), kind), kind, l.persona);
+        const text = this.clockChecked(this.speakable(stripSpeakerLabel(l.text || '', knownNames), kind, { persona: l.persona }), kind, l.persona);
         if (!text) continue;
         const wavPath = await this._speak(text, { kind, persona: l.persona });
         rendered.push({ ...l, text, wavPath });
@@ -3444,7 +3491,7 @@ class Queue {
     const safeText = this.clockChecked(this.speakable(
       scheduledSpeaker?.name ? stripSpeakerLabel(text || '', [scheduledSpeaker.name]) : (text || ''),
       kind,
-      { verbatim: meta?.verbatim === true },
+      { verbatim: meta?.verbatim === true, persona: scheduledSpeaker },
     ), kind, scheduledSpeaker, { verbatim: meta?.verbatim === true });
     if (!safeText) return false;
     if (hostSpeech && !session.isHostSpeechCurrent(hostSpeech)) return false;

@@ -16,6 +16,7 @@ import { logEvent } from '../../observability/events.js';
 import { onAirPersona } from '../session.js';
 import { pickNoteLanguage, type PickNoteLanguage } from './pick-reason-language.js';
 import { misnamedPickNote, type ClaimTrack } from '../../util/request-claim.js';
+import { scriptLeakVerdict } from '../../util/script-leak-policy.js';
 
 type Named = { title?: string | null; artist?: string | null } | null | undefined;
 
@@ -68,7 +69,11 @@ export function groundPickNote(queue: any, note: string | null | undefined, { tr
 }): string {
   const text = typeof note === 'string' ? note : '';
   if (!text.trim()) return text;
-  const others = [...candidates].filter((c) => c && c.id !== track.id);
+  const pool = [...candidates];
+  const cleaned = pickNoteWithoutScriptLeak(queue, text, { track, candidates: pool, pickAnchor, show, route });
+  if (!cleaned) return '';
+  if (cleaned !== text) return groundPickNote(queue, cleaned, { track, candidates: pool, pickAnchor, show, route });
+  const others = pool.filter((c) => c && c.id !== track.id);
   const claims = misnamedPickNote(text, {
     track,
     others,
@@ -84,4 +89,43 @@ export function groundPickNote(queue: any, note: string | null | undefined, { tr
     agent: route, to: track.id ?? null, lines: [{ field: 'reason', claims }], candidates: others.length, outcome: 'note-plain',
   });
   return '';
+}
+
+// A pick note with a word from a writing system the on-air persona's language
+// does not use (util/script-leak-policy.ts, the `note` surface). A note is read
+// in the Booth, never aired, so this is minor and never retried: the foreign
+// runs come out and the rest of the note stays. Returns the note unchanged,
+// that cleaned note, or '' (the routes' plain-copy signal, “Title” — Artist
+// in any language but English) when too little is left to mean anything. The
+// names it may carry in another script are the queued track's, the other
+// candidates', the pick's context and the station's own. Logged once, with the
+// offending letters.
+export function pickNoteWithoutScriptLeak(queue: any, note: string | null | undefined, { track, candidates = [], pickAnchor = null, show = null, route }: {
+  track: (ClaimTrack & { id?: unknown; album?: unknown; genre?: unknown; genres?: unknown }) | null | undefined;
+  candidates?: Iterable<(ClaimTrack & { id?: unknown }) | null | undefined>;
+  pickAnchor?: Named;
+  show?: any;
+  route: 'pick' | 'shortlist' | 'pool';
+}): string {
+  const text = typeof note === 'string' ? note : '';
+  if (!text.trim()) return text;
+  const languages = settings.personaLanguages(onAirPersona());
+  const names: unknown[] = [
+    track?.title, track?.artist, track?.album, track?.genre,
+    ...(Array.isArray(track?.genres) ? track.genres : []),
+    ...[...candidates].flatMap((c) => [c?.title, c?.artist]),
+    ...pickNoteReferences(queue, pickAnchor, show),
+    ...stationClaimNames(null),
+  ];
+  const verdict = scriptLeakVerdict(text, { languages, names, surface: 'note' });
+  if (verdict.action !== 'strip' && verdict.action !== 'plain') return text;
+  const runs = verdict.leak.runs.map((r) => `"${r}"`).join(', ');
+  queue?.log?.(route === 'shortlist' ? 'shortlist' : 'picker', verdict.action === 'strip'
+    ? `${route} note carried another writing system (${runs}) in a ${languages.primary} note over "${track?.title}" by ${track?.artist} — removed it, kept the rest`
+    : `${route} note carried another writing system (${runs}) in a ${languages.primary} note over "${track?.title}" by ${track?.artist} — too little left, replaced with plain copy`);
+  logEvent('pick.scriptLeak', {
+    agent: route, to: track?.id ?? null, language: languages.primary, runs: verdict.leak.runs, scripts: verdict.leak.scripts,
+    outcome: verdict.action === 'strip' ? 'note-stripped' : 'note-plain',
+  });
+  return verdict.action === 'strip' ? verdict.text : '';
 }
