@@ -92,7 +92,8 @@ export function groundPickNote(queue: any, note: string | null | undefined, { tr
 }
 
 // A pick note with a word from a writing system the on-air persona's language
-// does not use (util/script-leak-policy.ts, the `note` surface). A note is read
+// does not use (util/script-leak-policy.ts, the `note` surface). Look-alike
+// letters inside a word are mended in place (`fold`), never cut. A note is read
 // in the Booth, never aired, so this is minor and never retried: the foreign
 // runs come out and the rest of the note stays. Returns the note unchanged,
 // that cleaned note, or '' (the routes' plain-copy signal, “Title” — Artist
@@ -118,6 +119,12 @@ export function pickNoteWithoutScriptLeak(queue: any, note: string | null | unde
     ...stationClaimNames(null),
   ];
   const verdict = scriptLeakVerdict(text, { languages, names, surface: 'note' });
+  if (verdict.action === 'fold') {
+    const folded = verdict.folds.map((f) => `${f.from}→${f.to}`);
+    queue?.log?.(route === 'shortlist' ? 'shortlist' : 'picker', `${route} note had look-alike letters in a ${languages.primary} note over "${track?.title}" by ${track?.artist} — mended (${folded.map((f) => `"${f}"`).join(', ')})`);
+    logEvent('pick.scriptLeak', { agent: route, to: track?.id ?? null, language: languages.primary, folded, outcome: 'folded' });
+    return verdict.text;
+  }
   if (verdict.action !== 'strip' && verdict.action !== 'plain') return text;
   const runs = verdict.leak.runs.map((r) => `"${r}"`).join(', ');
   queue?.log?.(route === 'shortlist' ? 'shortlist' : 'picker', verdict.action === 'strip'
@@ -126,6 +133,7 @@ export function pickNoteWithoutScriptLeak(queue: any, note: string | null | unde
   logEvent('pick.scriptLeak', {
     agent: route, to: track?.id ?? null, language: languages.primary, runs: verdict.leak.runs, scripts: verdict.leak.scripts,
     outcome: verdict.action === 'strip' ? 'note-stripped' : 'note-plain',
+    ...(verdict.folds.length ? { folded: verdict.folds.map((f) => `${f.from}→${f.to}`) } : {}),
   });
   return verdict.action === 'strip' ? verdict.text : '';
 }
