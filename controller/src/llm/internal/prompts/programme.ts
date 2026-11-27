@@ -150,7 +150,8 @@ export async function generateProgrammePlan({
   const featureCount = Math.max(1, Math.min(MAX_FEATURES, spanHours));
   // Never the operator's steer: the plan outlives it for the whole episode,
   // and its angle rides the public context (GET /now-playing, context.ts).
-  const ctxLines = buildContextLines(context, { contextFields: PROGRAMME_CONTEXT_FIELDS, steer: false });
+  // No speaker: the plan is producer notes, never spoken, so it keeps its bytes.
+  const ctxLines = buildContextLines(context, { contextFields: PROGRAMME_CONTEXT_FIELDS, steer: false, speaker: null });
   const cast = [
     `Host: ${host?.name || 'the DJ'}`,
     ...(guests || []).map((g: any) => `Guest co-host: ${g.name}`),
@@ -222,7 +223,7 @@ export function introTask({ show, plan = null, speaker = null, episodeSubject = 
 
 export async function generateProgrammeIntro({ show, plan = null, persona = null, context = null, recap = null, recentOpeners = null, episodeSubject = null }: any) {
   const speaker = persona || settings.getEffectivePersona();
-  const ctxLines = buildContextLines(context, { contextFields: PROGRAMME_CONTEXT_FIELDS });
+  const ctxLines = buildContextLines(context, { contextFields: PROGRAMME_CONTEXT_FIELDS, speaker });
   ctxLines.push(introTask({ show, plan, speaker, episodeSubject }));
   return djText({
     system: djSystem(speaker),
@@ -241,7 +242,7 @@ export function outroTask({ show, plan = null, speaker = null, nextShowName = nu
 
 export async function generateProgrammeOutro({ show, plan = null, persona = null, context = null, recap = null, recentOpeners = null, nextShowName = null }: any) {
   const speaker = persona || settings.getEffectivePersona();
-  const ctxLines = buildContextLines(context, { contextFields: PROGRAMME_CONTEXT_FIELDS });
+  const ctxLines = buildContextLines(context, { contextFields: PROGRAMME_CONTEXT_FIELDS, speaker });
   ctxLines.push(outroTask({ show, plan, speaker, nextShowName }));
   return djText({
     system: djSystem(speaker),
@@ -268,7 +269,7 @@ export function featureTask({ show, topic, plan = null, speaker = null }: any): 
 
 export async function generateProgrammeFeature({ show, topic, plan = null, persona = null, context = null, recap = null, recentOpeners = null }: any) {
   const speaker = persona || settings.getEffectivePersona();
-  const ctxLines = buildContextLines(context, { contextFields: PROGRAMME_CONTEXT_FIELDS, steer: true });
+  const ctxLines = buildContextLines(context, { contextFields: PROGRAMME_CONTEXT_FIELDS, steer: true, speaker });
   if (recap) ctxLines.push(`Already said on air recently (do not repeat these topics or phrasing):\n${recap}`);
   ctxLines.push(featureTask({ show, topic, plan, speaker }));
   return djText({

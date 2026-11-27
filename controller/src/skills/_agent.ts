@@ -391,9 +391,11 @@ export const directorAgent = defineAgent({
 
 // The situation handed to the agent as its single user turn: what is on air plus
 // queue.getDjRecap(), never the track-pick session history.
-export function buildSituation(ctx, { forced = false, contextFields, recentCuriosity }: { forced?: boolean; contextFields?: string[]; recentCuriosity?: string[] } = {}) {
+// `speaker` is who writes the spoken line (the date is given in their own
+// language); omitted, the persona on air at the context's moment.
+export function buildSituation(ctx, { forced = false, contextFields, recentCuriosity, speaker }: { forced?: boolean; contextFields?: string[]; recentCuriosity?: string[]; speaker?: unknown } = {}) {
   const lines = ['The current moment:'];
-  const ctxLines = buildContextLines(ctx, { contextFields, steer: true });
+  const ctxLines = buildContextLines(ctx, { contextFields, steer: true, speaker });
   if (ctxLines.length) lines.push(...ctxLines);
   const cur = queue.current?.track;
   if (cur) lines.push(`On air now: "${cur.title}" by ${cur.artist || 'unknown'}`);
@@ -536,7 +538,7 @@ async function runSimpleDirector(ctx, { caps, speaker, freq, sfxCatalog, onData 
   const recentCuriosity = cap.kind === 'curiosity' ? recentAiredCuriosity() : undefined;
   const out = await deadlinedSegmentObject({
     system: simpleSystem(speaker, cap, freq, sfxCatalog),
-    prompt: buildSituation(ctx, { contextFields: effectiveContextFields(cap), recentCuriosity }) + dataBlock(data),
+    prompt: buildSituation(ctx, { contextFields: effectiveContextFields(cap), recentCuriosity, speaker: skillWriterFor(cap, speaker) }) + dataBlock(data),
     schema: simpleSegmentSchema(),
     temperature: 0.9,
     kind: 'generateSegment',
@@ -596,7 +598,7 @@ export async function agenticTick(ctx) {
       // doesn't repeat itself (#577).
       const recentCuriosity = caps.some(c => c.kind === 'curiosity') ? recentAiredCuriosity() : undefined;
       const { object } = await directorAgent.run({
-        messages: [{ role: 'user', content: buildSituation(ctx, { contextFields: unionContextFields(caps), recentCuriosity }) }],
+        messages: [{ role: 'user', content: buildSituation(ctx, { contextFields: unionContextFields(caps), recentCuriosity, speaker }) }],
         persona: speaker, caps, freq, sfxCatalog,
         ctx, segmentState, onData: weather.onData,
       });
@@ -881,7 +883,7 @@ export async function runCapability(
   // Empty catalogue when SFX are disabled — the agent is never offered effects.
   const sfxCatalog = settings.get().sfx?.enabled === false ? [] : await sfx.catalog();
   const recentCuriosity = cap.kind === 'curiosity' ? recentAiredCuriosity() : undefined;
-  const situation = buildSituation(ctx, { forced: true, contextFields: effectiveContextFields(cap), recentCuriosity })
+  const situation = buildSituation(ctx, { forced: true, contextFields: effectiveContextFields(cap), recentCuriosity, speaker: skillWriterFor(cap, speaker) })
     + (brief ? `\n\n${brief}` : '');
 
   // Whether this skill may stand down at all: decided once, applied identically

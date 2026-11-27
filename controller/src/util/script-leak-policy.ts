@@ -170,6 +170,15 @@ for (const entry of LANGUAGES) {
   for (const code of entry.codes) BY_CODE.set(code, entry.scripts);
 }
 
+/**
+ * The language table's names and codes, read-only, for the one other reader
+ * that needs a language recognised rather than its scripts: the persona's
+ * date locale (util/language-locale.ts). One table, so the two cannot drift.
+ */
+export function knownLanguages(): ReadonlyArray<{ readonly names: readonly string[]; readonly codes: readonly string[] }> {
+  return LANGUAGES;
+}
+
 const CODE = /^([a-z]{2,3})(?:[-_][a-z0-9]{2,8})*$/;
 const WORD = /[\p{L}\p{M}'ʻ]+/gu;
 
