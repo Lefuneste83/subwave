@@ -1,9 +1,13 @@
 // normalizeForDisplay removes markup only. normalizeForSpeech also applies
 // pronunciation corrections, year/decade, clock (am/pm) and "No." expansion,
-// currency and unit expansion, and station spelling.
+// currency and unit expansion, and station spelling; a non-English line gets
+// its years and whole numbers in its own language's words (CLDR, spellout.ts).
 // Persist only display text; speech spellings belong exclusively to TTS (#963, #1186, #1669).
 // Preserve artist/title punctuation and validate structural performance cues.
 // Pure helpers; see scripts/speech-text.test.ts.
+
+import { spellOut, spelloutLocale } from './spellout.js';
+import { languageLocale } from '../util/language-locale.js';
 
 // Apply operator from/to corrections from settings.tts.corrections.
 // Pass them explicitly so the normalizer remains pure.
@@ -127,7 +131,50 @@ function isNumericContext(before: string, after: string): boolean {
     || /^\s*(?:[-/]|to\b)\s*\d/i.test(after);
 }
 
-function normalizeYears(text: string): string {
+// How a recognised year, decade or year range is said. The recognition
+// (YEAR_RE and the context guards in normalizeYears) is one rule for every
+// language; only the words differ. A null keeps the digits as written.
+interface YearVoice {
+  year(year: number): string | null;
+  // `decade` is the captured `s` / `'s` suffix; `before` the text before it.
+  decade(year: number, decade: string, before: string): string | null;
+  // `end` is the endpoint as written (2 or 4 digits), `resolved` its year.
+  range(year: number, resolved: number, end: string): string | null;
+  // The bare short decades ("the 60s", "'80s") are an English form.
+  shortDecades: boolean;
+}
+
+// A two-digit range end said on its own ("1965-75" → "... seventy-five").
+function shortRangeEnd(year: number, resolved: number, end: string): number | null {
+  const century = Math.floor(year / 100) * 100;
+  const shortEnd = Number(end);
+  return end.length === 2 && resolved < century + 100 && shortEnd >= 10 ? shortEnd : null;
+}
+
+const ENGLISH_YEARS: YearVoice = {
+  year: yearWords,
+  decade(year, decade, before) {
+    if (decade.startsWith("'")) {
+      return year % 10 === 0 && DECADE_CONTEXT_RE.test(before)
+        ? decadeWords(year) : `${yearWords(year)}'s`;
+    }
+    return year % 10 === 0 ? decadeWords(year) : null;
+  },
+  range(year, resolved, end) {
+    const short = shortRangeEnd(year, resolved, end);
+    return `${yearWords(year)} to ${short === null ? yearWords(resolved) : twoDigitWords(short)}`;
+  },
+  shortDecades: true,
+};
+
+// Character ranges of `text` a pass must leave as written.
+type Spans = readonly (readonly [number, number])[];
+
+function overlaps(spans: Spans, start: number, end: number): boolean {
+  return spans.some(([s, e]) => start < e && end > s);
+}
+
+function normalizeYears(text: string, voice: YearVoice = ENGLISH_YEARS, keep: Spans = []): string {
   const t = text.replace(YEAR_RE, (
     match, first: string, decade: string | undefined, end: string | undefined, offset: number,
   ) => {
@@ -135,14 +182,9 @@ function normalizeYears(text: string): string {
     const after = text.slice(offset + match.length);
     if (isNumericContext(before, after)
       || (!decade && (QUANTITY_SUFFIX_RE.test(after) || PLURAL_QUANTITY_SUFFIX_RE.test(after)))) return match;
+    if (overlaps(keep, offset, offset + match.length)) return match;
     const year = Number(first);
-    if (decade) {
-      if (decade.startsWith("'")) {
-        return year % 10 === 0 && DECADE_CONTEXT_RE.test(before)
-          ? decadeWords(year) : `${yearWords(year)}'s`;
-      }
-      return year % 10 === 0 ? decadeWords(year) : match;
-    }
+    if (decade) return voice.decade(year, decade, before) ?? match;
     if (end) {
       const century = Math.floor(year / 100) * 100;
       const shortEnd = Number(end);
@@ -150,12 +192,11 @@ function normalizeYears(text: string): string {
         ? century + shortEnd + (shortEnd < year % 100 ? 100 : 0) : shortEnd;
       // Leave non-forward/out-of-range endpoints and multi-part dates alone.
       if (resolvedEnd <= year || resolvedEnd < 1800 || resolvedEnd > 2099) return match;
-      const endWords = end.length === 2 && resolvedEnd < century + 100 && shortEnd >= 10
-        ? twoDigitWords(shortEnd) : yearWords(resolvedEnd);
-      return `${yearWords(year)} to ${endWords}`;
+      return voice.range(year, resolvedEnd, end) ?? match;
     }
-    return yearWords(year);
+    return voice.year(year) ?? match;
   });
+  if (!voice.shortDecades) return t;
   return t.replace(SHORT_DECADE_RE, (match, quote: string, digits: string, offset: number) => {
     const before = t.slice(0, offset);
     const after = t.slice(offset + match.length);
@@ -169,6 +210,85 @@ function normalizeYears(text: string): string {
       if (!dateContext && !musicContext) return match;
     }
     return DECADES[Number(digits) / 10];
+  });
+}
+
+// --- numbers in the speaker's own language (every language but English) ---
+// A voice reads digits in the language it was trained on most, so a Greek
+// voice says "2021" in English, and a model told to write years in words
+// writes them wrong (1996 as "two thousand ninety-six"). The code spells them
+// instead, in the persona's language, from Unicode CLDR's spell-out rules
+// (spellout.ts), and the model keeps digits. English keeps its own
+// verbaliser above; a language without CLDR rules, or one the language table
+// does not know, keeps the digits exactly as before.
+//
+// Years are recognised by the English rule (normalizeYears: YEAR_RE and its
+// guards) and said with the locale's year rules; every other whole number up
+// to SPELLOUT_MAX with its plain numbering rules. Both are CLDR's nominative,
+// numbering-gender forms (and Russian's year rules give the genitive ordinal
+// of "1991 года"): no case or gender is inflected to fit the sentence.
+// Digits stay digits inside a name the line may carry (a title such as
+// "Top 100" or "Hits - 1983 -", matched word by word), with a leading zero,
+// glued to a letter ("3η", "2pac"), in a numeric context the year rule
+// already knows (decimals, clocks, dates, "No."/"#" identifiers, digit
+// ranges) and before a symbol or unit this pass later expands (%, °, a
+// currency sign, mph, km/h).
+const INTEGER_RE = /(?<![\p{L}\p{N}_])\d+(?![\p{L}\p{N}_])/gu;
+const SYMBOL_AFTER_RE = /^\s*(?:[%°\p{Sc}]|mph\b|km\/h\b)/iu;
+// Soft hyphens mark compound-word breaks in German, Dutch, Italian, Greek…
+// rules and are not speech.
+const INVISIBLE_RE = /[\u00ad\u200b]/g;
+
+function nameSpans(text: string, names: readonly unknown[]): Spans {
+  const spans: [number, number][] = [];
+  for (const name of names) {
+    const words = String(name ?? '').match(/[\p{L}\p{N}]+/gu);
+    if (!words?.some((w) => /\p{N}/u.test(w))) continue;
+    const re = new RegExp(`(?<![\\p{L}\\p{N}])${words.join('[^\\p{L}\\p{N}]+')}(?![\\p{L}\\p{N}])`, 'giu');
+    for (const m of text.matchAll(re)) spans.push([m.index, m.index + m[0].length]);
+  }
+  return spans;
+}
+
+function spelloutVoice(locale: string): YearVoice {
+  const say = (n: number, kind: 'year' | 'number') => spellOut(locale, n, kind)?.replace(INVISIBLE_RE, '') ?? null;
+  return {
+    year: (year) => say(year, 'year'),
+    decade: () => null,
+    range(year, resolved, end) {
+      const short = shortRangeEnd(year, resolved, end);
+      const from = say(year, 'year');
+      const to = short === null ? say(resolved, 'year') : say(short, 'number');
+      return from && to ? `${from} - ${to}` : null;
+    },
+    shortDecades: false,
+  };
+}
+
+// The CLDR spell-out locale for a non-English persona language, else null.
+// The language is recognised once, by util/language-locale.ts (the script
+// guard's table, the same reading the localized date gets).
+function spelloutLocaleFor(language: string): string | null {
+  const tag = languageLocale(language);
+  if (!tag) return null;
+  try {
+    if (new Intl.Locale(tag).language === 'en') return null;
+  } catch {
+    return null;
+  }
+  return spelloutLocale(tag);
+}
+
+function spellNumbers(text: string, locale: string, names: readonly unknown[]): string {
+  const t = normalizeYears(text, spelloutVoice(locale), nameSpans(text, names));
+  const keep = nameSpans(t, names);
+  return t.replace(INTEGER_RE, (match, offset: number) => {
+    if (match.length > 1 && match.startsWith('0')) return match;
+    if (overlaps(keep, offset, offset + match.length)) return match;
+    const before = t.slice(0, offset);
+    const after = t.slice(offset + match.length);
+    if (isNumericContext(before, after) || SYMBOL_AFTER_RE.test(after)) return match;
+    return spellOut(locale, Number(match), 'number')?.replace(INVISIBLE_RE, '') ?? match;
   });
 }
 
@@ -419,6 +539,9 @@ export function normalizeForSpeech(
   corrections?: readonly SpeechCorrection[],
   language = '',
   engine = '',
+  // The names the line may carry (queue.spokenNames): digits inside one stay
+  // digits when a non-English line is spelled out.
+  names: readonly unknown[] = [],
 ): string {
   if (!text) return text;
   let t = stripMarkup(text, { engine });
@@ -459,6 +582,10 @@ export function normalizeForSpeech(
     // already passed above with "no." as a protected identifier prefix, so
     // "No. 1967" keeps its numeric reading.
     t = t.replace(/\b(?:No\.\s*|[Nn][Oo]\.)(?=\d)/g, 'number ');
+  } else {
+    // Any other language CLDR spells: years and whole numbers in its words.
+    const locale = spelloutLocaleFor(lang);
+    if (locale) t = spellNumbers(t, locale, names);
   }
 
   // --- units and symbols (all keyed on an adjacent digit — conservative) ---

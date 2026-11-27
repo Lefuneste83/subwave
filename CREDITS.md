@@ -54,6 +54,7 @@ in the `package.json` files, lockfiles, and `docker/Dockerfile.*`, not here.
 | [jieba](https://github.com/fxsjy/jieba), [pypinyin](https://github.com/mozillazg/python-pinyin), pypinyin-dict, [cn2an](https://github.com/Ailln/cn2an) | Chinese segmentation, pinyin, and number reading | MIT |
 | [ordered-set](https://pypi.org/project/ordered-set/) | misaki dependency | MIT |
 | [soundfile](https://github.com/bastibe/python-soundfile) | WAV output from the Python workers | BSD-3-Clause |
+| [Unicode CLDR](https://cldr.unicode.org) rule-based number format data (`cldr-rbnf`) | Years and numbers spelled in the speaker's language, vendored in `controller/src/audio/rbnf/` | Unicode-3.0 |
 
 ## Audio analysis and machine learning
 

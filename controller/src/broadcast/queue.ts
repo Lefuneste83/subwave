@@ -32,7 +32,7 @@ import * as blocklist from '../music/blocklist.js';
 import { artistRootKey, creditedActKeys, creditedActNames, trackKey, type CandidateLike } from '../music/recency.js';
 import type { AirTimeOf } from '../music/show-recency.js';
 import { albumKeyFor } from '../music/album-facts.js';
-import { speak, voiceGainDb } from '../audio/tts.js';
+import { setSpokenNamesProvider, speak, voiceGainDb } from '../audio/tts.js';
 import {
   writeSilentWav,
   discardSilentWav,
@@ -6086,6 +6086,9 @@ class Queue {
 export type QueueApi = InstanceType<typeof Queue>;
 
 export const queue = new Queue();
+
+// speak() keeps the digits inside these names when it spells a line out.
+setSpokenNamesProvider(() => queue.spokenNames());
 
 // Every settings writer publishes through the cache. Refresh the same-show host
 // and synchronously detach obsolete uncommitted speech before any later await.

@@ -196,8 +196,11 @@ TTS engine routing, personas, guests, programmes and the policy switches
 - **Speech-only year readings (#1669)**: engines can read a digit year as a
   quantity (Kokoro: "1967" → "one thousand nine hundred sixty-seven"), so
   `normalizeForSpeech` spells years, decades and simple year ranges as words for
-  every engine when the speech language is English or unset. Non-English
-  languages keep digit dates for their engine's native reading. Synthesis,
+  every engine when the speech language is English or unset. Every other
+  language Unicode CLDR has spell-out rules for (97 locales) gets its years
+  and whole numbers spelled in its own words instead (next bullet); a language
+  without rules, or a label the language table does not recognise, keeps its
+  digit dates for the engine's native reading. Synthesis,
   previews and intro budgeting pass the speaker's language to the same rule.
   It runs after operator `tts.corrections` and before the unit/symbol rules;
   a correction to spoken words preempts expansion, while a replacement that
@@ -216,6 +219,38 @@ TTS engine routing, personas, guests, programmes and the policy switches
   to the engine's own reading, i.e. the pre-change behaviour — and `during
   1990's final month` still reads as a decade. Operator corrections remain the
   override for any case the rule gets wrong.
+- **Numbers in the speaker's language (CLDR spell-out)**: a voice reads digits
+  in the language it was trained on most, so a Greek voice read "2021" in
+  English; and a model asked (by a house rule) to write years in words wrote
+  them wrong ("1996" as "two thousand ninety-six" in Greek). So the code spells
+  them and the model keeps digits. For a non-English speaker,
+  `normalizeForSpeech` recognises years with the English year rule above (the
+  same `YEAR_RE` and guards, only the words differ) and reads them with the
+  locale's `%spellout-numbering-year`; every other whole number up to
+  999,999,999 with `%spellout-numbering`. `audio/spellout.ts` is a small
+  interpreter of ICU's rule-based number format over CLDR's own rules, vendored
+  in `audio/rbnf/cldr-spellout.json` (CLDR 49, only the two rule sets and what
+  they reach, whole-number rules only; Unicode licence beside it; regenerate
+  with `scripts/gen-rbnf-spellout.ts`). Node's `Intl` has no spell-out, and the
+  one npm implementation was a single-release package needing Node 24. The
+  interpreter matched ICU4C 79.1 on 603,243 values over all 97 locales; the
+  committed golden table (`scripts/fixtures/rbnf-icu-golden.json`, nine
+  languages) is ICU's output. The language is recognised by
+  `languageLocale()` in `util/language-locale.ts`, the one reading the
+  localized date also uses, over the script guard's table (English or native
+  name, ISO code). An English label the English rule
+  never matched ("Inglés") keeps its digits, as before. Digits stay digits
+  inside a name the line may carry (`queue.spokenNames()`, registered with
+  `tts.setSpokenNamesProvider`; matched word by word, so "Hits 1983" matches
+  the album "Hits - 1983 -"), with a leading zero, glued to a letter (`3η`),
+  in the numeric contexts above, and before `%`, `°`, a currency sign, `mph`
+  or `km/h` (the unit rules key on the digit). Year ranges read
+  `<year> - <year>`; English-only decade forms (`1980s`, `'80s`) stay. **Known
+  gaps**: CLDR's plain rule sets are one form (Greek neuter nominative, so
+  "δύο χιλιάδες είκοσι ένα"; Russian's year set is the genitive ordinal of
+  "1991 года"); no case or gender is fitted to the sentence, and ordinals,
+  decimals and digit ranges (`3–4` → `3 to 4`) are not spelled. A bare-number
+  title ("1999") protects the same digits anywhere in the line.
 
 ## Episode preparation research
 

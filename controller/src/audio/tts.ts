@@ -30,6 +30,22 @@ export const ENGINES = ['piper', 'kokoro', 'chatterbox', 'pocket-tts', 'cloud', 
 // Every other kind takes engine+voice from the effective persona's `tts`.
 const GLOBAL_VOICE_KINDS = new Set(['jingle', 'default']);
 
+// The names a spoken line may carry (queue.spokenNames), so a non-English
+// line's spell-out keeps the digits inside a title. The queue registers it,
+// which keeps this module free of the queue.
+let spokenNamesProvider: (() => readonly unknown[]) | null = null;
+export function setSpokenNamesProvider(provider: (() => readonly unknown[]) | null): void {
+  spokenNamesProvider = provider;
+}
+
+function spokenNames(): readonly unknown[] {
+  try {
+    return spokenNamesProvider?.() ?? [];
+  } catch {
+    return [];
+  }
+}
+
 // Explicit override (the persona-handoff mic-pass voices the OUTGOING persona
 // after the clock has moved on), else the clock-driven effective persona.
 function personaFor(persona?: any): any {
@@ -443,7 +459,9 @@ export async function speak(
   // that the free-text generators' own stripThinking never sees. No-op on clean
   // text. Operator speech corrections are read live, so a saved rule applies to
   // the next spoken line with no restart.
-  const normalizedText = normalizeForSpeech(stripThinking(text), settings.get().tts?.corrections, language, requested);
+  const normalizedText = normalizeForSpeech(
+    stripThinking(text), settings.get().tts?.corrections, language, requested, language ? spokenNames() : [],
+  );
   const speakText = GLOBAL_VOICE_KINDS.has(kind)
     ? normalizedText
     : scrubCjkForSpeech(normalizedText, language, alsoSpeaks);

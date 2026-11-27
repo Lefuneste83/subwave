@@ -59,16 +59,27 @@ const french = {
 test('on-air speech follows the explicit speaker language and keeps quantities numeric', async () => {
   const text = 'Sorti en 1967. Une durée de 1967 ms et un prix de ₹1967.';
   await tts.speak(text, { kind: 'link', persona: french, speedScale: 1 });
-  assert.equal(requests.at(-1), text);
+  assert.equal(requests.at(-1),
+    'Sorti en dix-neuf-cent soixante-sept. Une durée de mille neuf cent soixante-sept ms et un prix de ₹1967.');
   await tts.speak('Released in 1967.', {
     kind: 'link', persona: { ...french, language: 'English' }, speedScale: 1,
   });
   assert.equal(requests.at(-1), 'Released in nineteen sixty-seven.');
 });
 
+test('on-air spell-out keeps the digits inside the names the queue registered', async () => {
+  tts.setSpokenNamesProvider(() => ['Top 1967']);
+  try {
+    await tts.speak('Le Top 1967, sorti en 1967.', { kind: 'link', persona: french, speedScale: 1 });
+    assert.equal(requests.at(-1), 'Le Top 1967, sorti en dix-neuf-cent soixante-sept.');
+  } finally {
+    tts.setSpokenNamesProvider(null);
+  }
+});
+
 test('voice previews use their requested language independently of the active host', async () => {
   await tts.synthesizeSample({ engine: 'remote', text: 'Sorti en 1967.', language: 'French' });
-  assert.equal(requests.at(-1), 'Sorti en 1967.');
+  assert.equal(requests.at(-1), 'Sorti en dix-neuf-cent soixante-sept.');
   await tts.synthesizeSample({ engine: 'remote', text: 'Released in 1967.', language: 'en-GB' });
   assert.equal(requests.at(-1), 'Released in nineteen sixty-seven.');
   await tts.synthesizeSample({
@@ -80,9 +91,10 @@ test('voice previews use their requested language independently of the active ho
 
 test('intro budgets and enqueue use the captured speaker language rather than the active host', async () => {
   // Engine × persona pace clamps to 2 at every daypart. A 2.5s runway fits
-  // twelve words, so French fits while the sixteen-word English reading does not.
+  // twelve words, so a line in a language that keeps its digits (no CLDR
+  // spell-out rules) fits while the sixteen-word English reading does not.
   await settings.update({ tts: { speed: { remote: 2 } } });
-  const speaker = { ...french, tts: { ...french.tts, speed: 2 } };
+  const speaker = { ...french, language: 'Basque', tts: { ...french.tts, speed: 2 } };
   const song = { title: 'Song', artist: 'Artist', introMs: 2500 };
   const text = 'Sorti en 1967. Sorti en 1972. Sorti en 1984. Sorti en 1991.';
   assert.equal(trimLinkToIntro(text, song, speaker), text);
@@ -106,5 +118,5 @@ test('Gemini previews retain the requested model and speech language together', 
   });
   const request = geminiRequests.at(-1)!;
   assert.equal(request.model, 'gemini-3.8-flash-tts');
-  assert.equal(request.input[0].content[0].text, 'Sorti en 1967.');
+  assert.equal(request.input[0].content[0].text, 'Sorti en dix-neuf-cent soixante-sept.');
 });
