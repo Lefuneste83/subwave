@@ -14,9 +14,9 @@ export interface BlockedCount {
 }
 
 /**
- * Null while the figure is unknown: no overview yet, a controller without the
- * per-entry tally, or an entry added after the overview was counted (it
- * recounts in the background, and the next coverage read carries it).
+ * Null while the figure is unknown: no overview yet, or an entry added after
+ * the overview was counted (it recounts in the background, and the next
+ * coverage read carries it).
  */
 export function blockedCount(
   byEntry: Record<string, number> | undefined | null,

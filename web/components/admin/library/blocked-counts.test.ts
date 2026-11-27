@@ -1,3 +1,6 @@
+// The Blocked tab's per-entry figure (blocked-counts.ts).
+//
+// Run: npm test -- blocked-counts
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { blockedCount } from './blocked-counts';
@@ -19,7 +22,7 @@ test('an entry the tally lacks blocks nothing, and says so', () => {
   assert.equal(c?.none, true);
 });
 
-test('unknown stays blank: no overview, an older controller, or an entry newer than the count', () => {
+test('unknown stays blank: no overview yet, or an entry newer than the count', () => {
   assert.equal(blockedCount(undefined, { type: 'track', id: 't1' }, at), null);
   assert.equal(blockedCount(null, { type: 'track', id: 't1' }, at), null);
   assert.equal(blockedCount({}, { type: 'track', id: 'new', addedAt: '2026-10-31T03:00:00Z' }, at), null);

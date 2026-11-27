@@ -76,16 +76,6 @@ export function HistoryTab({
   selectionBar?: ReactNode;
 }) {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const { snap, player, linkFor } = usePreviewControls();
-  // A track can list several times here: the bar goes under the play the
-  // operator pressed, not under every play of that track.
-  const [previewPlay, setPreviewPlay] = useState<PlayEntry['id'] | null>(null);
-  // The page's tickable tracks, once each (a track can air twice on a page).
-  const pageTracks: Track[] = [];
-  for (const p of rows || []) {
-    if (p.trackId && !pageTracks.some(t => t.id === p.trackId)) pageTracks.push(historyTrack(p));
-  }
-  const allSelected = pageTracks.length > 0 && pageTracks.every(t => selected.has(t.id));
   return (
     <>
       {selectionBar}
@@ -111,117 +101,20 @@ export function HistoryTab({
             />
           )
         ) : (
-          <div className={cn(loading && 'opacity-60 transition-opacity')}>
-            {pageTracks.length > 0 && (
-              <div className="lib-colhead !flex items-center gap-3">
-                <label className={CHECK_HIT}>
-                  <input
-                    type="checkbox"
-                    checked={allSelected}
-                    onChange={() => onToggleAll(pageTracks)}
-                    aria-label={allSelected ? 'deselect the tracks on this page' : 'select the tracks on this page'}
-                  />
-                </label>
-                <span>{allSelected ? 'deselect this page' : 'select this page'}</span>
-              </div>
-            )}
-            {rows.map((p, i) => {
-              const day = playDayLabel(p.playedAt);
-              const prev = i > 0 ? rows[i - 1] : null;
-              const prevDay = prev ? playDayLabel(prev.playedAt) : null;
-              const time = new Date(p.playedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-              const track = historyTrack(p);
-              const seam = historySeamLine(p);
-              return (
-                <Fragment key={p.id}>
-                  {day !== prevDay && (
-                    <div className="caption border-b border-dashed border-[var(--separator-strong)] px-4 py-1.5 text-muted">{day}</div>
-                  )}
-                  <div className="flex items-center gap-3 border-b border-dashed border-[var(--separator-strong)] px-4 py-2.5 last:border-b-0">
-                    {p.trackId ? (
-                      <label className={CHECK_HIT}>
-                        <input
-                          type="checkbox"
-                          checked={selected.has(p.trackId)}
-                          onChange={() => onToggleSelect(p.trackId as string)}
-                          aria-label={`select ${p.title || 'track'}`}
-                        />
-                      </label>
-                    ) : (
-                      // Keeps the column: a play with no track id has nothing to tick.
-                      <span className="w-[13px] shrink-0" aria-hidden />
-                    )}
-                    <span className="mono-num w-11 shrink-0 text-[11px] text-muted" title={new Date(p.playedAt).toLocaleString('en-GB')}>
-                      {time}
-                    </span>
-                    <PreviewButton
-                      track={track}
-                      snap={snap}
-                      active={snap.id === track.id && previewPlay === p.id}
-                      onPress={() => {
-                        if (!(snap.id === track.id && previewPlay === p.id)) player?.stop();
-                        setPreviewPlay(p.id);
-                        void player?.toggle(track.id, linkFor(track.id));
-                      }}
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="lib-title">{p.title || 'unknown'}</div>
-                      <div className="lib-artist">{p.artist || ''}{p.album ? ` · ${p.album}` : ''}</div>
-                      {seam && (
-                        <div className="truncate text-[11px] text-muted" title={seam.title}>
-                          ↳ {seam.text}
-                        </div>
-                      )}
-                    </div>
-                    {p.showName && (
-                      <span className="lib-mtag hidden shrink-0 md:inline-block" title="show on air">{p.showName}</span>
-                    )}
-                    <span className="hidden w-24 shrink-0 text-right text-[11px] text-muted sm:block" title="how it was picked">
-                      {playSourceLabel(p)}
-                    </span>
-                    {!p.trackId ? (
-                      /* Says WHY the row is action-less. Without it an operator
-                         cannot tell a play with no id from buttons that failed to
-                         render — which is the work the old disabled Queue button's
-                         tooltip was doing. */
-                      <span className="shrink-0 text-[11px] text-muted" title="no track id recorded for this play">—</span>
-                    ) : (
-                      /* Three buttons where there was one, so Queue drops to its icon
-                         below sm: — the row still has to leave the title readable on a
-                         phone. */
-                      <span className="flex shrink-0 items-center gap-1.5">
-                        <HeartButton
-                          track={track}
-                          like={likeStateFor(track, likeIndex)}
-                          busy={liking === track.id}
-                          onToggle={onToggleLike}
-                        />
-                        <BlockMenu
-                          track={track}
-                          busy={blocking === track.id}
-                          disabled={!!blocking}
-                          onBlock={onBlock}
-                        />
-                        <Btn
-                          sm
-                          onClick={() => onQueue(track)}
-                          disabled={!!queuing}
-                          title="queue this track again"
-                        >
-                          {queuing === track.id ? '…' : (
-                            <><ListPlus size={12} /><span className="hidden sm:inline"> Queue</span></>
-                          )}
-                        </Btn>
-                      </span>
-                    )}
-                  </div>
-                  {snap.id === track.id && previewPlay === p.id && player && (
-                    <PreviewBar track={track} snap={snap} player={player} />
-                  )}
-                </Fragment>
-              );
-            })}
-          </div>
+          <HistoryRows
+            rows={rows}
+            loading={loading}
+            queuing={queuing}
+            onQueue={onQueue}
+            likeIndex={likeIndex}
+            liking={liking}
+            onToggleLike={onToggleLike}
+            blocking={blocking}
+            onBlock={onBlock}
+            selected={selected}
+            onToggleSelect={onToggleSelect}
+            onToggleAll={onToggleAll}
+          />
         )}
       </Card>
 
@@ -238,6 +131,151 @@ export function HistoryTab({
         </div>
       )}
     </>
+  );
+}
+
+// Split from HistoryTab so the preview hooks run only while rows are on screen
+// (the skeleton and the empty state render no player), as TrackTable's
+// TrackRows does: the preview stops when the last list showing rows leaves.
+function HistoryRows({
+  rows, loading, queuing, onQueue, likeIndex, liking, onToggleLike, blocking, onBlock,
+  selected, onToggleSelect, onToggleAll,
+}: {
+  rows: PlayEntry[];
+  loading: boolean;
+  queuing: string | null;
+  onQueue: (t: Track) => void;
+  likeIndex: LikeIndex;
+  liking: string | null;
+  onToggleLike: (t: Track, liked: boolean) => void;
+  blocking: string | null;
+  onBlock: (t: Track, type: BlockType) => void;
+  selected: Set<string>;
+  onToggleSelect: (id: string) => void;
+  onToggleAll: (rows: Track[]) => void;
+}) {
+  const { snap, player, linkFor } = usePreviewControls();
+  // A track can list several times here: the bar goes under the play the
+  // operator pressed, not under every play of that track.
+  const [previewPlay, setPreviewPlay] = useState<PlayEntry['id'] | null>(null);
+  // The page's tickable tracks, once each (a track can air twice on a page).
+  const pageTracks: Track[] = [];
+  for (const p of rows) {
+    if (p.trackId && !pageTracks.some(t => t.id === p.trackId)) pageTracks.push(historyTrack(p));
+  }
+  const allSelected = pageTracks.length > 0 && pageTracks.every(t => selected.has(t.id));
+  return (
+    <div className={cn(loading && 'opacity-60 transition-opacity')}>
+      {pageTracks.length > 0 && (
+        <div className="lib-colhead !flex items-center gap-3">
+          <label className={CHECK_HIT}>
+            <input
+              type="checkbox"
+              checked={allSelected}
+              onChange={() => onToggleAll(pageTracks)}
+              aria-label={allSelected ? 'deselect the tracks on this page' : 'select the tracks on this page'}
+            />
+          </label>
+          <span>{allSelected ? 'deselect this page' : 'select this page'}</span>
+        </div>
+      )}
+      {rows.map((p, i) => {
+        const day = playDayLabel(p.playedAt);
+        const prev = i > 0 ? rows[i - 1] : null;
+        const prevDay = prev ? playDayLabel(prev.playedAt) : null;
+        const time = new Date(p.playedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+        const track = historyTrack(p);
+        const seam = historySeamLine(p);
+        return (
+          <Fragment key={p.id}>
+            {day !== prevDay && (
+              <div className="caption border-b border-dashed border-[var(--separator-strong)] px-4 py-1.5 text-muted">{day}</div>
+            )}
+            <div className="flex items-center gap-3 border-b border-dashed border-[var(--separator-strong)] px-4 py-2.5 last:border-b-0">
+              {p.trackId ? (
+                <label className={CHECK_HIT}>
+                  <input
+                    type="checkbox"
+                    checked={selected.has(p.trackId)}
+                    onChange={() => onToggleSelect(p.trackId as string)}
+                    aria-label={`select ${p.title || 'track'}`}
+                  />
+                </label>
+              ) : (
+                // Keeps the column: a play with no track id has nothing to tick.
+                <span className="w-[13px] shrink-0" aria-hidden />
+              )}
+              <span className="mono-num w-11 shrink-0 text-[11px] text-muted" title={new Date(p.playedAt).toLocaleString('en-GB')}>
+                {time}
+              </span>
+              <PreviewButton
+                track={track}
+                snap={snap}
+                active={snap.id === track.id && previewPlay === p.id}
+                onPress={() => {
+                  if (!(snap.id === track.id && previewPlay === p.id)) player?.stop();
+                  setPreviewPlay(p.id);
+                  void player?.toggle(track.id, linkFor(track.id));
+                }}
+              />
+              <div className="min-w-0 flex-1">
+                <div className="lib-title">{p.title || 'unknown'}</div>
+                <div className="lib-artist">{p.artist || ''}{p.album ? ` · ${p.album}` : ''}</div>
+                {seam && (
+                  <div className="truncate text-[11px] text-muted" title={seam.title}>
+                    ↳ {seam.text}
+                  </div>
+                )}
+              </div>
+              {p.showName && (
+                <span className="lib-mtag hidden shrink-0 md:inline-block" title="show on air">{p.showName}</span>
+              )}
+              <span className="hidden w-24 shrink-0 text-right text-[11px] text-muted sm:block" title="how it was picked">
+                {playSourceLabel(p)}
+              </span>
+              {!p.trackId ? (
+                /* Says WHY the row is action-less. Without it an operator
+                   cannot tell a play with no id from buttons that failed to
+                   render — which is the work the old disabled Queue button's
+                   tooltip was doing. */
+                <span className="shrink-0 text-[11px] text-muted" title="no track id recorded for this play">—</span>
+              ) : (
+                /* Three buttons where there was one, so Queue drops to its icon
+                   below sm: — the row still has to leave the title readable on a
+                   phone. */
+                <span className="flex shrink-0 items-center gap-1.5">
+                  <HeartButton
+                    track={track}
+                    like={likeStateFor(track, likeIndex)}
+                    busy={liking === track.id}
+                    onToggle={onToggleLike}
+                  />
+                  <BlockMenu
+                    track={track}
+                    busy={blocking === track.id}
+                    disabled={!!blocking}
+                    onBlock={onBlock}
+                  />
+                  <Btn
+                    sm
+                    onClick={() => onQueue(track)}
+                    disabled={!!queuing}
+                    title="queue this track again"
+                  >
+                    {queuing === track.id ? '…' : (
+                      <><ListPlus size={12} /><span className="hidden sm:inline"> Queue</span></>
+                    )}
+                  </Btn>
+                </span>
+              )}
+            </div>
+            {snap.id === track.id && previewPlay === p.id && player && (
+              <PreviewBar track={track} snap={snap} player={player} />
+            )}
+          </Fragment>
+        );
+      })}
+    </div>
   );
 }
 
