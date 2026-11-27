@@ -188,7 +188,9 @@ for (const language of ['', 'English', 'English (UK)', 'en', 'en-GB', ' en_US ']
   });
 }
 
-for (const language of ['French', 'fr', 'Spanish', 'es', 'Turkish', 'German', 'Japanese', 'unknown']) {
+// Languages CLDR spells are covered by speech-spellout.test.ts; these have no
+// spell-out rules or are not recognised, and keep the digits as written.
+for (const language of ['Basque', 'eu', 'Inglés', 'unknown']) {
   test(`${language} dates stay numeric and operator corrections still apply`, () => {
     const text = "1967, 1960s, '60s and 1967-1972";
     assert.equal(normalizeForSpeech(text, undefined, language), text);

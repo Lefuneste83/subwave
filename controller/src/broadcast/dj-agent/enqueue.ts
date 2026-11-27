@@ -119,7 +119,9 @@ export function trimLinkToIntro(
   // the ceiling stays a spoken-word ceiling while the trim lands on the display
   // text's sentence boundaries. firstVocalMsFor arms the drop when a measured
   // vocal entry leaves no runway.
-  const spoken = normalizeForSpeech(clean, settings.get().tts?.corrections, String(speaker.language || ''));
+  const spoken = normalizeForSpeech(
+    clean, settings.get().tts?.corrections, String(speaker.language || ''), '', [song?.title, song?.artist, song?.album],
+  );
   const pace = speechPaceScale('link', speaker) * spokenWordScale(display, spoken);
   return dj.enforceIntroBudget(display, introMsOf(song), pace, dj.firstVocalMsFor(song)) || null;
 }
