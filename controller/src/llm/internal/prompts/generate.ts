@@ -186,7 +186,8 @@ const SAY_SUGGESTIONS_SYSTEM = `You write prompt suggestions for the operator of
 // Returns the raw slot values as a list — the route normalises (trim, dedupe,
 // drop empties/over-long) and decides whether enough survived.
 export async function generateSaySuggestions(context: any, nowPlaying?: any): Promise<string[]> {
-  const lines = buildContextLines(context);
+  // Operator-facing suggestions, never spoken: no date in a persona's language.
+  const lines = buildContextLines(context, { speaker: null });
   if (nowPlaying?.title) {
     lines.push(`Now playing: "${nowPlaying.title}" by ${nowPlaying.artist || 'unknown'}`);
   }

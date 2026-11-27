@@ -8,7 +8,7 @@ import { djText } from '../strategy/text.js';
 import { djSystem, lengthPhrase } from './system.js';
 import { onAirLocationGrounding } from './grounding.js';
 import { quotedSteer } from '../../../schemas/steer.js';
-import { buildContextLines, decoratePrompt, pickTimePhrase, randomSeed, steerLine } from './context.js';
+import { buildContextLines, coarseDaypart, decoratePrompt, localizedDateLine, pickTimePhrase, randomSeed, steerLine } from './context.js';
 import { speakClockAllowed } from '../../../broadcast/clock-policy.js';
 import { isNamedRequester } from '../../../util/request-guard.js';
 import { introBudgetPhrase, introMsFor, firstVocalMsFor } from './intro-budget.js';
@@ -93,16 +93,38 @@ export const REQUESTER_GREETING_CLAUSE = ' When the request comes with a name, s
 
 const PERSONA_GROUNDING_RULE = 'FACTUAL GROUNDING: Treat supplied facts, including Sleeve Notes, as the factual ground truth for the current task. For factual claims about music, supplied facts are your only source of truth. Do not supplement them with your own knowledge of an artist, track, album or music history, even when you believe that knowledge is correct. You may naturally rephrase supplied facts, but do not expand, strengthen, upgrade or generalise them into unsupported claims, explanations, causes, relationships or historical context. “First station play” is not a premiere or a world premiere, and an album title does not make that album belong to the station or presenter. Do not invent or assume release dates, albums, chart history, credits, artist biography, lyrics, instrumentation, production details or other music trivia unless supplied. Sleeve Notes are optional material for natural conversation, not a checklist. Use only what helps the current on-air line. You do not need to mention them at all. You may freely express subjective, in-character reactions and musical impressions provided they are not presented as additional facts; describe the presenter’s response to the music, not an invented world around the station. Do not invent weather, season, date, clock time, programme state, people being present or events around the station. If approximate air time is supplied, you may infer the corresponding time of day but never make it more precise than supplied. Style or Tone instructions never override these factual-grounding rules. Use local colour, time, weather or other contextual texture only when the necessary information has been supplied.';
 
-function verifiedContextPacket(context: any, current: any = null, clockIsAirTime = false): string {
+// The following show as the link's fact packet states it, or null. Only the
+// final quarter-hour of a show carries one (context.ts showHandoverContext),
+// and only while the operator lets the DJ preview it (previewNextShow).
+function followingShow(context: any): { name: string; presenter: string } | null {
+  const handover = context?.showHandover;
+  if (handover?.phase !== "final-quarter-hour") return null;
+  const name = String(handover?.nextShow?.name || "").trim();
+  const presenter = String(handover?.nextShow?.presenter || "").trim();
+  return name && presenter ? { name, presenter } : null;
+}
+
+function verifiedContextPacket(context: any, current: any = null, clockIsAirTime = false, speaker: unknown = null): string {
   const moment: string[] = [];
   const day = String(context?.date?.dayLabel || "").trim();
   if (day) moment.push("Day: " + day + ".");
+  // The day and month in the presenter's own words: a link had only the
+  // English weekday, so the model translated it (wrongly) and invented the
+  // month. English presenters get nothing new here.
+  const local = day ? localizedDateLine(context, speaker) : null;
+  if (local) moment.push(local + ".");
   const airTime = clockIsAirTime ? fuzzyAirTime(context?.clock) : null;
   if (airTime) moment.push("Approximate air time: " + airTime + ".");
+  // A daypart is not a time statement, so it rides along with or without a
+  // verified air time and with the clock switched off: without it a link at
+  // 20:31 had the sun setting. It is read off the link's own clock (the
+  // air-time clock when one was resolved, dj-agent speechClockContext).
+  const daypart = coarseDaypart(context?.clock);
+  if (daypart) moment.push("Part of day: " + daypart.part + (daypart.dark == null ? "" : daypart.dark ? ", after dark" : ", daylight") + ".");
   const showName = String(context?.activeShow?.name || "").trim();
   if (showName) moment.push("Current show: \"" + showName + "\".");
   const handover = context?.showHandover;
-  const hasFollowingShow = handover?.phase === "final-quarter-hour" && handover?.nextShow?.name && handover?.nextShow?.presenter;
+  const hasFollowingShow = !!followingShow(context);
   if (hasFollowingShow) {
     moment.push("Current show is approaching its scheduled close.");
     const startsAt = clockIsAirTime ? String(handover.nextShow.startsAt || "").trim() : "";
@@ -140,7 +162,7 @@ export async function generateIntro({ track, context, requestedBy = null, reques
   const speaker = persona || settings.getEffectivePersona();
   // A song intro follows the operator's steer; a request intro carries the
   // listener's own words, so it never does.
-  const ctxLines = buildContextLines(context, { recentTracks, contextFields: SCRIPT_CONTEXT_FIELDS, steer: !requestText && !requestedBy });
+  const ctxLines = buildContextLines(context, { recentTracks, contextFields: SCRIPT_CONTEXT_FIELDS, steer: !requestText && !requestedBy, speaker });
   // Gate on isNamedRequester, not on truthiness: cleanRequesterName returns the
   // ledger stand-in 'anon' for every unsigned request, and that string is
   // truthy (#1347). The gate lives here rather than at the four call sites so a
@@ -216,7 +238,7 @@ export function stationIdPrompt({ context = null, persona = null }: any = {}) {
   const speaker = persona || settings.getEffectivePersona();
   const djName = speaker?.name || 'your host';
   const stationName = settings.get().station;
-  const ctxLines = buildContextLines(context, { contextFields: SCRIPT_CONTEXT_FIELDS });
+  const ctxLines = buildContextLines(context, { contextFields: SCRIPT_CONTEXT_FIELDS, speaker });
   // Daypart only: an ident is generated at the cron tick but airs after
   // LLM + TTS + voice-queue latency — an exact "18:15" routinely lands on air
   // minutes late (issue #864). "Keep it loose, never the exact minutes" was
@@ -273,6 +295,7 @@ export function signoffPrompt({ personaOut, personaIn, showOut = null, showIn = 
   // makes their sign-off claim they have been presenting the new show.
   const ctxLines = buildContextLines(context, {
     contextFields: SCRIPT_CONTEXT_FIELDS.filter(field => field !== 'show'),
+    speaker: personaOut ?? null,
   });
   const outName = personaOut?.name || 'your host';
   const inName = personaIn?.name || 'the next host';
@@ -293,7 +316,7 @@ export async function generateSignoff(args: any) {
 }
 
 export function handoffGreetingPrompt({ personaIn, personaOut, showIn = null, episodeAngle = null, episodeSubject = null, sameHost = false, context = null, recap = null, recentOpeners = null }: any) {
-  const ctxLines = buildContextLines(context, { contextFields: SCRIPT_CONTEXT_FIELDS });
+  const ctxLines = buildContextLines(context, { contextFields: SCRIPT_CONTEXT_FIELDS, speaker: personaIn ?? null });
   const inName = personaIn?.name || 'your host';
   const outName = personaOut?.name || 'the previous host';
   // Programme shows: this greeting doubles as the episode's intro, so the
@@ -326,7 +349,7 @@ export async function generateHandoffGreeting(args: any) {
 // Takes a free-text instruction/topic and performs it in character, rather
 // than reading it verbatim (that's what raw mode is for).
 export async function generateAdLib({ instruction, context = null, recap = null, recentOpeners = null }: any) {
-  const ctxLines = buildContextLines(context, { contextFields: SCRIPT_CONTEXT_FIELDS });
+  const ctxLines = buildContextLines(context, { contextFields: SCRIPT_CONTEXT_FIELDS, speaker: settings.getEffectivePersona() });
   const clipped = String(instruction || '').replace(/\s+/g, ' ').trim().slice(0, 300);
   ctxLines.push(`Task: the station operator wants you to say something on-air. Their instruction: "${clipped}". Deliver it in character as a natural spoken line — don't read the instruction back verbatim, perform it. ${lengthPhrase('adlib')}.`);
   return djText({
@@ -398,7 +421,13 @@ export function linkPrompt({
     : '';
   if (budget) rules.push(budget);
 
-  const facts = verifiedContextPacket(context, current, clockIsAirTime);
+  const facts = verifiedContextPacket(context, current, clockIsAirTime, speaker);
+  // Who comes on next is a fact only the schedule knows. Outside the final
+  // quarter-hour (or with the preview switched off) none is supplied, and a
+  // link that named the next presenter anyway named the wrong one.
+  if (!followingShow(context)) {
+    rules.push('No following show or presenter is supplied: do not name, announce or guess who or what comes on air after this show.');
+  }
   if (clockIsAirTime && fuzzyAirTime(context?.clock)) {
     rules.push("If you mention the time, use only the approximate phrase supplied in Current Context; do not turn it into an exact minute." + clockWordingNote(speaker));
   } else {
@@ -602,7 +631,7 @@ const HOURLY_NO_WEATHER_RULE = 'For this hourly time check, do not mention weath
   + ' This rule overrides persona and tone instructions for this segment; weather belongs only in the dedicated weather segment.';
 
 export async function generateHourlyTime({ recap = null, context = null, recentOpeners = null, persona = null, showWelcome = false }: any = {}) {
-  const ctxLines = buildContextLines(context, { contextFields: SCRIPT_CONTEXT_FIELDS });
+  const ctxLines = buildContextLines(context, { contextFields: SCRIPT_CONTEXT_FIELDS, speaker: persona || settings.getEffectivePersona() });
   const timeClause = nextHourlyTimeClause(context?.clock, persona || settings.getEffectivePersona());
   ctxLines.push(`Task: a brief top-of-the-hour time check, in character. ${lengthPhrase('hourly', persona || undefined)}. ${timeClause}`);
   if (showWelcome && context?.activeShow?.name) {

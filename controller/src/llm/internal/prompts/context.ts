@@ -6,7 +6,8 @@ import { steerClause } from '../../../schemas/steer.js';
 import { activeSteer } from '../../../settings/persona.js';
 
 import { speakClockAllowed } from '../../../broadcast/clock-policy.js';
-import { spokenContext } from '../../../settings.js';
+import { getEffectivePersona, personaLanguages, spokenContext } from '../../../settings.js';
+import { localizedDayLabel } from '../../../util/language-locale.js';
 
 // Narrative angles per call type. One is picked at random and injected into the
 // user prompt as "Tone for this segment:" so consecutive generations don't fall
@@ -140,11 +141,41 @@ export function steerLine(context: any): string {
   return steerClause(activeSteer(Number.isFinite(at) ? at : Date.now())?.prompt).trim();
 }
 
+// The day and month in the speaker's own language (util/language-locale.ts),
+// as one prompt line, or null for an English speaker, an unknown language or a
+// context without a date. A model handed only "Thursday, 26 November"
+// translates the labels itself, and a small one aired a Thursday as Tuesday
+// and November as February. The English line stays beside it, unchanged: it
+// carries the season, and every English prompt keeps its bytes. Primary
+// language only: the mixed-in ones are colour, not the language the date is
+// said in.
+export function localizedDateLine(context: any, speaker: unknown): string | null {
+  const { primary } = personaLanguages(speaker);
+  const label = localizedDayLabel(context?.date?.iso, primary);
+  return label ? `Day in ${primary}: ${label} (when you name the day or the month, use exactly these words)` : null;
+}
+
+// The coarse part of the day (morning, afternoon, evening, night) plus
+// whether it is dark, from the moment's clock: a daypart, never a time, so it
+// rides along with the clock switch off (broadcast/clock-policy.ts: daypart
+// descriptions stay eligible). Null without a readable clock. Night runs to
+// 05:00, the clock context's own late-night edge, so 02:00 is not "morning".
+export function coarseDaypart(clock: any): { part: 'morning' | 'afternoon' | 'evening' | 'night'; dark: boolean | null } | null {
+  const m = String(clock?.hhmm ?? '').match(/^(\d{1,2}):\d{2}$/);
+  const h = m ? Number(m[1]) : NaN;
+  if (!Number.isInteger(h) || h < 0 || h > 23) return null;
+  const part = h < 5 ? 'night' : h < 12 ? 'morning' : h < 18 ? 'afternoon' : h < 22 ? 'evening' : 'night';
+  return { part, dark: typeof clock?.isDark === 'boolean' ? clock.isDark : null };
+}
+
 export function buildContextLines(
   context: any,
-  { recentTracks, contextFields, steer = false }: {
+  { recentTracks, contextFields, steer = false, speaker }: {
     recentTracks?: any[];
     contextFields?: string | readonly string[] | null;
+    // Who speaks the line, for the date in their own language. Omitted, the
+    // persona on air at the moment the context describes (context.at).
+    speaker?: unknown;
     // The operator's steer, opted into by the links and segments a steer leans
     // (a song intro, a segment, banter, a programme feature) and by nothing
     // else. Never a prompt built around a listener's own words, whose output
@@ -165,7 +196,18 @@ export function buildContextLines(
   if (steerText) lines.push(steerText);
   if (on('date') && context?.date) {
     lines.push(`Day: ${context.date.dayLabel}, ${context.date.dayOfMonth} ${context.date.monthLabel} (${context.date.season})`);
+    const at = Date.parse(context?.at ?? '');
+    const local = localizedDateLine(context, speaker !== undefined
+      ? speaker
+      : getEffectivePersona(Number.isFinite(at) ? new Date(at) : new Date()));
+    if (local) lines.push(local);
   }
+  // Whether a line below already tells the model the part of the day (the
+  // time, the period) and that it is dark; when neither does, a coarse daypart
+  // is added after them, so a segment whose skill narrows its context never
+  // guesses "tonight" at noon.
+  let daypartShown = false;
+  let darkShown = false;
   if (on('clock') && context?.clock) {
     const tags: string[] = [];
     if (context.clock.isDark) tags.push('after dark');
@@ -189,7 +231,9 @@ export function buildContextLines(
       if (tags.length) lines.push(`Vibe: ${tags.join(' · ')}`);
     } else {
       lines.push(`Local time: ${context.clock.display || context.clock.hhmm}${tags.length ? ' · ' + tags.join(' · ') : ''}`);
+      daypartShown = true;
     }
+    darkShown = typeof context.clock.isDark === 'boolean';
   }
   if (on('time') && context?.time) {
     // A show's pinned mood overrides the autonomous mood chain (context.ts),
@@ -201,6 +245,12 @@ export function buildContextLines(
     lines.push(context?.activeShow?.moods?.length
       ? `Period: ${context.time.period}`
       : `Period: ${context.time.period} (${context.time.vibe})`);
+    daypartShown = true;
+  }
+  const daypart = daypartShown ? null : coarseDaypart(context?.clock);
+  if (daypart) {
+    const dark = !darkShown && daypart.dark != null ? (daypart.dark ? ' · after dark' : ' · daylight') : '';
+    lines.push(`Part of day: ${daypart.part}${dark}`);
   }
   // A place the operator withholds (#2099) leaves the reading unattributed.
   const weather = spokenContext(context)?.weather;
