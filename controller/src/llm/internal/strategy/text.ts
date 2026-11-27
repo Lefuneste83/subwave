@@ -26,7 +26,9 @@ const MAX_TOKENS_TEXT = 4000;
 // does not use (util/script-leak-policy.ts), judged against everything the
 // model was handed (system + prompt carry the names it may write), and a leak
 // is regenerated ONCE, with a note naming the stray letters. The homelab
-// default is slow, so never more than once. The retry's own answer is returned
+// default is slow, so never more than once. Look-alike letters alone (a
+// Cyrillic а inside a Greek word) are folded into the word's script and the
+// mended line comes back with no retry (the policy's `fold`). The retry's own answer is returned
 // whatever it holds: queue.speakable is the gate that drops a line still
 // leaking, so a dropped line is never recorded as said. Without `speaker` the
 // call is unchanged.
@@ -35,6 +37,12 @@ export async function djText(args: any): Promise<string> {
   if (args?.speaker === undefined) return out;
   const languages = personaLanguages(args.speaker);
   const verdict = scriptLeakVerdict(out, { languages, names: [args.system, args.prompt], surface: 'speech', retry: true });
+  // Look-alike letters, or a space missing before a name, are mended in
+  // place: the line is right once they are, so it costs no second call.
+  if (verdict.action === 'fold') {
+    logEvent('speech.scriptLeak', { kind: args.kind || 'sdk.djText', stage: 'writer', outcome: 'folded', language: languages.primary, folded: verdict.folds.map((f) => `${f.from}→${f.to}`) });
+    return verdict.text;
+  }
   if (verdict.action !== 'regenerate') return out;
   const { leak } = verdict;
   const kind = args.kind || 'sdk.djText';

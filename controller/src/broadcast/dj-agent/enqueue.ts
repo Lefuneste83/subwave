@@ -86,7 +86,7 @@ export function trimLinkToIntro(
   persona: Persona | null = null,
   queue: {
     log?: (kind: string, message: string) => void;
-    scriptLeakDropped?: (text: string, kind: string, opts: { persona?: Persona | null; names?: readonly unknown[] }) => boolean;
+    withoutScriptLeak?: (text: string, kind: string, opts: { persona?: Persona | null; names?: readonly unknown[] }) => string;
   } | null = null,
 ): string | null {
   const raw = (text || '').trim();
@@ -103,11 +103,15 @@ export function trimLinkToIntro(
     logEvent('speech.standInDropped', { kind: 'link', token });
     return null;
   }
-  const display = normalizeForDisplay(clean);
+  let display = normalizeForDisplay(clean);
   // A word from another writing system goes here too, before the budget and
   // before the caller records the line as the pick's `say` (queue.speakable
   // is the rule's gate; the free-text writer has had its one retry).
-  if (display && queue?.scriptLeakDropped?.(display, 'link', { persona: speaker, names: [song?.title, song?.artist, song?.album] })) return null;
+  // A line carrying only look-alike letters comes back mended.
+  if (display && queue?.withoutScriptLeak) {
+    display = queue.withoutScriptLeak(display, 'link', { persona: speaker, names: [song?.title, song?.artist, song?.album] });
+    if (!display) return null;
+  }
   // Non-DJ personas skip the budget but not the cleanup.
   if (!speaker?.djMode) return display || null;
   // A DURATION budget, so it is counted on the words the engine will read.

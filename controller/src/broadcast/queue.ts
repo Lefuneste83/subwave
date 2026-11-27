@@ -3008,8 +3008,7 @@ class Queue {
     const token = verbatim ? null : standInToken(text);
     if (!token) {
       const shown = normalizeForDisplay(text);
-      if (!verbatim && this.scriptLeakDropped(shown, kind, { persona, names })) return '';
-      return shown;
+      return verbatim ? shown : this.withoutScriptLeak(shown, kind, { persona, names });
     }
     this.log('scheduler', `${kind}: dropped a stand-in line ("${token}") instead of airing it`);
     logEvent('speech.standInDropped', { kind, token });
@@ -3032,16 +3031,24 @@ class Queue {
     return out;
   }
 
-  // True when `text` carries a foreign-script word, logged once with the
-  // offending letters (never the line or the prompt).
-  scriptLeakDropped(text: string, kind: string, { persona = null, names = [] }: { persona?: Persona | null; names?: readonly unknown[] } = {}): boolean {
+  // `text` as it may air: '' when it carries a foreign-script word (logged
+  // once with the offending letters, never the line or the prompt), the line
+  // with its look-alike letters folded into the word's own script when that
+  // is all it carries (the policy's `fold`, logged once), else `text`.
+  withoutScriptLeak(text: string, kind: string, { persona = null, names = [] }: { persona?: Persona | null; names?: readonly unknown[] } = {}): string {
     const languages = settings.personaLanguages(persona ?? settings.getEffectivePersona());
     const verdict = scriptLeakVerdict(text, { languages, names: this.spokenNames(names), surface: 'speech' });
-    if (verdict.action !== 'drop') return false;
+    if (verdict.action === 'fold') {
+      const folded = verdict.folds.map((f) => `${f.from}→${f.to}`);
+      this.log('scheduler', `${kind}: mended look-alike letters in a ${languages.primary} line (${folded.map((f) => `"${f}"`).join(', ')})`);
+      logEvent('speech.scriptLeak', { kind, stage: 'gate', outcome: 'folded', language: languages.primary, folded });
+      return verdict.text;
+    }
+    if (verdict.action !== 'drop') return text;
     const { leak } = verdict;
     this.log('scheduler', `${kind}: dropped a ${languages.primary} line carrying another writing system (${leak.runs.map((r) => `"${r}"`).join(', ')}) instead of airing it`);
     logEvent('speech.scriptLeakDropped', { kind, language: languages.primary, runs: leak.runs, scripts: leak.scripts });
-    return true;
+    return '';
   }
 
   // M1: a generated line may state a time copied from the DJ's earlier speech
