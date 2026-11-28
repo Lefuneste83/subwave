@@ -28,6 +28,56 @@ export function withheldFromPrompts(turn: { meta?: { verbatim?: unknown } | null
   return turn?.meta?.verbatim === true;
 }
 
+// A mid-show host change (session.refreshHost: the operator moved the live
+// show to another persona) keeps the editorial session, so the lines the
+// previous host aired stay in it. Offered to the new host they read as a
+// guest's words at best and as the station's voice at worst: the previous
+// host's greeting naming the show before ("Tom Avro") sat in a new host's
+// "You said these things on-air recently" block, every ident by the new host
+// then aired "with Tom Avro", and each one fed the next prompt as his own
+// words. So the change is a prompt-memory boundary for spoken lines, the way a
+// show handoff is: before the LATEST change, a line attributed to anyone but
+// the current host (`meta.personaId`, which every automatic host path stamps)
+// is withheld, so an A -> B -> A change keeps A's first lines and never B's.
+// An unattributed line (a legacy turn, a caller that stamps no speaker) stays,
+// as before: nothing says whose it was, and a recovered session's memory must
+// not empty itself on a host repair. Should such a line name the previous
+// host, the spoken-line guard (util/host-name-policy.ts) still keeps that
+// name off the air.
+// The turns stay in session.json, the booth and djLog; only prompts lose them.
+// The change is the scenario turn refreshHost() writes, stamped
+// `meta.hostChange`; a session persisted before the stamp is recognised by
+// that turn's fixed wording. Both prompt readers, promptMemoryEntries() and
+// session.windowMessages(), ask heldByHostChange().
+export const HOST_CHANGE_META = 'hostChange';
+const LEGACY_HOST_CHANGE = /^Host changed from .+ to .+ while the show continues\.$/;
+
+function isHostChange(turn: { role?: unknown; kind?: unknown; text?: unknown; meta?: Record<string, unknown> | null } | null | undefined): boolean {
+  if (turn?.role !== 'event' || turn?.kind !== 'scenario') return false;
+  return turn.meta?.[HOST_CHANGE_META] === true
+    || (typeof turn.text === 'string' && LEGACY_HOST_CHANGE.test(turn.text));
+}
+
+// Whether the turn at `index` of `turns` is held from prompts by a later host
+// change. `personaId` is the session's current host.
+export function heldByHostChange(
+  turns: readonly ({ role?: unknown; kind?: unknown; text?: unknown; meta?: Record<string, unknown> | null } | null | undefined)[],
+  personaId: string | null,
+): (index: number) => boolean {
+  let last = -1;
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (isHostChange(turns[i])) { last = i; break; }
+  }
+  if (last < 0) return () => false;
+  return (index) => {
+    if (index >= last) return false;
+    const turn = turns[index];
+    if (turn?.role !== 'segment') return false;
+    const speakerId = turn.meta?.personaId;
+    return typeof speakerId === 'string' && speakerId !== '' && speakerId !== personaId;
+  };
+}
+
 export interface PromptMemoryEntry {
   t: string;
   kind: string;
@@ -41,9 +91,12 @@ export function promptMemoryEntries(
   personaId: string | null = null,
 ): PromptMemoryEntry[] {
   const out: PromptMemoryEntry[] = [];
-  for (const turn of turns) {
+  const held = heldByHostChange(turns, personaId);
+  for (let i = 0; i < turns.length; i++) {
+    const turn = turns[i];
     if (turn?.role !== 'segment') continue;
     if (withheldFromPrompts(turn)) continue;
+    if (held(i)) continue;
     // recover() validates the array but not each turn, and getDjRecap() runs
     // synchronously inside request/DJ routes: a hand-edited state file must
     // not turn into a 500.

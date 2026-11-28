@@ -12,6 +12,8 @@ import { llmCallOptions, repeatPenaltyApplies, samplingWithLocalKnobs } from '..
 import { personaLanguages, resolveMaxOutputTokens } from '../../../settings.js';
 import { scriptLeakVerdict, type ScriptLeak } from '../../../util/script-leak-policy.js';
 import { logEvent } from '../../../observability/events.js';
+import { judgeHostNames } from '../../../broadcast/host-name-guard.js';
+import type { WrongHost } from '../../../util/host-name-policy.js';
 
 // Hard output-token cap. A reasoning model with no cap can generate until it
 // fills the whole context window — one runaway <think> ramble then ties up the
@@ -32,31 +34,51 @@ const MAX_TOKENS_TEXT = 4000;
 // whatever it holds: queue.speakable is the gate that drops a line still
 // leaking, so a dropped line is never recorded as said. Without `speaker` the
 // call is unchanged.
+//
+// The same one regeneration also answers a line that names another station
+// presenter who is not on the air (util/host-name-policy.ts, asked through
+// broadcast/host-name-guard.ts): an ident by one host once aired "with Tom
+// Avro", another persona, seven times. Both checks share the single retry, so
+// a line is never generated more than twice.
 export async function djText(args: any): Promise<string> {
   const out = await djTextOnce(args);
   if (args?.speaker === undefined) return out;
   const languages = personaLanguages(args.speaker);
+  const kind = args.kind || 'sdk.djText';
   const verdict = scriptLeakVerdict(out, { languages, names: [args.system, args.prompt], surface: 'speech', retry: true });
+  let text = out;
+  let note = '';
   // Look-alike letters, or a space missing before a name, are mended in
   // place: the line is right once they are, so it costs no second call.
   if (verdict.action === 'fold') {
-    logEvent('speech.scriptLeak', { kind: args.kind || 'sdk.djText', stage: 'writer', outcome: 'folded', language: languages.primary, folded: verdict.folds.map((f) => `${f.from}→${f.to}`) });
-    return verdict.text;
+    logEvent('speech.scriptLeak', { kind, stage: 'writer', outcome: 'folded', language: languages.primary, folded: verdict.folds.map((f) => `${f.from}→${f.to}`) });
+    text = verdict.text;
+  } else if (verdict.action === 'regenerate') {
+    const { leak } = verdict;
+    logEvent('speech.scriptLeak', { kind, stage: 'retry', language: languages.primary, runs: leak.runs, scripts: leak.scripts });
+    note += scriptLeakRetryNote(languages.primary, leak);
   }
-  if (verdict.action !== 'regenerate') return out;
-  const { leak } = verdict;
-  const kind = args.kind || 'sdk.djText';
-  logEvent('speech.scriptLeak', { kind, stage: 'retry', language: languages.primary, runs: leak.runs, scripts: leak.scripts });
+  const host = judgeHostNames(text, { speaker: args.speaker, kind, retry: true });
+  if (host.action === 'regenerate') {
+    logEvent('speech.wrongHost', { kind, stage: 'retry', personaId: args.speaker?.id ?? null, named: host.named.map(n => n.personaId), said: host.named.map(n => n.said) });
+    note += wrongHostRetryNote(args.speaker, host.named);
+  }
+  if (!note) return text;
   try {
     return await djTextOnce({
       ...args,
-      prompt: `${args.prompt}${scriptLeakRetryNote(languages.primary, leak)}`,
+      prompt: `${args.prompt}${note}`,
       seed: typeof args.seed === 'number' ? (args.seed + 1) % 2147483647 : args.seed,
     });
   } catch {
     // The first answer goes on to the gate, which drops it.
     return out;
   }
+}
+
+function wrongHostRetryNote(speaker: { name?: unknown } | null | undefined, named: readonly WrongHost[]): string {
+  const self = typeof speaker?.name === 'string' && speaker.name.trim() ? speaker.name.trim() : 'the presenter on the air';
+  return `\n\nPRESENTER: a draft of this line named ${named.map(n => `"${n.said}"`).join(', ')}, another presenter of this station who is not on the air now. You are ${self}. Write the line again as yourself: never introduce yourself, or the station, with another presenter's name.`;
 }
 
 function scriptLeakRetryNote(language: string, leak: ScriptLeak): string {

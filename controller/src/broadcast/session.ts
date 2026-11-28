@@ -10,7 +10,7 @@ import { writeFileAtomic, writeFileAtomicSync } from '../util/atomic-file.js';
 import * as settings from '../settings.js';
 import { logEvent } from '../observability/events.js';
 import type { getFullContext } from '../context.js';
-import { promptMemoryEntries, withheldFromPrompts, type PromptMemoryEntry } from './prompt-memory.js';
+import { HOST_CHANGE_META, heldByHostChange, promptMemoryEntries, withheldFromPrompts, type PromptMemoryEntry } from './prompt-memory.js';
 import { stripClockPhrases } from './clock-phrases.js';
 import { snapshotBoothCarry, type BoothCarry } from './booth-carry.js';
 import { BOUNDARY_MAX_HORIZON_SEC, nextShowBoundaryMs, showKeyAt, showRunContinues, showTakeoverStartedAt } from './show-boundary.js';
@@ -302,6 +302,9 @@ export function refreshHost(at: Date = new Date()): boolean {
     role: 'event',
     kind: 'scenario',
     text: `Host changed from ${previousName || 'the default DJ'} to ${persona?.name || 'the default DJ'} while the show continues.`,
+    // The prompt-memory boundary (prompt-memory.ts heldByHostChange): the
+    // previous host's lines stay here and in the booth, never in a prompt.
+    meta: { [HOST_CHANGE_META]: true, fromPersonaId: previousId, toPersonaId: nextId, hostRevision: s.hostRevision },
   });
   logEvent('session.host-refresh', {
     sessionId: s.id, key: s.key, previousPersonaId: previousId, personaId: nextId,
@@ -915,6 +918,8 @@ export function windowMessages() {
   for (let i = recent.length - 1; i >= 0; i--) {
     if (recent[i].role === 'event' && recent[i].kind === 'pick') { lastPickEventIdx = i; break; }
   }
+  // Lines a previous host aired before a mid-show host change (prompt-memory.ts).
+  const held = heldByHostChange(recent, sessionPersonaId ?? null);
   const keepRationaleIdx = new Set<number>();
   for (let i = recent.length - 1, kept = 0; i >= 0 && kept < RATIONALE_WINDOW; i--) {
     if (recent[i].role === 'dj' && recent[i].kind === 'pick') { keepRationaleIdx.add(i); kept++; }
@@ -926,6 +931,7 @@ export function windowMessages() {
     if (m.kind === 'play') continue;       // redundant — current track is in the pick event
     if (m.kind === 'sfx') continue;        // audio-production cue, not conversation — bare effect name reads as spoken
     if (withheldFromPrompts(m)) continue;  // aired verbatim, never written by a model
+    if (held(i)) continue;                 // a previous host's line, before a host change
     if (m.role === 'event' && m.kind === 'pick' && i !== lastPickEventIdx) continue;  // old pick asks
     if (m.role === 'dj' && m.kind === 'pick' && !keepRationaleIdx.has(i)) continue;   // stale pick rationales
     const role = (m.role === 'dj' || m.role === 'segment') ? 'assistant' : 'user';

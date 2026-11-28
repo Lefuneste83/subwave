@@ -56,7 +56,7 @@ import { vocalRunwayMs, segmentFitsRunway } from './vocal-runway.js';
 import * as session from './session.js';
 import type { HostSpeechStamp, TurnMeta } from './session.js';
 import { promptRecapEntries, VERBATIM_META } from './prompt-memory.js';
-import { getFullContext, getClockContext, energyForDaypart } from '../context.js';
+import { getFullContext, getClockContext, energyForDaypart, showHandoverContext } from '../context.js';
 import * as settings from '../settings.js';
 import { showKeyAt } from './show-boundary.js';
 import { programmeShowKey } from './resume-show.js';
@@ -69,6 +69,7 @@ import { trackLineVoiceAllowed } from './voice-policy.js';
 import { speakClockAllowed, stationIdDaypartDrifted, stationIdDaypartStamp } from './clock-policy.js';
 import { standInToken, withoutStrayNullTokens } from './stand-in-policy.js';
 import { scriptLeakVerdict } from '../util/script-leak-policy.js';
+import { judgeHostNames, setHostNameScene } from './host-name-guard.js';
 import { CLOCK_CHECK_EXEMPT_KINDS, dropClockSentences, reconcileClockPhrases, spokenClockRule, stripClockPhrases } from './clock-phrases.js';
 import { fuzzyAirTime } from '../llm/internal/prompts/scripts.js';
 import {
@@ -2997,7 +2998,12 @@ class Queue {
   // carry (spokenNames, plus the caller's `names`). The free-text writers have
   // already had their one retry (llm djText `speaker`); what reaches here
   // still leaking goes.
-  speakable(text: string, kind: string, { verbatim = false, persona = null, names = [] }: { verbatim?: boolean; persona?: Persona | null; names?: readonly unknown[] } = {}): string {
+  //
+  // So is a line naming another station presenter who is not on the air
+  // (util/host-name-policy.ts via withoutWrongHost): an ident once aired "with
+  // Tom Avro" in another host's voice. `cast` is the other voices of the
+  // exchange the line belongs to, who are on the air for it.
+  speakable(text: string, kind: string, { verbatim = false, persona = null, names = [], cast = [] }: { verbatim?: boolean; persona?: Persona | null; names?: readonly unknown[]; cast?: readonly (Persona | null | undefined)[] } = {}): string {
     // Judged on the display form, where a leaked tag around the token is gone,
     // and then judged as that form, so the render's second pass agrees.
     if (!verbatim) {
@@ -3008,7 +3014,9 @@ class Queue {
     const token = verbatim ? null : standInToken(text);
     if (!token) {
       const shown = normalizeForDisplay(text);
-      return verbatim ? shown : this.withoutScriptLeak(shown, kind, { persona, names });
+      if (verbatim) return shown;
+      const kept = this.withoutScriptLeak(shown, kind, { persona, names });
+      return kept ? this.withoutWrongHost(kept, kind, { persona, names, cast }) : kept;
     }
     this.log('scheduler', `${kind}: dropped a stand-in line ("${token}") instead of airing it`);
     logEvent('speech.standInDropped', { kind, token });
@@ -3022,13 +3030,59 @@ class Queue {
   spokenNames(extra: readonly unknown[] = []): unknown[] {
     const s: any = settings.get();
     const out: unknown[] = [...extra, s?.station, s?.weather?.locationName, s?.weather?.onAirLocation];
-    const track = (t: any) => (t ? [t.title, t.artist, t.album, t.albumArtist] : []);
     for (const p of Array.isArray(s?.personas) ? s.personas : []) out.push(p?.name);
     for (const sh of Array.isArray(s?.shows) ? s.shows : []) out.push(sh?.name, sh?.topic);
+    out.push(...this.trackNames());
+    return out;
+  }
+
+  // The tracks the writers are handed, with their requesters and back-announce
+  // targets: on air, queued, recently played.
+  trackNames(): unknown[] {
+    const out: unknown[] = [];
+    const track = (t: any) => (t ? [t.title, t.artist, t.album, t.albumArtist] : []);
     out.push(...track(this.current?.track), this.current?.requestedBy);
     for (const i of this.upcoming) out.push(...track(i.track), i.requestedBy, i.linkPrev?.title, i.linkPrev?.artist);
     for (const h of this.history.slice(0, 12)) out.push(...track(h.track));
     return out;
+  }
+
+  // The scene the off-air-presenter rule judges a line in (host-name-guard.ts,
+  // registered below for the writer too). On the air: the roster's host and
+  // guests, the session's host (ahead of the grid after a look-ahead roll), and
+  // the next show's presenter inside the final quarter hour, the nod the
+  // prompts offer. A line may carry the station, the weather place and the
+  // tracks with their requesters; persona and show names are not offered here,
+  // since they are what is judged.
+  hostNameScene() {
+    const s: any = settings.get();
+    const personas = (Array.isArray(s?.personas) ? s.personas : []) as { id?: unknown; name?: unknown }[];
+    const onAir: unknown[] = [];
+    try {
+      const roster: any = settings.getOnAirRoster();
+      onAir.push(roster?.host?.id, ...(roster?.guests ?? []).map((g: any) => g?.id));
+    } catch { /* the speaker and cast still count */ }
+    onAir.push(session.getSession()?.persona?.id);
+    try {
+      const presenter = showHandoverContext()?.nextShow?.presenter;
+      if (presenter) for (const p of personas) if (typeof p?.name === 'string' && p.name.trim() === presenter) onAir.push(p.id);
+    } catch { /* no nod to allow */ }
+    return { personas, onAir, names: [s?.station, s?.weather?.locationName, s?.weather?.onAirLocation, ...this.trackNames()] };
+  }
+
+  // `text` as it may air: '' when it names another station presenter who is
+  // not on the air (util/host-name-policy.ts; logged once with the words that
+  // named them, never the line), else `text`. The writer has had its one
+  // retry. Callers pass verbatim (operator) text around this.
+  withoutWrongHost(text: string, kind: string, { persona = null, names = [], cast = [] }: { persona?: Persona | null; names?: readonly unknown[]; cast?: readonly (Persona | null | undefined)[] } = {}): string {
+    if (!text) return text;
+    const speaker = persona ?? settings.getEffectivePersona();
+    const verdict = judgeHostNames(text, { speaker, kind, names, cast });
+    if (verdict.action === 'keep') return text;
+    const said = verdict.named.map(n => n.said);
+    this.log('scheduler', `${kind}: dropped a line by ${speaker?.name || 'the DJ'} naming another presenter who is not on air (${said.map(w => `"${w}"`).join(', ')}) instead of airing it`);
+    logEvent('speech.wrongHostDropped', { kind, personaId: speaker?.id ?? null, named: verdict.named.map(n => n.personaId), said });
+    return '';
   }
 
   // `text` as it may air: '' when it carries a foreign-script word (logged
@@ -3375,7 +3429,7 @@ class Queue {
       // Each clip owns its speaker's gain, attribution and live-edge marker.
       // Conversational batching must preserve those before it can air here.
       for (const l of lines) {
-        const text = this.clockChecked(this.speakable(stripSpeakerLabel(l.text || '', knownNames), kind, { persona: l.persona }), kind, l.persona);
+        const text = this.clockChecked(this.speakable(stripSpeakerLabel(l.text || '', knownNames), kind, { persona: l.persona, cast: lines.map(c => c.persona) }), kind, l.persona);
         if (!text) continue;
         const wavPath = await this._speak(text, { kind, persona: l.persona });
         rendered.push({ ...l, text, wavPath });
@@ -6086,6 +6140,7 @@ class Queue {
 export type QueueApi = InstanceType<typeof Queue>;
 
 export const queue = new Queue();
+setHostNameScene(() => queue.hostNameScene());
 
 // speak() keeps the digits inside these names when it spells a line out.
 setSpokenNamesProvider(() => queue.spokenNames());
