@@ -62,6 +62,7 @@ import array
 import http.server
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -80,6 +81,12 @@ ORIGIN_DELAY = 0.2
 SLOW_DELAY = 5.0
 READY_HOLD = 1.5
 HOST_ALIAS = "host.docker.internal"
+# Where the container reaches this script's origin. Docker's `host-gateway`
+# works on a rootful daemon; a rootless one (rootlesskit) maps it to its own
+# namespace's gateway, where nothing listens, and every subhttp: download
+# fails. There, set RESUME_TEST_HOST to an address of this host the
+# container can reach (its LAN IP).
+HOST_TARGET = os.environ.get("RESUME_TEST_HOST") or "host-gateway"
 
 
 def tone(path, frequency, seconds):
@@ -165,7 +172,7 @@ class Station:
         if radio_liq:
             mounts += ["-v", f"{Path(radio_liq).resolve()}:/etc/liquidsoap/radio.liq:ro"]
         subprocess.run(["docker", "run", "-d", "--name", self.name, "--memory", "512m",
-                        "--add-host", f"{HOST_ALIAS}:host-gateway",
+                        "--add-host", f"{HOST_ALIAS}:{HOST_TARGET}",
                         "-p", "127.0.0.1::1234", *mounts,
                         "-e", "TZ=UTC", image], check=True, capture_output=True, timeout=60)
         out = subprocess.check_output(["docker", "port", self.name, "1234/tcp"], text=True)

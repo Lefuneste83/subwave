@@ -139,6 +139,10 @@ python3 scripts/liquidsoap-image-smoke.test.py -v
 python3 scripts/liquidsoap-resume-fallback.py subwave-test/broadcast:smoke   # resume into another show airs the new fallback
 ```
 
+On a rootless Docker daemon `host-gateway` does not reach the host, so every
+subhttp: download in `liquidsoap-resume-fallback.py` fails and most cases fail
+on any image; set `RESUME_TEST_HOST` to the host's LAN address there.
+
 The smoke test uses a unique container, an ephemeral loopback port, disposable
 state and generated tones. It runs the baked `radio.liq`, checks repeated track
 changes, both voice channels and a manual jingle, then decodes non-silent MP3,
