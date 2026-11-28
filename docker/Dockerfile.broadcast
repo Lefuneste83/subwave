@@ -5,17 +5,19 @@
 # shared passwords, renders icecast.xml, launches both, and exits if either
 # dies so the restart policy bounces them together.
 #
-# v2.4.6 minimum. 2.4.4's per-pull clock scan let the per-transition DJ effect
+# Liquidsoap 2.5.0-rc2, the release candidate: the 2.5.0 final replaces it,
+# pinned the same way, before this ships. radio.liq needs 2.5 (per-source
+# switch settings, one cross duration); 2.4.x is sunset upstream. 2.4.6 had
+# been the minimum: 2.4.4's per-pull clock scan let the per-transition DJ effect
 # chains (~30 operators) peg a core and stall the stream clock at every
-# crossfade ("Latency is too high" → dead-air source resets); 2.4.5 made clock
-# propagation push-based/O(1). 2.4.5 in turn grows unifier reference chains
-# without bound on a long-running station (#5257, until now backported here
-# from source), and its `sequence` drops the first partial frame of the
-# incoming source after a `cross` transition (#5296), which put up to 20 ms of
-# beat error on every stem-blend clip seam whose outgoing track ends mid-frame.
-# Stock upstream release, pinned by manifest digest. Keep this stage identical
+# crossfade ("Latency is too high" → dead-air source resets); 2.4.5 grew
+# unifier reference chains without bound on a long-running station (#5257), and
+# its `sequence` dropped the first partial frame of the incoming source after a
+# `cross` transition (#5296), up to 20 ms of beat error on every stem-blend clip
+# seam whose outgoing track ends mid-frame.
+# Stock upstream image, pinned by manifest digest. Keep this stage identical
 # in both Dockerfiles (CI compares the two executables); see docker/liquidsoap/.
-FROM savonet/liquidsoap:v2.4.6@sha256:1d4ecfc1b53851c5f018d1ada430302a0678f789a6e96f6de5264255f679689c AS liquidsoap
+FROM savonet/liquidsoap:v2.5.0-rc2@sha256:1de09f5450d25653e38009f79c42c8e21962155561b9c2ed1dd952441f023950 AS liquidsoap
 
 FROM liquidsoap AS runtime
 
@@ -25,12 +27,14 @@ USER root
 # the entrypoint renders, and the listener-auth behaviour it relies on, are KH
 # features: stock Icecast 2.4.4 boots, streams and ignores them, so every
 # listener shows the edge's container IP and loses its country. KH comes from
-# deb-multimedia, which the 2.4.5 base image happened to configure and 2.4.6
-# does not. Pinned to icecast2 alone so the rest of DMO cannot replace Debian
-# packages, the mixer's included: the stock 2.4.6 liquidsoap bundles a static
-# FFmpeg and fdk-aac, but links Debian's libmp3lame0, libopus0, libflac and
-# libvorbis dynamically, and DMO also ships libmp3lame0 (1:3.100-dmo3), so the
-# pin keeps the MP3 encoder on Debian's build. Same for the AIO's CLI ffmpeg.
+# deb-multimedia, which the 2.4.5 base image happened to configure and the
+# stock 2.4.6 and 2.5 images do not. Pinned to icecast2 alone so the rest of DMO
+# cannot replace Debian packages, the mixer's included: the stock liquidsoap
+# (2.4.6 and 2.5.0-rc2 alike) bundles a static FFmpeg and fdk-aac, but loads
+# Debian's libmp3lame0, libopus0, libflac and libvorbis at run time (measured in
+# /proc/<pid>/maps while encoding), and DMO also ships libmp3lame0
+# (1:3.100-dmo3), so the pin keeps the MP3 encoder on Debian's build. Same for
+# the AIO's CLI ffmpeg.
 ADD --checksum=sha256:8dc6cbb266c701cfe58bd1d2eb9fe2245a1d6341c7110cfbfe3a5a975dcf97ca \
     https://www.deb-multimedia.org/pool/main/d/deb-multimedia-keyring/deb-multimedia-keyring_2024.9.1_all.deb \
     /tmp/deb-multimedia-keyring.deb
