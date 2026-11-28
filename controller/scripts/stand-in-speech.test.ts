@@ -395,8 +395,16 @@ for (const [shape, line] of Object.entries(DISGUISED)) {
   });
 }
 
+// Niki is in the studio for these: a line naming a persona who is OFF the air
+// is the off-air-presenter rule's to drop (host-name-guard.test.ts), and what
+// is pinned here is only that the stand-in gate keeps a labelled line.
+const nikiInStudio = () => settings.update({
+  shows: [{ id: SHOW, name: 'Stand-in', topic: 'tests', personaId: HOST.id, energies: ['medium'], guestPersonaIds: [GUEST.id] }],
+} as never);
+
 for (const [shape, line] of Object.entries(REAL_SPEECH)) {
   test(`${shape} airs`, async () => {
+    await nikiInStudio();
     const out = await queue.announce(line, 'programme-feature', { persona: HOST as never });
     assert.equal(out.accepted, true);
     assert.equal(spoken.length, 1);
@@ -405,6 +413,7 @@ for (const [shape, line] of Object.entries(REAL_SPEECH)) {
   });
 
   test(`${shape} stays in an exchange and on a pushed track`, async () => {
+    await nikiInStudio();
     await queue.announceExchange([{ persona: GUEST as never, text: line }], 'banter', { castNames: [GUEST.name] });
     assert.equal(spoken.length, 1);
     let reported = 0;

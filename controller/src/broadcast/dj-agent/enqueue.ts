@@ -87,6 +87,7 @@ export function trimLinkToIntro(
   queue: {
     log?: (kind: string, message: string) => void;
     withoutScriptLeak?: (text: string, kind: string, opts: { persona?: Persona | null; names?: readonly unknown[] }) => string;
+    withoutWrongHost?: (text: string, kind: string, opts: { persona?: Persona | null; names?: readonly unknown[] }) => string;
   } | null = null,
 ): string | null {
   const raw = (text || '').trim();
@@ -110,6 +111,12 @@ export function trimLinkToIntro(
   // A line carrying only look-alike letters comes back mended.
   if (display && queue?.withoutScriptLeak) {
     display = queue.withoutScriptLeak(display, 'link', { persona: speaker, names: [song?.title, song?.artist, song?.album] });
+    if (!display) return null;
+  }
+  // So does a line naming another station presenter who is not on the air
+  // (queue.withoutWrongHost, util/host-name-policy.ts).
+  if (display && queue?.withoutWrongHost) {
+    display = queue.withoutWrongHost(display, 'link', { persona: speaker, names: [song?.title, song?.artist, song?.album] });
     if (!display) return null;
   }
   // Non-DJ personas skip the budget but not the cleanup.
