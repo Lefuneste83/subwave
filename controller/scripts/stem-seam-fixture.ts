@@ -4,7 +4,7 @@
 // `verbatim` mode stamps the worker's cues as-is and probes nothing.
 import { getAnnotatedUri, getClipUri } from '../src/music/subsonic.js';
 import { CLIP_SEAM_CROSS_SEC, clipSeamCues } from '../src/broadcast/stem-seam.js';
-import { probeCueLanding } from '../src/music/cue-landing.js';
+import { cueSeekFor, probeCueLanding } from '../src/music/cue-landing.js';
 import { _markLibraryMountProven } from '../src/music/library-mount.js';
 
 // stem-seam-test.sh bind-mounts this directory into its own mixer.
@@ -26,7 +26,10 @@ const track = (title: string, path: string, crossSec: number) =>
 const yFile = process.env.STEM_SEAM_Y_FILE || 'y.flac';
 const y = track('Y', yFile, stationSec);
 const landing = mode === 'controller'
-  ? await probeCueLanding(`${process.env.MUSIC_LIBRARY_PATH}/${yFile}`, cues.inCueSec, { timeoutMs: 10000 })
+  // The mixer under test (CUE_LANDING_MIXER, from stem-seam-test.sh; 2.4 when
+  // unset) picks the landing model, as the drain's telnet `version` does.
+  ? await probeCueLanding(`${process.env.MUSIC_LIBRARY_PATH}/${yFile}`, cues.inCueSec,
+    { timeoutMs: 10000, seek: cueSeekFor(process.env.CUE_LANDING_MIXER || '2.4') })
   : null;
 const cueLateSec = landing?.ok ? landing.lateSec : null;
 console.log(JSON.stringify({
@@ -41,6 +44,6 @@ console.log(JSON.stringify({
     getAnnotatedUri(track('P', 'p.flac', stationSec)),
     getAnnotatedUri(track('X', 'x.flac', CLIP_SEAM_CROSS_SEC), { cueOutSec: cues.outCueSec, clipLeadSec: CLIP_SEAM_CROSS_SEC }),
     getClipUri(y, `${process.env.MUSIC_LIBRARY_PATH}/clip.wav`, CLIP_SEAM_CROSS_SEC),
-    getAnnotatedUri(y, { cueInSec: cues.inCueSec, clipCueLateSec: cueLateSec }),
+    getAnnotatedUri(y, { cueInSec: landing?.ok ? landing.cueInSec : cues.inCueSec, clipCueLateSec: cueLateSec }),
   ],
 }));

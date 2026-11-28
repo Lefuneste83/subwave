@@ -2378,7 +2378,7 @@ class Queue {
         // failure is fail-open (no stamp = the seam aligns on the cue as before).
         // Budgeted against the same clock as the intro render: the probe is a
         // garnish on the seam and must never eat the commit reserve.
-        let clipCueLate: { cueSec: number; lateSec: number } | null = null;
+        let clipCueLate: { cueSec: number; lateSec: number; stampCueSec: number } | null = null;
         if (item.stemSeam && item.stemCueInSec && item.cueInSec === item.stemCueInSec) {
           const cueSec = item.cueInSec;
           let source: string | null = null;
@@ -2388,13 +2388,21 @@ class Queue {
             source = subsonic.findLibraryFile(item.track) || (item.track.id ? subsonic.getRawStreamUrl(item.track.id) : null);
           } catch { /* no Subsonic config: no probe */ }
           const probeBudgetMs = cueProbeBudgetMs(this.remainingUntilItemAirs(item));
+          // 2.4 and 2.5 land a cue a packet apart (music/cue-landing.ts); the
+          // version is read once per mixer, so this costs a round trip once.
+          const mixer = source && probeBudgetMs > 0
+            ? await liquidsoapControl.mixerVersion(Math.min(1000, probeBudgetMs))
+            : null;
+          const seek = cueLanding.cueSeekFor(mixer);
           const landing: cueLanding.CueLanding = !source
             ? { ok: false, codec: null, reason: 'no source' }
             : probeBudgetMs === 0
               ? { ok: false, codec: null, reason: 'airs too soon to probe' }
-              : await cueLanding.probeCueLanding(source, cueSec, { timeoutMs: probeBudgetMs });
+              : !seek
+                ? { ok: false, codec: null, reason: `mixer version ${mixer ?? 'unknown'} not validated` }
+                : await cueLanding.probeCueLanding(source, cueSec, { timeoutMs: probeBudgetMs, seek });
           if (landing.ok) {
-            clipCueLate = { cueSec, lateSec: landing.lateSec };
+            clipCueLate = { cueSec, lateSec: landing.lateSec, stampCueSec: landing.cueInSec };
             const ms = Math.abs(landing.lateSec * 1000).toFixed(1);
             this.log('mix', landing.lateSec < 0
               ? `stem seam cue-in lands ${ms}ms early (${landing.codec}) — clip→Y lead lengthened`
@@ -2428,7 +2436,9 @@ class Queue {
             // past a short track's end defeats the crossfade (track-floor.ts).
             maxDurationSec: capCueOutSec(itemDurSec, liveMax),
             cueOutSec: earlyEnds.length ? Math.min(...earlyEnds) : null,
-            cueInSec: item.cueInSec ?? null,
+            // A 2.5 mixer gets the cue nudged onto the packet the landing was
+            // probed for (stampCueSec); a 2.4 one gets the cue itself.
+            cueInSec: clipCueLate && item.cueInSec === clipCueLate.cueSec ? clipCueLate.stampCueSec : item.cueInSec ?? null,
             resolveProbeId: item.resolveProbeId,
             clipLeadSec: item.stemBlend ? stemBlend.CLIP_SEAM_CROSS_SEC : null,
             // Only while the cue it was probed for is still the live one.

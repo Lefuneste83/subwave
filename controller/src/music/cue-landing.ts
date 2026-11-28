@@ -18,6 +18,17 @@
 // its stamp is negative and Y starts that much sooner, out of the slack the
 // clip seam already buffers (#2077).
 //
+// Liquidsoap 2.5 (savonet/liquidsoap#5324) decodes from the packet BEFORE the
+// seek target, the last one starting before it, and emits that one whole: one
+// packet earlier than 2.4 (FLAC/ALAC 4,096 samples, AAC 1,024, MP3 1,152 when
+// its seek target crosses a packet), up to ~93 ms EARLY, more than the clip
+// seam's slack can absorb. Neither version trims inside a packet. So for a
+// 2.5 mixer the controller stamps a cue just past the packet 2.4 would land
+// on (`stampCueSec`): 2.5 then starts Y on that same packet, and the landing
+// and its stamp are 2.4's, sample for sample. The version comes from the
+// mixer itself (telnet `version`, broadcast/liquidsoap-control.ts); an
+// unknown or unvalidated version gets no stamp and no nudge (`cueSeekFor`).
+//
 // Only codecs whose prediction `scripts/stem-seam-test.sh cuein` validated
 // against real Liquidsoap renders carry a rule. Anything else returns null and
 // the seam aligns on the stamped cue, exactly as before the probe existed.
@@ -64,6 +75,61 @@ export const CODEC_RULES: Readonly<Record<string, CodecRule>> = Object.freeze({
 
 export interface CuePacket { pts: number }
 
+// How the mixer's decoder lands a seek: '2.4' = the first packet at or after
+// the cue; '2.5' = the last packet starting before the target (the cue, plus
+// start_time where the rule subtracts it), both emitted whole.
+export type CueSeek = '2.4' | '2.5';
+
+// The one place a mixer version picks the landing model. Parses the telnet
+// `version` answer ("Liquidsoap 2.5.0-rc2") or a bare "2.4.6". Only the series
+// the `cuein` harness validated map: 2.4.x (on 2.4.6) and 2.5.x (on
+// 2.5.0-rc2; re-run it on each 2.5 release). Anything else, or nothing, is
+// null: no probe stamp, the seam aligns on the cue.
+export function cueSeekFor(version: string | null | undefined): CueSeek | null {
+  const m = /^(?:Liquidsoap\s+)?v?(\d+)\.(\d+)(?:\.\d+)?(?:[-+~]\S*)?$/.exec(String(version ?? '').trim());
+  if (!m) return null;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  if (major === 2 && minor === 4) return '2.4';
+  if (major === 2 && minor === 5) return '2.5';
+  return null;
+}
+
+// How far past the 2.4 landing packet a 2.5 stamp puts the cue: far enough
+// that float rounding never puts the target ON the packet (2.5 would then take
+// the one before), well inside the shortest packet (1,024 samples at 96 kHz,
+// 10.7 ms), so the packet after is never reached.
+export const SEEK_PAST_PACKET_SEC = 0.001;
+
+// First packet the 2.4 rule lands on: at or after the cue (after, for an
+// exclusive-boundary codec). Null when none is in the probed window.
+function landingPacket(packets: CuePacket[], cueSec: number, rule: CodecRule): number | null {
+  let first: number | null = null;
+  for (const p of packets) {
+    if (!Number.isFinite(p.pts)) continue;
+    const after = rule.exclusiveBoundary ? p.pts > cueSec + PTS_EPSILON_SEC : p.pts >= cueSec - PTS_EPSILON_SEC;
+    if (!after) continue;
+    if (first == null || p.pts < first) first = p.pts;
+  }
+  return first;
+}
+
+// Pure: the liq_cue_in to stamp so the mixer lands where `cueLateSec`
+// predicts. '2.4': the cue itself. '2.5': just past the 2.4 landing packet on
+// the decoder's seek timeline (start_time is added to the target there, so it
+// is taken off the stamp), so the packet starting before it is that packet.
+// Null when there is no landing packet or the stamp would not be positive.
+export function stampCueSec(packets: CuePacket[], cueSec: number, rule: CodecRule | null | undefined,
+  startTimeSec: number | null, seek: CueSeek): number | null {
+  if (!rule || !Number.isFinite(cueSec)) return null;
+  if (seek === '2.4') return cueSec;
+  const first = landingPacket(packets, cueSec, rule);
+  if (first == null) return null;
+  const start = rule.subtractStartTime && Number.isFinite(startTimeSec) ? Number(startTimeSec) : 0;
+  const stamp = Math.max(first, cueSec) - start + SEEK_PAST_PACKET_SEC;
+  return stamp > 0 ? Number(stamp.toFixed(6)) : null;
+}
+
 // Pure: how late a cue lands given the packet start times (seconds) around
 // it, on the timeline the clip's stems were cut from. NEGATIVE means early (an
 // MP3 whose encoder delay puts Y ahead of its cue). Null when no packet starts
@@ -72,13 +138,7 @@ export interface CuePacket { pts: number }
 export function cueLateSec(packets: CuePacket[], cueSec: number, rule: CodecRule | null | undefined,
   startTimeSec: number | null = null): number | null {
   if (!rule || !Number.isFinite(cueSec)) return null;
-  let first: number | null = null;
-  for (const p of packets) {
-    if (!Number.isFinite(p.pts)) continue;
-    const after = rule.exclusiveBoundary ? p.pts > cueSec + PTS_EPSILON_SEC : p.pts >= cueSec - PTS_EPSILON_SEC;
-    if (!after) continue;
-    if (first == null || p.pts < first) first = p.pts;
-  }
+  const first = landingPacket(packets, cueSec, rule);
   if (first == null) return null;
   const start = rule.subtractStartTime && Number.isFinite(startTimeSec) ? Number(startTimeSec) : 0;
   const late = Math.max(0, first - cueSec) - start;
@@ -108,7 +168,8 @@ export interface CuePacketProbe {
 }
 
 export type CueLanding =
-  | { ok: true; lateSec: number; codec: string; rawLateSec: number }
+  // `cueInSec` is the liq_cue_in to stamp for that landing (stampCueSec).
+  | { ok: true; lateSec: number; codec: string; rawLateSec: number; cueInSec: number }
   | { ok: false; codec: string | null; reason: string };
 
 function parseRational(s: unknown): number | null {
@@ -189,9 +250,13 @@ export function probeCuePackets(source: string, cueSec: number, { timeoutMs = 20
   });
 }
 
-// Probe how late Y's cue-in will land. Never throws.
-export async function probeCueLanding(source: string, cueSec: number, opts: { timeoutMs?: number } = {}): Promise<CueLanding> {
+// Probe how late Y's cue-in will land on a mixer that seeks the `seek` way
+// (cueSeekFor; null = unknown mixer, no stamp). Never throws.
+export async function probeCueLanding(source: string, cueSec: number,
+  opts: { timeoutMs?: number; seek?: CueSeek | null } = {}): Promise<CueLanding> {
   if (!source || !Number.isFinite(cueSec) || cueSec <= 0) return { ok: false, codec: null, reason: 'no cue' };
+  const seek = opts.seek === undefined ? '2.4' : opts.seek;
+  if (!seek) return { ok: false, codec: null, reason: 'mixer version not validated' };
   try {
     const { probe, reason } = await probeCuePackets(source, cueSec, opts);
     if (!probe) return { ok: false, codec: null, reason };
@@ -201,13 +266,15 @@ export async function probeCueLanding(source: string, cueSec: number, opts: { ti
     const late = cueLateSec(probe.packets, cueSec, rule, probe.startTimeSec);
     if (raw == null) return { ok: false, codec: probe.codec, reason: 'no packet at or after the cue' };
     if (late == null) return { ok: false, codec: probe.codec, reason: `lands ${((raw - (rule.subtractStartTime ? probe.startTimeSec ?? 0 : 0)) * 1000).toFixed(1)}ms off — outside the range the seam can absorb` };
-    return { ok: true, lateSec: late, codec: probe.codec, rawLateSec: raw };
+    const cueInSec = stampCueSec(probe.packets, cueSec, rule, probe.startTimeSec, seek);
+    if (cueInSec == null) return { ok: false, codec: probe.codec, reason: 'no cue to stamp for this mixer' };
+    return { ok: true, lateSec: late, codec: probe.codec, rawLateSec: raw, cueInSec };
   } catch (e) {
     return { ok: false, codec: null, reason: redactSource(`probe failed: ${(e as Error)?.message ?? e}`) };
   }
 }
 
-export async function probeCueLate(source: string, cueSec: number, opts: { timeoutMs?: number } = {}):
+export async function probeCueLate(source: string, cueSec: number, opts: { timeoutMs?: number; seek?: CueSeek | null } = {}):
   Promise<{ lateSec: number; codec: string } | null> {
   const r = await probeCueLanding(source, cueSec, opts);
   return r.ok ? { lateSec: r.lateSec, codec: r.codec } : null;

@@ -2,9 +2,14 @@
 // cues as JSON (one object per line), so scripts/stem-seam-test.sh `cuein` can
 // compare it with real Liquidsoap renders. `rawLateSec` is the packet rule with
 // no codec offset (reported for every codec, validated or not); `lateSec` is
-// what the queue drain would stamp (null for a codec without a rule).
+// what the queue drain would stamp (null for a codec without a rule), and
+// `stampCueSec` the liq_cue_in it would write for that landing. The mixer's
+// version comes from CUE_LANDING_MIXER ("Liquidsoap 2.5.0-rc2", "2.4.6"; 2.4
+// when unset), so the harness renders the cue the drain would send that mixer.
 //   tsx scripts/cue-landing-cli.ts <file> <cue-sec> [<cue-sec> ...]
-import { CODEC_RULES, RAW_PACKET_RULE, cueLateSec, probeCueLanding, probeCuePackets } from '../src/music/cue-landing.js';
+import { CODEC_RULES, RAW_PACKET_RULE, cueLateSec, cueSeekFor, probeCueLanding, probeCuePackets } from '../src/music/cue-landing.js';
+
+const seek = cueSeekFor(process.env.CUE_LANDING_MIXER || '2.4');
 
 const [source, ...cues] = process.argv.slice(2);
 if (!source || !cues.length || cues.some(c => !Number.isFinite(Number(c)))) {
@@ -13,7 +18,7 @@ if (!source || !cues.length || cues.some(c => !Number.isFinite(Number(c)))) {
 for (const cue of cues) {
   const cueSec = Number(cue);
   const { probe, reason } = await probeCuePackets(source, cueSec, { timeoutMs: 10000 });
-  const landing = await probeCueLanding(source, cueSec, { timeoutMs: 10000 });
+  const landing = await probeCueLanding(source, cueSec, { timeoutMs: 10000, seek });
   console.log(JSON.stringify({
     cue: cueSec,
     codec: probe?.codec ?? null,
@@ -28,6 +33,8 @@ for (const cue of cues) {
       return raw == null ? null : raw - (rule.subtractStartTime ? probe.startTimeSec ?? 0 : 0);
     })() : null,
     lateSec: landing.ok ? landing.lateSec : null,
+    seek,
+    stampCueSec: landing.ok ? landing.cueInSec : null,
     reason: landing.ok ? 'ok' : (probe ? landing.reason : reason),
   }));
 }

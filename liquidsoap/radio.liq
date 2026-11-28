@@ -896,7 +896,9 @@ def dj_transition(a, b) =
   clip_lead = float_of_string(default=-1., clip_meta["liq_clip_lead"])
   # CUE-IN LANDING (#2003). On 2.4.x liq_cue_in lands on the next codec-frame
   # boundary at or after the cue (the ffmpeg decoder emits whole packets), up
-  # to ~93ms late. At clip -> Y both sides are Y's own audio, so that is a
+  # to ~93ms late. 2.5 lands a packet earlier, so for a 2.5 mixer the
+  # controller stamps a cue just past that same packet (cue-landing.ts), and
+  # the landing and its stamp below are the 2.4 ones. At clip -> Y both sides are Y's own audio, so that is a
   # comb filter or a flam. The controller probes how late Y lands and stamps
   # it on Y (liq_clip_cue_late); here Y waits that much longer, so its first
   # sample meets the clip at the same instant of Y. An MP3 with a LAME header

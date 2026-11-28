@@ -41,13 +41,22 @@ What travels with the image:
 
 Known differences on 2.5.0-rc2, all measured against 2.4.6:
 
-- **`liq_cue_in` lands up to one codec packet earlier** (savonet/liquidsoap#5324
-  decodes the pre-roll before a seek target): FLAC and ALAC 4,096 samples, AAC
-  1,024-2,048, MP3 0 or 1,152, PCM WAV 1,570 samples or more; Vorbis and Opus are
-  unchanged. `controller/src/music/cue-landing.ts` predicts the 2.4.6 landings,
-  so `scripts/stem-seam-test.sh cuein` fails, and a stem-blend clip seam's
-  clip → Y side airs 69-82 ms off (a flam). The controller's rules must learn the
-  2.5 landings before this image ships.
+- **`liq_cue_in` lands one codec packet earlier** (savonet/liquidsoap#5324
+  decodes the pre-roll before a seek target): 2.5 starts a track on the last
+  packet that begins before its seek target (the cue, plus `start_time` for an
+  MP3), where 2.4.6 started on the first packet at or after the cue. FLAC and
+  ALAC land 4,096 samples earlier, AAC 1,024, an MP3 0 or 1,152, PCM WAV a
+  constant 1,570; Vorbis and Opus are unchanged. Neither version trims inside
+  a packet. Uncompensated, a stem-blend clip seam's clip → Y side aired
+  69-82 ms off (a flam). The controller reads the mixer's version over telnet
+  (`version`, cached per mixer) and, for a 2.5 mixer, stamps the cue just past
+  the packet 2.4.6 would land on (`cue-landing.ts` `stampCueSec`), so 2.5
+  lands on that same packet and the `liq_clip_cue_late` stamp is 2.4.6's.
+  `scripts/stem-seam-test.sh cuein` renders the stamped cue and passes on
+  both versions, and the clip → Y seam lands within 2 samples at every
+  predecessor trim on both. WAV has no rule on either version (no stamp,
+  aligned on the cue), so a WAV Y now airs 35.6 ms early at that seam. An
+  unknown or unvalidated version (anything but 2.4.x and 2.5.x) gets no stamp.
 - **A replaced source keeps its cached head.** A 2.5 source keeps whatever its
   consumer did not take for the next cycle. The rotate takes a stinger only up
   to its track mark, and the jingles playlist starts its next clip in that

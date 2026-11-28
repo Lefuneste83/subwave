@@ -494,10 +494,22 @@ def cuein_script(work, case_name):
         man = json.load(f)
     case = next(c for c in man["cases"] if c["case"] == case_name)
     src = "#{w}/cuein/" + case["file"]
+    # Render the liq_cue_in the drain would stamp for this mixer (a 2.5 mixer
+    # gets the cue nudged onto the packet the probe predicts); measured
+    # against the original cue either way.
+    preds = {}
+    pred_path = os.path.join(d, "predictions.jsonl")
+    if os.path.exists(pred_path):
+        for line in open(pred_path):
+            p = json.loads(line)
+            if p.get("case") == case_name:
+                preds[float(p["cue"])] = p
     lines = ["settings.log.stdout := true", "settings.log.level := 4", "settings.init.allow_root := true",
              'w = environment.get(default="/work", "W")', "srcs = ref([])"]
     for i, cue in enumerate(man["cues"]):
-        uri = f'annotate:liq_cue_in="{cue}",liq_cue_out="{cue + CUEIN_LEN:.3f}":{src}'
+        stamp = preds.get(float(cue), {}).get("stampCueSec")
+        cue_in = cue if stamp is None else stamp
+        uri = f'annotate:liq_cue_in="{cue_in}",liq_cue_out="{cue + CUEIN_LEN:.3f}":{src}'
         lines += [f'q{i} = request.queue(id="q{i}")',
                   f"ignore(q{i}.push(request.create({json.dumps(uri)})))",
                   f'output.file(%wav, fallible=true, "#{{w}}/cuein/out-{case_name}-{i}.wav", q{i})',

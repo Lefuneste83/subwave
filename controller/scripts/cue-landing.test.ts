@@ -13,7 +13,8 @@ import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import {
-  CODEC_RULES, CUE_EARLY_MAX_SEC, CUE_LATE_MAX_SEC, cueLateSec, parseProbeJson, probeCueLanding, probeCueLate, redactSource,
+  CODEC_RULES, CUE_EARLY_MAX_SEC, CUE_LATE_MAX_SEC, SEEK_PAST_PACKET_SEC, cueLateSec, cueSeekFor, parseProbeJson,
+  probeCueLanding, probeCueLate, redactSource, stampCueSec,
 } from '../src/music/cue-landing.js';
 import { createTempDir } from './test-utils/temp-dir.js';
 
@@ -87,6 +88,73 @@ test('a codec without a validated rule gets no prediction', () => {
   assert.equal(cueLateSec(grid(4096, 500000, 8), 11.7, CODEC_RULES.vorbis), null);
   assert.equal(cueLateSec(grid(4096, 500000, 8), 11.7, undefined), null);
   for (const unvalidated of ['vorbis', 'opus', 'pcm_s16le']) assert.ok(!(unvalidated in CODEC_RULES), unvalidated);
+});
+
+// ── Liquidsoap 2.5 (savonet/liquidsoap#5324) ────────────────────────────────
+// 2.5 starts Y on the LAST packet beginning before its seek target (the cue,
+// plus start_time for an MP3), one packet earlier than 2.4: measured on
+// 2.5.0-rc2 with `stem-seam-test.sh cuein`, a 4096-sample FLAC cued at 11.7 s
+// lands 3970 samples early, at 40.96 s (a boundary) 4096 early, an AAC at
+// 10.24 s 1024 early, a LAME MP3 at 40.961 s 1149.1 early. So a 2.5 mixer is
+// stamped a cue just past the packet 2.4 lands on, which 2.5 then lands on.
+
+// What a 2.5 decoder starts on for a stamped cue: the last packet before the
+// target (stamp + start_time for a codec that subtracts it).
+const land25 = (packets: Array<{ pts: number }>, stamp: number, start = 0) =>
+  Math.max(...packets.map(p => p.pts).filter(pts => pts < stamp + start));
+
+test('the mixer version picks the landing model; anything unvalidated picks none', () => {
+  assert.equal(cueSeekFor('Liquidsoap 2.4.6'), '2.4');
+  assert.equal(cueSeekFor('Liquidsoap 2.5.0-rc2'), '2.5');
+  assert.equal(cueSeekFor('2.5.0'), '2.5');
+  assert.equal(cueSeekFor('Liquidsoap 2.5.1+git@abc'), '2.5');
+  assert.equal(cueSeekFor('Liquidsoap 2.3.3'), null);
+  assert.equal(cueSeekFor('Liquidsoap 2.6.0'), null);
+  assert.equal(cueSeekFor(''), null);
+  assert.equal(cueSeekFor(null), null);
+  assert.equal(cueSeekFor('ERROR: unknown command'), null);
+});
+
+test('a 2.4 mixer is stamped the cue itself', () => {
+  assert.equal(stampCueSec(grid(4096, 500000, 8), 11.7, CODEC_RULES.flac, null, '2.4'), 11.7);
+});
+
+test('a 2.5 mixer is stamped just past the 2.4 landing packet, so it lands there', () => {
+  const cases: Array<[string, number, Array<{ pts: number }>, number]> = [
+    ['flac', 11.7, grid(4096, 500000, 8), 0],
+    ['flac', 40.96, grid(4096, 1800000, 8), 0],           // on a boundary: that block
+    ['flac', (1806336 + 1) / SR, grid(4096, 1800000, 8), 0],
+    ['flac', 12.0, grid(1152, 525000, 8), 0],
+    ['aac', 10.24, grid(1024, 450000, 8), 0],             // exclusive: the packet after
+    ['aac', 1.0, grid(1024, 43000, 8), 0],
+    ['mp3', 40.961, grid(1152, 1800000, 8), 1105 / SR],   // the LAME case 2.5 lands a packet early
+    ['mp3', 1.0, grid(1152, 43000, 8), 1105 / SR],
+  ];
+  for (const [codec, cue, packets, start] of cases) {
+    const rule = CODEC_RULES[codec];
+    const stamp = stampCueSec(packets, cue, rule, start, '2.5');
+    assert.ok(stamp != null, `${codec} @ ${cue}: a stamp`);
+    const landed = land25(packets, stamp, rule.subtractStartTime ? start : 0);
+    const late24 = cueLateSec(packets, cue, rule, start);
+    assert.ok(late24 != null);
+    // Same landing as 2.4, measured from the original cue on the stems' timeline.
+    const late25 = landed - cue - (rule.subtractStartTime ? start : 0);
+    assert.ok(Math.abs(late25 - late24) * SR < 0.05, `${codec} @ ${cue}: 2.5 lands ${late25 * SR} vs 2.4 ${late24 * SR}`);
+  }
+});
+
+test('the 2.5 nudge never reaches the next packet', () => {
+  // The shortest packet a rule covers: 1024 samples at 96 kHz.
+  assert.ok(SEEK_PAST_PACKET_SEC < 1024 / 96000);
+  assert.ok(SEEK_PAST_PACKET_SEC * SR > 1, 'and is more than float noise');
+});
+
+test('no landing packet, or an unknown mixer, stamps nothing', async () => {
+  assert.equal(stampCueSec([], 11.7, CODEC_RULES.flac, null, '2.5'), null);
+  assert.equal(stampCueSec(grid(4096, 500000, 8), 11.7, null, null, '2.5'), null);
+  const landing = await probeCueLanding('/nonexistent.flac', 11.7, { seek: null });
+  assert.equal(landing.ok, false);
+  assert.match(landing.ok ? '' : landing.reason, /mixer version/);
 });
 
 test('ffprobe JSON is read from integer pts × time_base, not the 6-dp pts_time', () => {

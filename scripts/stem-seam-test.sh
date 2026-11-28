@@ -46,6 +46,20 @@ liq() {
   fi
 }
 
+# The mixer's own version line ("Liquidsoap 2.5.0-rc2"): the controller picks
+# its cue-landing model from it (cue-landing.ts cueSeekFor), as the drain does
+# from telnet `version`.
+liq_version() {
+  if [ -n "${LIQ_BIN:-}" ]; then
+    "$LIQ_BIN" --version 2>/dev/null | head -1
+  else
+    docker run --rm --network none --entrypoint liquidsoap "$IMAGE" --version 2>/dev/null | head -1
+  fi
+}
+CUE_LANDING_MIXER="${CUE_LANDING_MIXER:-$(liq_version || true)}"
+export CUE_LANDING_MIXER
+echo "Mixer version: ${CUE_LANDING_MIXER:-unknown}"
+
 py() {
   if [ -z "${ANALYZER_IMAGE:-}" ] && python3 -c 'import numpy, soundfile' 2>/dev/null; then
     local args=() a

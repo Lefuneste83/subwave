@@ -119,6 +119,27 @@ export async function restartLiquidsoap() {
   );
 }
 
+// The running mixer's Liquidsoap version, from the built-in telnet `version`
+// command ("Liquidsoap 2.5.0-rc2"; every release answers it). Read once per
+// mixer: forgotten when a restart starts and again once it has landed, since
+// the mixer that comes back may be another image. A failure is not cached and
+// reads null, so the caller treats the version as unknown this time.
+let mixerVersionCache: Promise<string | null> | null = null;
+onMixerRestart(() => { mixerVersionCache = null; });
+export function mixerVersion(timeoutMs = 1000): Promise<string | null> {
+  if (!mixerVersionCache) {
+    const attempt: Promise<string | null> = sendCommand('version', timeoutMs, { requireComplete: true })
+      .then(answer => (/^Liquidsoap\s+\S+/.test(answer.trim()) ? answer.trim() : null))
+      .catch(() => null)
+      .then((version) => {
+        if (version == null && mixerVersionCache === attempt) mixerVersionCache = null;
+        return version;
+      });
+    mixerVersionCache = attempt;
+  }
+  return mixerVersionCache;
+}
+
 // Unlike restart, this returns a normal "OK" — Liquidsoap stays up.
 export async function skipTrack() {
   return sendCommand('skip', 2000);
