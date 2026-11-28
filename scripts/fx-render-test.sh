@@ -56,7 +56,7 @@
 
 set -euo pipefail
 
-IMAGE="${LIQ_IMAGE:-savonet/liquidsoap:v2.4.6}"
+IMAGE="${LIQ_IMAGE:-savonet/liquidsoap:v2.5.0-rc2}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WORK="$HERE/.fx-render"
 mkdir -p "$WORK"
@@ -660,6 +660,8 @@ xchain() {
   # tones with distinct stamps run through the OLD wiring (raw
   # liq_cross_duration) and the NEW one (cross_stamps + strip_cross_stamps,
   # lifted verbatim from radio.liq so the harness cannot drift from the mixer).
+  # On 2.5 cross_stamps writes the one liq_cross_duration key back normalised;
+  # on 2.4 it wrote liq_cross_end_duration, read here when present.
   # Repeated files are new airings, while injected metadata repeats within an
   # airing must retain its original incoming stamp. Unstamped jingles use the
   # station default. Expected durations come from the input, not the rewrite.
@@ -667,7 +669,7 @@ xchain() {
   for f in 1 2 3 4 5; do
     [ -f "$WORK/x$f.wav" ] || ffmpeg -v error -y -f lavfi -i "sine=frequency=$((220 + f * 110)):duration=30" -af volume=-12dB -ar 44100 -ac 2 "$WORK/x$f.wav"
   done
-  awk '/^cross_prev_end = ref/{on=1} /^# BUFFER SIZING/{on=0} on' "$HERE/../liquidsoap/radio.liq" > "$WORK/xchain-stamps.liq"
+  awk '/^cross_prev_end = ref|^# CLIP SEAM SLACK/{on=1} /^# BUFFER SIZING/{on=0} on' "$HERE/../liquidsoap/radio.liq" > "$WORK/xchain-stamps.liq"
   grep -q "def strip_cross_stamps" "$WORK/xchain-stamps.liq" \
     || { echo "XCHAIN FAIL — could not lift cross_stamps/strip_cross_stamps out of radio.liq"; return 1; }
   cat > "$WORK/xchain.liq" <<'LIQ'
@@ -700,7 +702,7 @@ if scenario == "metadata-replay" then
 end
 %include "/work/xchain-stamps.liq"
 def t(a, b) =
-  key = if mode == "new" then "liq_cross_end_duration" else "liq_cross_duration" end
+  key = if mode == "new" and a.metadata["liq_cross_end_duration"] != "" then "liq_cross_end_duration" else "liq_cross_duration" end
   stamp = float_of_string(default=crossfade_duration(), a.metadata[key])
   expected = float_of_string(default=crossfade_duration(), a.metadata["expected_cross"])
   ra = source.remaining(a.source)
@@ -709,8 +711,8 @@ def t(a, b) =
     log("XCHAIN: #{a.metadata['title']} -> #{b.metadata['title']} expected=#{expected} stamp=#{stamp} a_buf=#{ra} b_buf=#{rb}")
   end
   d = if mode == "new" then min(ra, rb) else stamp end
-  out = add(normalize=false, [fade.out(duration=d, initial_metadata=a.metadata, a.source),
-                              fade.in(duration=d, initial_metadata=b.metadata, b.source)])
+  out = add(normalize=false, [fade.out(duration=d, a.source),
+                              fade.in(duration=d, b.source)])
   if mode == "new" then strip_cross_stamps(out) else out end
 end
 music = if mode == "new" then metadata.map(update=true, strip=true, cross_stamps, q) else q end
@@ -781,7 +783,7 @@ jingleseam() {
   # rewrite are LIFTED from radio.liq so the harness cannot drift from the
   # mixer; each seam logs what it armed.
   gen_tones
-  awk '/^cross_prev_end = ref/{on=1} /^# BUFFER SIZING/{on=0} on' "$HERE/../liquidsoap/radio.liq" > "$WORK/jseam-stamps.liq"
+  awk '/^cross_prev_end = ref|^# CLIP SEAM SLACK/{on=1} /^# BUFFER SIZING/{on=0} on' "$HERE/../liquidsoap/radio.liq" > "$WORK/jseam-stamps.liq"
   grep -E '^  (boundary_fading|jingle_out|washing|looping|sweeping|dissolving|chopping|blending) = ' \
     "$HERE/../liquidsoap/radio.liq" > "$WORK/jseam-arming.liq"
   local mark
@@ -851,8 +853,8 @@ def t(a, b) =
   jingle_out = a.metadata["subwave_jingle"] == "true"
   jingle_in = b.metadata["subwave_jingle"] == "true"
   d = min(source.remaining(a.source), source.remaining(b.source))
-  a_source = fade.out(duration=d, initial_metadata=a.metadata, a.source)
-  b_source = fade.in(duration=d, initial_metadata=b.metadata, b.source)
+  a_source = fade.out(duration=d, a.source)
+  b_source = fade.in(duration=d, b.source)
 %include "/work/jdry-seam.liq"
   seam
 end
@@ -1212,7 +1214,7 @@ tracks = playlist(mode="randomize", reload_mode="never", "/work/orph-tracks.m3u"
 LIQ
     echo "jingles = ${mark}, playlist(mode=\"randomize\", reload_mode=\"never\", \"/work/orph-jingles.m3u\"))"
     cat <<'LIQ'
-music = rotate(weights=[1, 2], [jingles, tracks])
+music = rotate([jingles.{weight = 1}, tracks.{weight = 2}])
 jseams = ref(0)
 equal_power_crossfade = ref(true)
 %include "/work/orph-eqfade.liq"

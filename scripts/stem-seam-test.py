@@ -263,7 +263,11 @@ def mixer(radio_path, work):
     default = re.search(r'^crossfade_duration = ref\(([0-9.]+)\)', radio, re.M)
     if default is None:
         raise ValueError("Cannot find the station's default crossfade")
+    # 2.4's stamp block opens on cross_prev_end; 2.5's (one cross duration) on
+    # the CLIP SEAM SLACK comment.
     start = radio.find("cross_prev_end = ref")
+    if start < 0:
+        start = radio.find("# CLIP SEAM SLACK")
     if start < 0:
         start = radio.index("def dj_transition(a, b) =")
     end = radio.index("# The PRE-cross handle", start)
