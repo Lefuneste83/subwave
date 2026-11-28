@@ -86,6 +86,91 @@ voice_until = ref(0.)
 # stacking a stinger on top of an announcement an operator fired by hand.
 jingle_now_on_air = ref(false)
 
+# SWITCHING AS ON 2.4 — Liquidsoap 2.5 moved a switch's settings (fallback,
+# rotate, switch) onto each child source and changed three defaults:
+#   * its default `on_select` fades the source being left over up to a second;
+#   * a file source left mid-track (`track_sensitive` false) is skipped by its
+#     `on_leave`, so it restarts fresh;
+#   * the metadata replay runs on EVERY selection and merges key by key: the
+#     child's last metadata fills in whatever its next track does not carry.
+# 2.4 did none of that: a switch cut cleanly, a left source resumed where it
+# stopped (the idle gate relies on it: "resumes where it froze"), and the replay
+# inserted the last metadata only when the first frame carried none, so a track
+# starting at a boundary kept exactly its own keys. Measured on 2.5.0-rc2 with
+# the merge: after a stinger, the next song inherited `subwave_jingle` and was
+# written to jingle-playing.json, and dj_transition would have read any
+# leaked flag (`liq_show_fade`, `liq_sweep`, a cross stamp) as the song's own.
+# Every switch child in this file goes through this helper with the switch's
+# old `track_sensitive`, so the 2.4 behaviour stays explicit: no handoff fade,
+# no skip on leave, and the replay only where 2.4's could fire. A
+# track-sensitive child is selected at a boundary, where its track brings its
+# own metadata (2.4's replay was a no-op there), so it replays nothing. A child
+# that may be cut into or resumed mid-track replays as before; those two
+# switches sit below `cross`, and the output strips all metadata (METADATA
+# below). A child that needs its own `on_select` (the dead-air guard's
+# emergency branch) overrides that one field afterwards.
+def legacy_switching(~track_sensitive, s) =
+  s.{
+    track_sensitive = track_sensitive,
+    replay_metadata = not track_sensitive,
+    on_select = source.composition.legacy_on_select,
+    on_leave = fun (_) -> ()
+  }
+end
+
+# 2.4's `rotate(weights=…)`, kept here because 2.5's stdlib rotate wraps its
+# selector in a `fallback` whose selector child takes the 2.5 defaults above,
+# which a script cannot reach. Same algorithm as both stdlibs (the inner switch
+# picks the next ready child once the current one has played its weight in
+# tracks; the outer fallback serves any ready child when the pick is not ready),
+# with every child, the selector included, on legacy_switching. `weights` are
+# ints, padded with 1, as 2.4's were.
+def legacy_rotate(~weights, sources) =
+  sources = list.map(fun (s) -> legacy_switching(track_sensitive=true, s), sources)
+  failed = (source.fail() : source)
+  picked_index = ref(-1)
+  tracks_played = list.map(fun (s) -> ((fun () -> source.id(s)), ref(0)), sources)
+  tracks_played =
+    fun () -> list.map(fun (x) -> begin label_fn = fst(x) (label_fn(), snd(x)) end, tracks_played)
+  def pick() =
+    list.iter((fun (el) -> snd(el) := 0), tracks_played())
+    if list.exists(source.is_ready, sources) then
+      def rec f(index) =
+        s = list.nth(default=failed, sources, index)
+        if source.is_ready(s) then picked_index := index else f((index + 1) mod list.length(sources)) end
+      end
+      f((picked_index() + 1) mod list.length(sources))
+    else
+      picked_index := -1
+    end
+  end
+  def add_condition(index, s) =
+    def cond() =
+      if picked_index() == -1 then pick() end
+      if picked_index() != -1 then
+        picked_weight = list.nth(default=1, weights, picked_index())
+        picked_source = list.nth(sources, picked_index())
+        fn = list.assoc(source.id(picked_source), tracks_played())
+        if picked_weight <= fn() then pick() end
+      end
+      picked_index() == index
+    end
+    (cond, s)
+  end
+  rotation = switch(list.mapi(add_condition, sources))
+  rotation.on_track(synchronous=true, fun (_) -> begin
+    if null.defined(rotation.selected()) then
+      selected_id = source.id(null.get(rotation.selected()))
+      if list.assoc.mem(selected_id, tracks_played()) then
+        ref.incr(list.assoc(selected_id, tracks_played()))
+      end
+    end
+  end)
+  s = fallback([legacy_switching(track_sensitive=true, rotation), ...sources])
+  source.set_id(rotation, "#{source.id(s)}.rotate")
+  s
+end
+
 # RUNTIME SETTINGS — one text file per value, written by the controller via
 # settings.update() and read ONCE at startup: a change needs a mixer restart.
 # Missing/garbage keeps the default, so an upgrade is byte-identical.
@@ -259,21 +344,27 @@ end
 def remember_subhttp_outcome(uri, outcome) =
   probe_id = subhttp_probe_id(uri)
   if probe_id != "" then
-    kept = list.filter(fun(p) -> fst(p) != probe_id, subhttp_probe_outcomes())
-    subhttp_probe_outcomes.set([(probe_id, outcome), ...kept])
+    # One read-modify-write: on 2.5 resolutions run on several cores at once,
+    # so two downloads finishing together would each drop the other's outcome.
+    atomic(fast=true, fun () -> begin
+      kept = list.filter(fun(p) -> fst(p) != probe_id, subhttp_probe_outcomes())
+      subhttp_probe_outcomes.set([(probe_id, outcome), ...kept])
+    end)
   end
 end
 
 def take_subhttp_outcome(probe_id) =
-  matches = list.filter(fun(p) -> fst(p) == probe_id, subhttp_probe_outcomes())
-  if list.length(matches) == 0 then
-    "pending"
-  else
-    subhttp_probe_outcomes.set(
-      list.filter(fun(p) -> fst(p) != probe_id, subhttp_probe_outcomes())
-    )
-    snd(list.hd(matches))
-  end
+  atomic(fast=true, fun () -> begin
+    matches = list.filter(fun(p) -> fst(p) == probe_id, subhttp_probe_outcomes())
+    if list.length(matches) == 0 then
+      "pending"
+    else
+      subhttp_probe_outcomes.set(
+        list.filter(fun(p) -> fst(p) != probe_id, subhttp_probe_outcomes())
+      )
+      snd(list.hd(matches))
+    end
+  end)
 end
 
 # Stream URLs carry Subsonic u/t/s query credentials. Keep operator-facing
@@ -423,7 +514,9 @@ auto_generation = ref(0)
 # or two, so only the newest stamps are ever asked about.
 auto_request_generations = ref([])
 def stamp_auto_request(r) =
-  auto_request_generations := list.prefix(32, [(request.id(r), auto_generation()), ...auto_request_generations()])
+  atomic(fast=true, fun () ->
+    auto_request_generations := list.prefix(32, [(request.id(r), auto_generation()), ...auto_request_generations()])
+  )
   true
 end
 # An unstamped request counts as current: drop only what is proven stale.
@@ -452,9 +545,8 @@ auto_slot = source.dynamic(
   # The clock thread calls this, while only the server thread below stores a
   # source; clearing only what was taken never drops one stored meanwhile.
   fun () -> begin
-    next = pending_auto_playlist()
-    if null.defined(next) then pending_auto_playlist := null end
-    next
+    # Taken in one step: `auto.reload` may set it while the mixer reads it.
+    pending_auto_playlist.exchange(null)
   end
 )
 
@@ -521,8 +613,7 @@ def purge_stale_auto() =
           log(label="subwave", "auto: dropped #{redact_subhttp_uri(request.uri(r))}, resolved from a fallback a reload replaced (#2213)")
           if on_air_rid != request.id(r) then request.destroy(r) end
         end, stale)
-      elsif auto_purge_fetched() != auto_generation() then
-        auto_purge_fetched := auto_generation()
+      elsif auto_purge_fetched.exchange(auto_generation()) != auto_generation() then
         thread.run(fast=false, fun () -> add_current_auto_request(p))
       end
     end
@@ -535,8 +626,12 @@ end
 # is stamped current, then watch for a request the old file still had in flight.
 # One watcher per reload; a later reload's watcher takes over from it.
 def reload_auto_in_place() =
-  auto_generation := auto_generation() + 1
-  generation = auto_generation()
+  # The telnet command and the file watch can reload at the same moment on 2.5:
+  # each bump gets its own generation.
+  generation = atomic(fast=true, fun () -> begin
+    auto_generation := auto_generation() + 1
+    auto_generation()
+  end)
   auto_playlist().reload()
   until = time() + settings.request.timeout() + 5.
   thread.run.recurrent(delay=0.25, fun () -> begin
@@ -600,9 +695,8 @@ server.register(
 auto_watch_scheduled = ref(false)
 def auto_m3u_changed() =
   if
-    not auto_watch_scheduled()
+    not auto_watch_scheduled.exchange(true)
   then
-    auto_watch_scheduled := true
     thread.run(
       delay=0.5,
       fun () ->
@@ -632,8 +726,10 @@ end
 # MAIN MUSIC SOURCE — queue takes priority, falls back to autonomous.
 music = fallback(
   id="music",
-  track_sensitive=true,
-  [dj_queue, auto_slot]
+  [
+    legacy_switching(track_sensitive=true, dj_queue),
+    legacy_switching(track_sensitive=true, auto_slot)
+  ]
 )
 
 # HARD TRACK-LENGTH CAP (#447) — the controller stamps liq_cue_out on autonomous
@@ -661,18 +757,22 @@ music = fallback(
 # are records with .source/.metadata/.db_level.
 #
 # CROSS STAMPS — the controller stamps ONE value per track, liq_cross_duration,
-# meaning "how long the transition OUT of this track lasts". `cross` needs it
-# twice: as the END duration of this track and as the START duration of the
-# next one. This rewrite runs on the source feeding `cross`, so it sees tracks
-# in the order cross pulls them, and it emits both explicitly:
-#   liq_cross_end_duration   = this track's own stamp (station crossfade if the
-#                              track carries none — a jingle, a cold-boot auto
-#                              pick — instead of inheriting the last one)
-#   liq_cross_start_duration = the PREVIOUS track's end value
-# A replayed metadata chunk must not advance the chain. The request's `rid`
+# meaning "how long the transition OUT of this track lasts". Liquidsoap 2.5's
+# `cross` takes exactly that: one `duration`, buffered from both the end of the
+# track and the start of the next, overridden per track by `liq_cross_duration`
+# (measured on 2.5.0-rc2: A 3 s → B 8 s → C 5 s crossed at 3, 8 and 5 s). On 2.4
+# the same value had to be split into an end duration for this track and a
+# start duration for the next (`liq_cross_end_duration`/`_start_duration`,
+# both gone in 2.5). This rewrite still runs on the source feeding `cross` and
+# still normalises the stamp, so the transition out of each track is the one
+# the controller asked for:
+#   liq_cross_duration = this track's own stamp (station crossfade if the track
+#                        carries none — a jingle, a cold-boot auto pick —
+#                        instead of inheriting the last one through
+#                        `persist_override`), or its clip lead + slack.
+# A replayed metadata chunk reuses the stamps of its airing. The request's `rid`
 # distinguishes new airings of the same local file, including repeated jingles;
 # fallback metadata replay keeps that request ID and reuses its stamps.
-cross_prev_end = ref(crossfade_duration())
 # CLIP SEAM SLACK — a stem-blend clip seam (`liq_clip_lead` stamped on the
 # outgoing track and on the clip) buffers this much MORE than its cue lead.
 # `cross` buffers whole frames, so the buffer it reports can land a frame
@@ -697,12 +797,7 @@ def cross_stamps(m) =
     own = if own < 0. then crossfade_duration() else own end
     lead = float_of_string(default=-1., m["liq_clip_lead"])
     own = if lead >= 0. then lead + clip_seam_slack else own end
-    stamps = [
-      ("liq_cross_start_duration", string(cross_prev_end())),
-      ("liq_cross_end_duration", string(own)),
-      ("liq_cross_duration", "")
-    ]
-    cross_prev_end := own
+    stamps = [("liq_cross_duration", string(own))]
     cross_last_file := fname
     cross_last_rid := rid
     cross_last_stamps := stamps
@@ -710,27 +805,23 @@ def cross_stamps(m) =
   end
 end
 
-# Remove every cross override key from what the transition EMITS. `cross`
+# Remove the cross override key from what the transition EMITS. `cross`
 # processes override keys on its output frames too; without this the replayed
 # outgoing metadata re-sizes the incoming track's own end buffer.
 def strip_cross_stamps(s) =
-  metadata.map(update=true, strip=true, fun (_) -> [
-    ("liq_cross_duration", ""),
-    ("liq_cross_start_duration", ""),
-    ("liq_cross_end_duration", "")
-  ], s)
+  metadata.map(update=true, strip=true, fun (_) -> [("liq_cross_duration", "")], s)
 end
 
-# BUFFER SIZING (measured on air, 2.4.5): `cross` sizes the outgoing TAIL from its
-# end duration and the incoming HEAD from its start duration, then trims both to
-# the shorter one before calling this function. A single liq_cross_duration
-# stamp could not keep those in step: cross re-applies the override keys it
-# finds in its OWN output, and the transition replays the OUTGOING track's
-# metadata, so each tail was sized by the stamp of the track BEFORE the
-# outgoing one (3931 of 3997 logged transitions), while the head followed the
-# incoming stamp. CROSS STAMPS below translates the controller's one stamp into
-# explicit start/end values per track, and STRIP_CROSS_STAMPS keeps cross from
-# re-reading them off its output.
+# BUFFER SIZING (measured on air, 2.4.5): 2.4's `cross` sized the outgoing TAIL
+# from its end duration and the incoming HEAD from its start duration, then
+# trimmed both to the shorter one before calling this function. A single
+# liq_cross_duration stamp could not keep those in step there: cross re-applied
+# the override keys it found in its OWN output, and the transition replayed the
+# OUTGOING track's metadata, so each tail was sized by the stamp of the track
+# BEFORE the outgoing one (3931 of 3997 logged transitions). 2.5 buffers one
+# duration from both sides and hands the transition its sources without their
+# metadata, so CROSS STAMPS above emits the one key again, and
+# STRIP_CROSS_STAMPS still keeps cross from re-reading it off its output.
 #
 # The fade length is the length actually buffered, not a stamp: the two a/b
 # sources are already equal length here, so `d` from them is the one value
@@ -778,7 +869,7 @@ def equal_power_fade(~span, ~rising, s) =
 end
 
 def dj_transition(a, b) =
-  stamp = float_of_string(default=crossfade_duration(), a.metadata["liq_cross_end_duration"])
+  stamp = float_of_string(default=crossfade_duration(), a.metadata["liq_cross_duration"])
   buffered = min(source.remaining(a.source), source.remaining(b.source))
   d = if buffered > 0. and buffered < 600. then buffered else stamp end
   if abs(d - stamp) > 0.25 then
@@ -923,15 +1014,15 @@ def dj_transition(a, b) =
     if jingle_out then
       a.source
     elsif washing then
-      fade.out(duration=a_fade, type="exp", initial_metadata=a.metadata, a.source)
+      fade.out(duration=a_fade, type="exp", a.source)
     elsif sweeping or chopping then
-      fade.out(duration=a_fade, type="log", initial_metadata=a.metadata, a.source)
+      fade.out(duration=a_fade, type="log", a.source)
     elsif looping then
       a.source
     elsif equal_power_seam then
       equal_power_fade(span=d, rising=false, a.source)
     else
-      fade.out(duration=a_fade, initial_metadata=a.metadata, a.source)
+      fade.out(duration=a_fade, a.source)
     end
   # SWEEP ENVELOPE — riding the filter out of a track. Cutoffs move in
   # LOG-frequency space (pow) throughout; linear Hz ramps read as
@@ -1436,7 +1527,7 @@ def dj_transition(a, b) =
     elsif equal_power_seam then
       equal_power_fade(span=b_fade, rising=true, b.source)
     else
-      fade.in(duration=b_fade, initial_metadata=b.metadata, b.source)
+      fade.in(duration=b_fade, b.source)
     end
   # INCOMING SIDE. Every effect here releases by driving WETNESS to 0, never by
   # parking the cutoff open: an RC filter at its open cutoff is still not
@@ -1630,9 +1721,7 @@ music =
       # The clock thread calls this, while only the server thread below stores a
       # source; clearing only what was taken never drops one stored meanwhile.
       fun () -> begin
-        next = pending_jingles_playlist()
-        if null.defined(next) then pending_jingles_playlist := null end
-        next
+        pending_jingles_playlist.exchange(null)
       end
     )
     # What the last reload read. The watch below skips a write this already
@@ -1665,8 +1754,7 @@ music =
     # Only the server thread replaces the instance. Never raises.
     jingles_watch_scheduled = ref(false)
     def jingles_m3u_changed() =
-      if not jingles_watch_scheduled() then
-        jingles_watch_scheduled := true
+      if not jingles_watch_scheduled.exchange(true) then
         thread.run(delay=0.5, fun () -> begin
           jingles_watch_scheduled := false
           contents = read_jingles_m3u()
@@ -1715,7 +1803,7 @@ music =
       fun (_) -> [("subwave_jingle", "true"), ("subwave_jingle_rotate", "true")],
       jingles
     )
-    rotate(weights=[1, jingle_ratio()], [jingles, music])
+    legacy_rotate(weights=[1, jingle_ratio()], [jingles, music])
   else
     music
   end
@@ -1736,10 +1824,9 @@ music =
 jingle_now = metadata.map(update=true, fun (_) -> [("subwave_jingle", "true")], jingle_now_queue)
 music = switch(
   id="music_with_jingle_now",
-  track_sensitive=true,
   [
-    ({not bed_on_air() and not pause_talk_on_air() and time() > voice_until()}, jingle_now),
-    ({true}, music)
+    ({not bed_on_air() and not pause_talk_on_air() and time() > voice_until()}, legacy_switching(track_sensitive=true, jingle_now)),
+    ({true}, legacy_switching(track_sensitive=true, music))
   ]
 )
 # A jingle on air also means the playlist has moved past its last track.
@@ -1883,7 +1970,8 @@ jingle_overlay_epoch = ref(0)
 intro_overlay_metadata = ref([])
 
 def cancel_jingle_overlay() =
-  jingle_overlay_epoch := jingle_overlay_epoch() + 1
+  # Telnet commands, poll_intro and the streaming thread all bump it.
+  atomic(fast=true, fun () -> jingle_overlay_epoch := jingle_overlay_epoch() + 1)
 end
 
 def jingle_overlay_valid(epoch, song_stamp) =
@@ -2101,7 +2189,7 @@ def poll_intro() =
       # Protect the lead-in until voice_marker installs the measured deadline.
       # Same 2s poll/duck slack as the clip marker above.
       if overlay then
-        voice_until := max(voice_until(), time() + 2.)
+        atomic(fast=true, fun () -> voice_until := max(voice_until(), time() + 2.))
         cancel_jingle_overlay()
       end
       epoch = "#{jingle_overlay_epoch()}"
@@ -2208,8 +2296,15 @@ intro = mic_chain(amplify(override="liq_amplify", 1., edge_fade(amplify(override
 # at boot vs "…with transition." after), and boot IS that first selection, so
 # `emergency` carries its own one-shot fade — whose default
 # track_sensitive=false memoises the ramp to the source's first frame ever,
-# right for boot and useless later. The `transitions=` entry covers every later
-# switch.
+# right for boot and useless later. The emergency branch's `on_select` covers
+# every later switch from music.
+#
+# Liquidsoap 2.5 replaced `transitions=` with a per-child `on_select`, which it
+# runs on EVERY selection, the first one included, and hands no `ending` source
+# when the one left had simply run dry (the starve case). So the 2.4 rule is
+# kept by hand: `safety_branch` remembers the branch last selected, and the
+# emergency ramp applies only on a switch away from music, never at boot and
+# never when the emergency loop is re-selected at its own track boundary.
 #
 # Measured (100 ms RMS): boot -38.5 -> -9.0 dB over 1.0s; mid-run starve
 # -32.6 -> -9.0 dB over 1.0s; recovery a single-window step with no ramp.
@@ -2218,16 +2313,26 @@ emergency = single("/sounds/emergency.mp3")
 # The `: source` casts drop fade.in's extra methods, which otherwise refuse to
 # unify with the plain source the identity transition and `music` child are.
 emergency = (fade.in(duration=EMERGENCY_FADE_SEC, emergency) : source)
+safety_branch = ref("")
+def safety_to_music(x) =
+  ignore(safety_branch.exchange("music"))
+  source.composition.legacy_on_select(x)      # identity: instant recovery
+end
+def safety_to_emergency(x) =
+  to_emergency = source.composition.legacy_on_select(x)
+  if safety_branch.exchange("emergency") == "music" then
+    (fade.in(duration=EMERGENCY_FADE_SEC, to_emergency) : source)
+  else
+    to_emergency
+  end
+end
 music =
   fallback(
     id="music_safety",
-    track_sensitive=false,
-    transitions=[
-      fun (_, back_to_music) -> back_to_music,      # identity: instant recovery
-      fun (_, to_emergency) ->
-        (fade.in(duration=EMERGENCY_FADE_SEC, to_emergency) : source)
-    ],
-    [music, emergency]
+    [
+      legacy_switching(track_sensitive=false, music).{on_select = safety_to_music},
+      legacy_switching(track_sensitive=false, emergency).{on_select = safety_to_emergency}
+    ]
   )
 
 # STUDIO BED — low-level room tone, mixed in BEFORE voice ducking so smooth_add
@@ -2309,8 +2414,10 @@ radio = smooth_add(
 # re-asserts idle if the room is still empty.
 radio = switch(
   id="idle_gate",
-  track_sensitive=false,
-  [({idle_mode()}, blank(id="idle_silence")), ({true}, radio)]
+  [
+    ({idle_mode()}, legacy_switching(track_sensitive=false, blank(id="idle_silence"))),
+    ({true}, legacy_switching(track_sensitive=false, radio))
+  ]
 )
 
 # blank.skip was REMOVED here (#660): with no music in the chain it busy-loops
@@ -2433,9 +2540,9 @@ radio = compress(
 #     on_meta fires the cross re-emits the OUTGOING track's metadata, which
 #     would clobber the title back and freeze Icecast one track behind.
 #  2. insert_metadata is then the ONLY source of stream metadata, pushed from
-#     on_meta.
+#     on_meta. On 2.5 it is the source method of this metadata.map (the
+#     `insert_metadata` operator is deprecated there and only returned it).
 radio = metadata.map(update=false, strip=true, fun(_) -> [], radio)
-radio = insert_metadata(radio)
 
 def on_meta(m) =
   title = m["title"]
@@ -2731,18 +2838,18 @@ end
 
 stream_shutdown = ref(fun () -> ())
 
+# Claimed with `exchange`: two telnet clients may call these at once on 2.5,
+# and a check-then-set would build the outputs twice or shut down twice.
 def stream_up() =
-  if not stream_on() then
+  if not stream_on.exchange(true) then
     stream_shutdown := make_stream_outputs()
-    stream_on := true
   end
 end
 
 def stream_down() =
-  if stream_on() then
+  if stream_on.exchange(false) then
     fn = stream_shutdown()
     fn()
-    stream_on := false
     # Drop now-playing.json so the UI stops advertising the last track: the
     # controller reads a missing file as "nothing playing". on_meta rewrites it
     # on the next track once back on air.
