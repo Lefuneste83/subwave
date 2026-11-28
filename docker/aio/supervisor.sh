@@ -641,12 +641,12 @@ END { if (block) print "%opus" }' "$1" 2>/dev/null | tr '\n' ' '
 # not declared beside it, so the answer changes in the same edit as the encoder
 # (#2138) and cannot outlive it. A client may treat the Opus burst as seconds
 # only on `cbr` (#2142); every doubt reads as not-CBR:
-# - no vbr at all, or a bare %opus: the 2.4.6 default is constrained VBR;
+# - no vbr at all, or a bare %opus: the default is constrained VBR (2.4.6, 2.5);
 # - any dtx but a literal false: true can stop sending silent frames whatever the
 #   vbr mode, and dtx=(true) or dtx=d is as real;
 # - vbr given twice: the last one wins, so one saying "none" proves nothing;
 # - a `(` inside the call: the first `)` then need not close it, so a dtx or a
-#   second vbr can sit past it, and `bitrate=(96), dtx=true` is DTX on 2.4.6;
+#   second vbr can sit past it, and `bitrate=(96), dtx=true` is DTX (2.4.6, 2.5);
 # - libopus, an %ffmpeg encoder this cannot read.
 # Read in the C locale, or a UTF-8 grep would take an em space for [[:space:]] and
 # the operator's LC_ALL would change the answer.

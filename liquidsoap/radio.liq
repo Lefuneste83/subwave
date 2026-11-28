@@ -1629,8 +1629,8 @@ def dj_transition(a, b) =
 end
 
 # The PRE-cross handle for the on_metadata hook attached further down. Hooking
-# the post-cross source fires TWICE per transition (dj_transition's fades both
-# pass initial_metadata= and the outgoing track wins), stranding the UI one song
+# the post-cross source fires TWICE per transition (the cross carries both
+# tracks' metadata and the outgoing track wins), stranding the UI one song
 # behind. Also what the starve guard samples.
 music_meta = music
 
@@ -2536,7 +2536,7 @@ radio = compress(
 # METADATA — ICY title driven explicitly from the pre-cross on_meta hook so it
 # matches now-playing.json. BOTH operators are load-bearing:
 #  1. metadata.map strip kills ALL metadata still flowing through the chain.
-#     dj_transition's fades pass initial_metadata=, so ~crossfade seconds after
+#     The cross carries the outgoing side's metadata, so ~crossfade seconds after
 #     on_meta fires the cross re-emits the OUTGOING track's metadata, which
 #     would clobber the title back and freeze Icecast one track behind.
 #  2. insert_metadata is then the ONLY source of stream metadata, pushed from

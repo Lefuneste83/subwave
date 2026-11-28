@@ -1,47 +1,73 @@
-# Liquidsoap 2.4.6
+# Liquidsoap 2.5
 
 Both the broadcast and AIO images run the stock upstream
-`savonet/liquidsoap:v2.4.6` release, pinned by its multi-platform manifest
-digest. Keep the `liquidsoap` stage identical in both Dockerfiles; CI compares
-the two executables.
+`savonet/liquidsoap:v2.5.0-rc2` image, pinned by its multi-platform manifest
+digest. The release candidate is a stage, not a destination: the 2.5.0 final
+replaces it, pinned the same way, once the checks below pass on the final.
+Keep the `liquidsoap` stage identical in both Dockerfiles; CI compares the two
+executables.
 
-Two things travel with the base-image swap, both under the encoders:
+`radio.liq` needs 2.5: switch settings live on each child source, `cross`
+takes one duration, and shared state is updated in `atomic` sections. The
+port keeps every 2.4 behaviour 2.5 changed by default; `liquidsoap/CLAUDE.md`
+("Switching and concurrency") lists them. 2.4.x is sunset upstream.
 
-- **Icecast-KH comes back through deb-multimedia.** The 2.4.5 base image
-  shipped with the deb-multimedia repository configured, so the runtime's
-  `apt-get install icecast2` resolved to Icecast-KH. Stock 2.4.6 does not, and
-  the same line installs Debian's plain Icecast 2.4.4, which parses the
+What travels with the image:
+
+- **Icecast-KH still comes through deb-multimedia.** The stock 2.4.6 and 2.5
+  images ship no deb-multimedia source, so the runtime's `apt-get install
+  icecast2` would install Debian's plain Icecast 2.4.4, which parses the
   `<x-forwarded-for>` trusted-proxy list but ignores it: behind the edge proxy
-  every listener is recorded with the proxy's container address and countries
-  disappear. Both Dockerfiles now add the DMO source explicitly (keyring
-  hash-checked) and pin it to `icecast2` alone, and the build fails if the
-  installed Icecast is not KH. The keyring pin needs a manual bump when DMO
+  every listener would be recorded with the proxy's container address and
+  countries would disappear. Both Dockerfiles add the DMO source explicitly
+  (keyring hash-checked) and pin it to `icecast2` alone, and the build fails if
+  the installed Icecast is not KH. The keyring pin needs a manual bump when DMO
   rotates its keyring: their pool keeps only the current
   `deb-multimedia-keyring` package, so a source build fails at the `ADD` until
   the URL and both hashes are updated.
-- **Liquidsoap's codec stack changes shape.** The old image decoded and encoded
-  through DMO's dynamically linked FFmpeg 7.1.4, with DMO's libfdk-aac 2.0.3 and
-  DMO's lame. The stock 2.4.6 executable bundles a static FFmpeg 8 and fdk-aac,
-  but still links Debian's libmp3lame0, libopus0, libflac and libvorbis
-  dynamically, so the image's apt state is still part of the MP3, Opus and FLAC
-  encoders. DMO also ships libmp3lame0 (`1:3.100-dmo3`), and the DMO pin above
-  keeps it on Debian's build (`3.100-6`), as it does the AIO's CLI `ffmpeg`.
-  MP3 encoding therefore moves from DMO's lame to Debian's, both the same
-  upstream 3.100.
+- **The codec stack is the 2.4.6 one.** The executable bundles a static FFmpeg 8
+  and fdk-aac and loads Debian's libmp3lame0, libopus0, libflac and libvorbis at
+  run time (measured in `/proc/<pid>/maps` while encoding, on 2.4.6 and 2.5
+  alike; they are not `NEEDED` entries), so the image's apt state is still part
+  of the MP3, Opus and FLAC encoders. DMO also ships libmp3lame0
+  (`1:3.100-dmo3`), and the DMO pin above keeps it on Debian's build
+  (`3.100-6`), as it does the AIO's CLI `ffmpeg`. Against 2.4.6 the base image
+  drops libfaad2 and lilv (2.5 removed the faad decoder) and adds theora, speex,
+  cairo and fontconfig. Opus stays hard CBR: 10 s of silence, noise and a tone
+  encode to the same byte count on both versions.
+- **More memory.** In the smoke test the broadcast container (Icecast and four
+  encoders included) settles at ~190-210 MiB on 2.5 against ~100-115 MiB on
+  2.4.6 (OCaml 5 runtime, more threads); CPU is within a few points.
 
-2.4.6 is the minimum, for two upstream fixes:
+Known differences on 2.5.0-rc2, all measured against 2.4.6:
+
+- **`liq_cue_in` lands up to one codec packet earlier** (savonet/liquidsoap#5324
+  decodes the pre-roll before a seek target): FLAC and ALAC 4,096 samples, AAC
+  1,024-2,048, MP3 0 or 1,152, PCM WAV 1,570 samples or more; Vorbis and Opus are
+  unchanged. `controller/src/music/cue-landing.ts` predicts the 2.4.6 landings,
+  so `scripts/stem-seam-test.sh cuein` fails, and a stem-blend clip seam's
+  clip → Y side airs 69-82 ms off (a flam). The controller's rules must learn the
+  2.5 landings before this image ships.
+- **A mixer start fades in.** The stdlib `smooth_add` runs its release on its
+  first selection, so the programme rises from −23.6 dB (the two default duck
+  depths) over 0.8 s after every mixer start; the ducks are then bit-identical.
+- **A restart may open on a stinger.** Requests resolve in parallel, so with
+  the mixer's own rotate the stinger can be ready before the first song.
+
+Why not 2.4.5 or older (the history behind the old 2.4.6 minimum):
 
 - **Unifier growth** ([savonet/liquidsoap#5257](https://github.com/savonet/liquidsoap/pull/5257),
   with #5336 and #5342). On 2.4.5 a long-running station spends an increasing
   share of CPU walking unifier reference chains, and a restart clears the chains
   without fixing their growth. Earlier SUB/WAVE images rebuilt 2.4.5 from source
-  with #5257 backported; 2.4.6 ships it, so the source build is gone.
+  with #5257 backported; 2.4.6 shipped it.
 - **Lost partial frame after `cross`** (#5296). On 2.4.5, `sequence` drops the
   first chunk of the incoming source when the source before it ends partway
   through a 20 ms frame. Every `dj_transition` ends in a `sequence`, so the
   track after a crossfade lost up to one frame, which put up to 20 ms of beat
   error on a stem-blend clip seam (#1933). `scripts/stem-seam-test.sh` sweeps
-  the predecessor across a frame and measures 0.3 ms at every phase on 2.4.6.
+  the predecessor across a frame and measures 0.3 ms at every phase on 2.4.6,
+  and 0.2 ms on the P → X seam on 2.5.0-rc2.
 
 Moving to a new release: run `scripts/fx-render-test.sh` and
 `scripts/stem-seam-test.sh` with `LIQ_IMAGE` set to it, check `radio.liq` with

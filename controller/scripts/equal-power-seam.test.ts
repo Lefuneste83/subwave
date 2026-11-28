@@ -58,12 +58,12 @@ test('the fader is cos out and sin^1.5 in over the elapsed fraction of its span,
 
 test('both sides span the full buffer and keep the linear fade otherwise', () => {
   assert.match(radio,
-    /elsif equal_power_seam then\s+equal_power_fade\(span=d, rising=false, a\.source\)\s+else\s+fade\.out\(duration=(?:d|a_fade), initial_metadata=a\.metadata, a\.source\)/,
+    /elsif equal_power_seam then\s+equal_power_fade\(span=d, rising=false, a\.source\)\s+else\s+fade\.out\(duration=(?:d|a_fade), a\.source\)/,
     // a_fade where the stem-blend clip seam alignment (#1933) is present: it
     // equals d on every seam that is not a clip seam, so on every equal-power one.
     'outgoing: equal-power over d, else the unchanged linear fade.out');
   assert.match(radio,
-    /b_source =\s+(?:if jingle_in or jingle_out then\s+b\.source\s+els)?if equal_power_seam then\s+equal_power_fade\(span=b_fade, rising=true, b\.source\)\s+else\s+fade\.in\(duration=b_fade, initial_metadata=b\.metadata, b\.source\)\s+end/,
+    /b_source =\s+(?:if jingle_in or jingle_out then\s+b\.source\s+els)?if equal_power_seam then\s+equal_power_fade\(span=b_fade, rising=true, b\.source\)\s+else\s+fade\.in\(duration=b_fade, b\.source\)\s+end/,
     // A jingle seam's raw b.source branch may come first (#2372): that seam is a
     // sequence and never reads the faded b_source.
     'incoming: equal-power over b_fade, else the unchanged linear fade.in');
