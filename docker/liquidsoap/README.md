@@ -48,6 +48,46 @@ Known differences on 2.5.0-rc2, all measured against 2.4.6:
   so `scripts/stem-seam-test.sh cuein` fails, and a stem-blend clip seam's
   clip → Y side airs 69-82 ms off (a flam). The controller's rules must learn the
   2.5 landings before this image ships.
+- **A replaced source keeps its cached head.** A 2.5 source keeps whatever its
+  consumer did not take for the next cycle. The rotate takes a stinger only up
+  to its track mark, and the jingles playlist starts its next clip in that
+  frame, so the rotate's jingle child holds about 10 ms of that clip, with its
+  metadata. When `jingles.reload` swaps a fresh playlist into the
+  `source.dynamic` slot between stingers, that head is the old list's: on the
+  next turn it aired as a track of its own, used up the turn, and the new list
+  aired one stinger late (an emptied list still aired one).
+  `scripts/liquidsoap-jingle-swap.py` failed `idle` and `empty`. No script call
+  drops a source's cache, so `radio.liq` stamps each playlist instance with a
+  generation (`subwave_jingle_gen`): a head from a replaced instance is not
+  counted by the rotate and writes no jingle marker, and the new list's clip
+  takes the turn. The head's ~10 ms still airs, at the seam. 2.4.6 dropped it.
+  Minimal repro with the stock `rotate` (correct on 2.4.6, one turn late on
+  2.5.0-rc2):
+
+  ```liquidsoap
+  songs = playlist(mode="normal", reload_mode="never", "/w/songs.m3u")
+  def mk(f) = playlist(register_server_commands=false, reload_mode="never", mode="normal", f) end
+  pending = ref(null)
+  slot = source.dynamic(self_sync=false, init=mk("/w/A.m3u"), fun () -> begin
+    p = pending()
+    pending := null
+    p
+  end)
+  music = rotate([slot, songs])
+  swapped = ref(false)
+  music.on_track(synchronous=true, fun (m) -> begin
+    print("AIR #{path.basename(m['filename'])} at #{music.time()}s")
+    if path.basename(m["filename"]) == "s1.wav" and not swapped() then
+      swapped := true
+      pending := slot.prepare(mk("/w/B.m3u"))
+      ignore(slot.is_ready())
+    end
+  end)
+  output.file(%wav, "/w/out.wav", fallible=true, music)
+  ```
+
+  With 3 s songs and 1 s stingers it prints `a1 s1 b1 s2 b2` on 2.4.6 and
+  `a1 s1 a2 s2 b1 s3` on 2.5.0-rc2, `a2` lasting about 10 ms.
 - **A mixer start fades in.** The stdlib `smooth_add` runs its release on its
   first selection, so the programme rises from −23.6 dB (the two default duck
   depths) over 0.8 s after every mixer start; the ducks are then bit-identical.

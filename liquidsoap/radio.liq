@@ -124,8 +124,9 @@ end
 # picks the next ready child once the current one has played its weight in
 # tracks; the outer fallback serves any ready child when the pick is not ready),
 # with every child, the selector included, on legacy_switching. `weights` are
-# ints, padded with 1, as 2.4's were.
-def legacy_rotate(~weights, sources) =
+# ints, padded with 1, as 2.4's were. `counts` says whether a track starting on
+# the selector uses up its child's turn (every track does in both stdlibs).
+def legacy_rotate(~weights, ~counts=fun (_) -> true, sources) =
   sources = list.map(fun (s) -> legacy_switching(track_sensitive=true, s), sources)
   failed = (source.fail() : source)
   picked_index = ref(-1)
@@ -158,8 +159,8 @@ def legacy_rotate(~weights, sources) =
     (cond, s)
   end
   rotation = switch(list.mapi(add_condition, sources))
-  rotation.on_track(synchronous=true, fun (_) -> begin
-    if null.defined(rotation.selected()) then
+  rotation.on_track(synchronous=true, fun (m) -> begin
+    if counts(m) and null.defined(rotation.selected()) then
       selected_id = source.id(null.get(rotation.selected()))
       if list.assoc.mem(selected_id, tracks_played()) then
         ref.incr(list.assoc(selected_id, tracks_played()))
@@ -1683,6 +1684,23 @@ VOICE_GATE_MAX_SEC = 120.
 # reads (below the jingle_now switch), released as the playlist starts its next
 # clip or any other track starts there. The rotate's gate holds open for it.
 rotate_jingle_on_air = ref(false)
+# STALE HEAD (2.5): a source keeps what its consumer did not take for the next
+# cycle, and the rotate takes a stinger only up to its track mark. The playlist
+# starts its next clip in that frame, so the rotate's jingle child holds that
+# clip's head (one frame: ~10 ms measured) with its metadata until the next
+# stinger turn. After a fresh instance replaced the playlist, that cached head
+# is the OLD list's: it aired first, as a track of its own, used up the turn,
+# and wrote the marker, so the new list aired one stinger late (and an emptied
+# list still aired a stinger). Nothing a script reaches drops a source's cache,
+# so each instance stamps its generation and a head from a replaced one is
+# neither counted by the rotate nor announced to the controller; the turn goes
+# to the new list's clip that follows it. 2.4 dropped the head instead.
+# Standalone repro: docker/liquidsoap/README.md ("A replaced source keeps its
+# cached head").
+jingles_gen = ref(0)
+def stale_rotate_jingle(m) =
+  m["subwave_jingle_rotate"] == "true" and m["subwave_jingle_gen"] != string(jingles_gen())
+end
 music =
   if jingle_ratio() > 0 then
     jingles_m3u = "#{state_dir}/jingles.m3u"
@@ -1709,7 +1727,10 @@ music =
       # aired under the previous one's name and length. On each instance, so the
       # slot changes nothing about when it runs.
       p.on_track(synchronous=true, fun (_) -> rotate_jingle_on_air := false)
-      p
+      # Committed as soon as it is made (boot, or `jingles.reload` below).
+      jingles_gen := jingles_gen() + 1
+      gen = string(jingles_gen())
+      metadata.map(update=true, fun (_) -> [("subwave_jingle_gen", gen)], p).{reload = p.reload}
     end
     jingles_playlist = ref(make_jingles_playlist())
     pending_jingles_playlist = ref(null)
@@ -1803,7 +1824,8 @@ music =
       fun (_) -> [("subwave_jingle", "true"), ("subwave_jingle_rotate", "true")],
       jingles
     )
-    legacy_rotate(weights=[1, jingle_ratio()], [jingles, music])
+    # A stale head (STALE HEAD, above) does not use up the stinger turn.
+    legacy_rotate(weights=[1, jingle_ratio()], [jingles, music], counts=fun (m) -> not stale_rotate_jingle(m))
   else
     music
   end
@@ -1907,7 +1929,9 @@ def write_jingle_marker(seq, fname, fed_at, ahead) =
 end
 
 music.on_track(synchronous=true, fun (m) ->
-  if m["subwave_jingle"] == "true" then
+  if stale_rotate_jingle(m) then
+    ()
+  elsif m["subwave_jingle"] == "true" then
     fname = m["filename"]
     fed_at = time()
     ahead = jingle_burst()

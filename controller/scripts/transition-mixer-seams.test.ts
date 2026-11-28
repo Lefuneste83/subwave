@@ -79,7 +79,9 @@ test('both jingle sources carry the mark the guard reads', () => {
   // either joins the music chain, so the mark rides every jingle that reaches
   // cross. A press is gated by the switch's own predicate, below its mark.
   assert.ok(rotateMark > radio.indexOf('jingles = source.available(jingles,'));
-  assert.ok(rotateMark < radio.indexOf('rotate(weights=[1, jingle_ratio()], [jingles, music])'));
+  // The 2.5 rotate also takes `counts=` (radio.liq STALE HEAD) after its sources.
+  const rotateAt = radio.search(/rotate\(weights=\[1, jingle_ratio\(\)\], \[jingles, music\][,)]/);
+  assert.ok(rotateAt > 0 && rotateMark < rotateAt);
   assert.ok(nowMark < radio.indexOf('id="music_with_jingle_now"'));
 });
 
