@@ -217,7 +217,12 @@ test('neither jingle source writes the marker from its own hook', () => {
 const priorityQueue = liq.indexOf('jingle_now_queue = request.queue(id="jingle_now_queue")');
 const prioritySwitch = liq.lastIndexOf('music = switch(', jingleNowSwitch);
 const priorityGate = liq.indexOf('({not bed_on_air()', prioritySwitch);
-const priorityChoices = liq.indexOf('({true}, music)', prioritySwitch);
+// Liquidsoap 2.5 switches each child on its own track_sensitive, so radio.liq
+// wraps every switch child in legacy_switching(...) to keep 2.4's behaviour;
+// the fallback choice is the same music either way.
+const priorityChoicesAt = liq.slice(prioritySwitch).search(
+  /\(\{true\}, (?:legacy_switching\(track_sensitive=true, )?music\)/);
+const priorityChoices = priorityChoicesAt < 0 ? -1 : prioritySwitch + priorityChoicesAt;
 assert.ok(priorityQueue > 0, 'on-demand jingles have a dedicated request queue');
 assert.ok(prioritySwitch > priorityQueue && jingleNowSwitch - prioritySwitch < 40,
   'the dedicated queue is the first choice of the music_with_jingle_now switch');
@@ -238,7 +243,10 @@ assert.ok(prioritySwitch > liq.indexOf('rotate(weights=[1, jingle_ratio()]'),
 // a press won, or a DJ clip, closed it mid-clip: measured on 2.4.6, a 14s
 // announcement aired 10s, two songs played, then its last 4s.
 test('a jingle that has started plays to its end', () => {
-  assert.ok(liq.slice(prioritySwitch, priorityGate).includes('track_sensitive=true'),
+  // 2.4 set it on the switch; 2.5 reads it per child (legacy_switching).
+  const pressChoice = liq.slice(prioritySwitch, liq.indexOf('jingle_now)', priorityGate) + 'jingle_now)'.length);
+  assert.ok(liq.slice(prioritySwitch, priorityGate).includes('track_sensitive=true')
+    || pressChoice.includes('legacy_switching(track_sensitive=true, jingle_now'),
     'the press gate is asked only when the switch chooses, at a track boundary');
   assert.ok(!liq.includes('source.available(jingle_now_queue'), 'never as a per-frame gate on the press');
   // The rotate's gate stays an availability gate (the rotate is the stdlib's),
